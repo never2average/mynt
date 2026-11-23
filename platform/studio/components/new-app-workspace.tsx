@@ -33,7 +33,7 @@ import { Thread } from "@/components/assistant-ui/thread"
 import { ChatWelcome } from "@/components/chat-welcome"
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
 import { CreateProductSheet } from "@/components/create-product-sheet"
-import { ChatSaver, listChats, loadChat, migrateLocalChats, newThreadId, sessionIdFor } from "@/lib/chat-sessions"
+import { ChatSaver, chatForProduct, LIST_LIMIT_MAX, listChats, loadChat, migrateLocalChats, newThreadId, OPEN_FAILED, SAVE_REFUSED, sessionIdFor } from "@/lib/chat-sessions"
 import { announceThreads, type AppThreadSource, type MyProduct, type OpenThreadDetail, type ProductChatRecord } from "@/lib/threads"
 import { EmptyRow, pagerOf } from "@/components/earn-view"
 import { COL, matches, PanelList, useFitRows, usePaged } from "@/components/list-layout"
@@ -629,8 +629,8 @@ export function NewAppWorkspace({
   fetcher?: typeof fetch
   // Create product mode's chat (app/api/product-chat unless given).
   transport?: ChatTransport<UIMessage>
-  // Recent's threads (lib/threads.ts): the user's apps, their own products, and the user's key (their
-  // product chats are kept on Mynt once it's known; older ones in this browser under it move there).
+  // Recent's threads (lib/threads.ts): the user's apps, their own products, and the key an older studio
+  // kept their product chats under in this browser (only for moving those to Mynt).
   apps?: AppThreadSource[] | null
   myProducts?: MyProduct[] | null
   historyOwner?: string | null
@@ -803,30 +803,49 @@ export function NewAppWorkspace({
   const drafting = productChat.status === "submitted" || productChat.status === "streaming"
 
   // ---- threads: saving the product chat, and reopening one from the sidebar or a link ----
-  // This product chat is kept on Mynt for the user (lib/chat-sessions.ts) from its first message, and
-  // again whenever a reply settles or a draft of it is created. A save that fails is tried again; the
-  // open chat is never lost for it.
+  // This product chat is kept on Mynt for the signed-in user (lib/chat-sessions.ts; Mynt knows who from
+  // the session, so nothing here waits on a key of the user's) from its first message, and again
+  // whenever a reply settles or a draft of it is created. A save that fails is tried again; the open
+  // chat is never lost for it.
   const [threadId, setThreadId] = useState(newThreadId)
-  const [chats, setChats] = useState<ProductChatRecord[]>([])
+  const [chats, setChats] = useState<ProductChatRecord[] | null>(null)
+  // A conversation that couldn't be opened, or one too long to keep: said in the chat.
+  const [threadNotice, setThreadNotice] = useState<string | null>(null)
   // The fetcher as of the last render, behind one function that never changes (the saver lives as long as the page).
   const fetchRef = useRef(fetcher)
   fetchRef.current = fetcher
   const threadFetch = useCallback<typeof fetch>((...a) => fetchRef.current(...a), [])
+  // Every product chat the user keeps (200 at most), so the one behind any of their products is found.
   const reloadChats = useCallback(async () => {
-    const list = await listChats("product", { fetcher: threadFetch })
+    const list = await listChats("product", { fetcher: threadFetch, limit: LIST_LIMIT_MAX })
     if (list) setChats(list)
+    return list
   }, [threadFetch])
-  const saver = useMemo(() => new ChatSaver("product", { fetcher: threadFetch, onSaved: () => void reloadChats().then(() => announceThreads()) }), [threadFetch, reloadChats])
+  const currentId = useRef(threadId)
+  currentId.current = threadId
+  const saver = useMemo(
+    () =>
+      new ChatSaver("product", {
+        fetcher: threadFetch,
+        onSaved: () => void reloadChats().then(() => announceThreads()),
+        onRefused: (id) => id === currentId.current && setThreadNotice(SAVE_REFUSED),
+      }),
+    [threadFetch, reloadChats],
+  )
   useEffect(() => () => saver.dispose(), [saver])
-  // Once the user is known: chats an older studio kept in this browser go to Mynt, then the list is read.
+  // The user's chats, read once on load.
+  useEffect(() => {
+    void reloadChats()
+  }, [reloadChats])
+  // Chats an older studio kept in this browser (under the user's hashed key, once known) go to Mynt.
   useEffect(() => {
     if (!historyOwner) return
     let live = true
     void (async () => {
       const moved = await migrateLocalChats("product", historyOwner, { fetcher: threadFetch })
-      if (!live) return
+      if (!live || !moved) return
       await reloadChats()
-      if (moved) announceThreads()
+      announceThreads()
     })()
     return () => {
       live = false
@@ -834,7 +853,7 @@ export function NewAppWorkspace({
   }, [historyOwner, threadFetch, reloadChats])
   const savedFirst = useRef("")
   useEffect(() => {
-    if (!historyOwner || !productChat.messages.length) return
+    if (!productChat.messages.length) return
     const first = savedFirst.current !== threadId
     // While a reply streams, only the first message is saved (at once); the reply once it settles.
     if (drafting && !first) return
@@ -846,7 +865,7 @@ export function NewAppWorkspace({
       { messages, outcomes: Object.fromEntries(created.map(([d, p]) => [d, { product_id: p }])), metadata: created.length ? { product_ids: created.map(([, p]) => p) } : undefined },
       { now: first },
     )
-  }, [historyOwner, drafting, productChat.messages, createdDrafts, threadId, saver])
+  }, [drafting, productChat.messages, createdDrafts, threadId, saver])
   // Products created or published here, until the page's list says so.
   const [localMine, setLocalMine] = useState<MyProduct[]>([])
   const noteMine = (p: MyProduct) => {
@@ -855,15 +874,23 @@ export function NewAppWorkspace({
   }
   const [focus, setFocus] = useState<string | null>(null)
   // Reopens one of the user's product chats, read back from Mynt with the drafts it created (so none
-  // is created twice). What it holds is already saved, so reopening it saves nothing.
-  const restoreChat = async (link: string): Promise<boolean> => {
+  // is created twice), even the one already open (it then shows what was last saved). What it holds is
+  // already saved, so reopening it saves nothing. One that can't be read says so in the chat.
+  // Each open is numbered: one picked after it (a second click) wins over a slower first.
+  const openSeq = useRef(0)
+  const restoreChat = async (link: string, seq = ++openSeq.current): Promise<boolean> => {
     const id = sessionIdFor(link)
-    if (id === threadId && productChat.messages.length) {
-      setMode("product")
-      return true
-    }
     const rec = await loadChat(id, threadFetch)
-    if (!rec) return false
+    if (seq !== openSeq.current) return false
+    setMode("product")
+    if (!rec) {
+      setThreadNotice(OPEN_FAILED)
+      return false
+    }
+    setThreadNotice(null)
+    setError(null)
+    // The open chat with a reply still coming, or something not yet saved, stays as it is.
+    if (rec.id === threadId && (drafting || saver.isPending(rec.id))) return true
     if (drafting) void productChat.stop()
     const created = Object.fromEntries(Object.entries(rec.outcomes).filter(([, o]) => typeof o.product_id === "string").map(([d, o]) => [d, o.product_id as string]))
     saver.adopt(rec.id, rec)
@@ -871,8 +898,6 @@ export function NewAppWorkspace({
     productChat.setMessages(rec.messages)
     setThreadId(rec.id)
     setCreatedDrafts(created)
-    setError(null)
-    setMode("product")
     return true
   }
   const focusProduct = (id: string) => {
@@ -881,21 +906,45 @@ export function NewAppWorkspace({
     setOpened(true)
     if (products?.some((p) => p.id === id && isPickable(p))) setPicked((p) => (p.includes(id) ? p : [...p, id]))
   }
-  // From the address (?thread=, ?product=) or the sidebar: once what it needs has loaded.
+  // A product picked in the sidebar or linked (?product=): the product chat whose draft created it, in
+  // Financial product mode, with the product in view on the Products tab. One made without a chat (by
+  // hand) opens a new product chat with "Continue with" and its name in the composer.
+  const openProduct = async (productId: string) => {
+    const seq = ++openSeq.current
+    focusProduct(productId)
+    const list = (await reloadChats()) ?? chats ?? []
+    if (seq !== openSeq.current) return
+    const chat = chatForProduct(list, productId)
+    if (chat) {
+      await restoreChat(chat.id, seq)
+      return
+    }
+    const name = products?.find((p) => p.id === productId)?.name ?? myProducts?.find((p) => p.id === productId)?.name ?? productId
+    if (drafting) void productChat.stop()
+    setThreadNotice(null)
+    setError(null)
+    savedFirst.current = ""
+    productChat.setMessages([])
+    setThreadId(newThreadId())
+    setCreatedDrafts({})
+    setMode("product")
+    setCarry((c) => ({ text: `Continue with ${name}: `, n: (c?.n ?? 0) + 1 }))
+  }
+  // From the address (?thread=, ?product=) or the sidebar, each request once (n changes on every click,
+  // the same item again included); a product once the products are known, so it can be shown.
   const appliedOpen = useRef(0)
   useEffect(() => {
     if (!openRequest || appliedOpen.current === openRequest.n) return
     if (openRequest.thread) {
-      if (!historyOwner) return
       appliedOpen.current = openRequest.n
       void restoreChat(openRequest.thread)
     } else if (openRequest.product) {
       if (!products) return
       appliedOpen.current = openRequest.n
-      focusProduct(openRequest.product)
+      void openProduct(openRequest.product)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openRequest?.n, historyOwner, products])
+  }, [openRequest?.n, products])
   const modeToggle = <ModeToggle mode={mode} onMode={(m) => switchMode(m)} />
   // Build app: what's typed clearly asks for a product, so Create product is offered (never switched to unasked).
   const suggestProduct = mode === "build" && !busy && !error && asksForProduct(text)
@@ -1016,7 +1065,11 @@ export function NewAppWorkspace({
                 commands={productCommands}
                 sendBlocked={ai === "enabled" || drafting ? null : ai === "loading" ? "Checking the assistant…" : AI_OFF}
                 note={
-                  ai === "disabled" ? (
+                  threadNotice ? (
+                    <span role="alert" className="text-destructive" data-thread-error>
+                      {threadNotice}
+                    </span>
+                  ) : ai === "disabled" ? (
                     <span role="status" data-product-ai-off>
                       {AI_OFF}
                     </span>

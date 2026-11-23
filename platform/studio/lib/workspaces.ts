@@ -94,7 +94,8 @@ export function stageOf(app: { stage?: unknown; status?: unknown }, lastBuild?: 
 }
 
 // An app, or a financial product (kind "product": the same three stages; the sidebar's folders list both).
-export type StagedApp = { id: string; name: string; stage: Stage; kind?: "app" | "product" };
+// conversationId: an app's newest build conversation (opened from the sidebar), when it has one.
+export type StagedApp = { id: string; name: string; stage: Stage; kind?: "app" | "product"; conversationId?: string | null };
 
 export function groupByStage(apps: StagedApp[]): Record<Stage, StagedApp[]> {
   const out: Record<Stage, StagedApp[]> = { production: [], staging: [], idea: [] };

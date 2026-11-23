@@ -63,7 +63,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { depositFor, panelFrom, PROMPT_EXAMPLES, proposalFields, proposalOptions, type Draft, type MoneyDraft, type ProposalDraft } from "@/lib/earn"
-import { ChatSaver, listChats, loadChat, migrateLocalChats, sessionIdFor } from "@/lib/chat-sessions"
+import { ChatSaver, listChats, loadChat, migrateLocalChats, OPEN_FAILED, SAVE_REFUSED, sessionIdFor } from "@/lib/chat-sessions"
 import { newThreadId, savedOutcomesFrom, type EarnThreadRecord, type SavedOutcome, type ThreadMatch } from "@/lib/earn-history"
 import type { SlashCommand } from "@/lib/slash-commands"
 import { centsToUsdcBaseUnits, DEPOSITS_PAUSED, onDevnet } from "@/lib/wallets"
@@ -164,10 +164,21 @@ const TAB_ICONS: Record<EarnTab, typeof Layers> = { pools: Layers, "my-pools": W
 
 // The chat side: the assistant, or, without a model, the same centred prompt that can't be used.
 // (Past conversations floats at the chat's top right, beside Show tabs: ChatWorkspaceShell's chatCorner.)
-export function EarnChat({ chat, status, commands, roles }: { chat: Chat; status: EarnStatus; commands?: readonly SlashCommand[]; roles?: readonly string[] }) {
+// `notice`: a past conversation that couldn't be opened, or one too long to keep, said in the chat.
+export function EarnChat({ chat, status, commands, roles, notice = null, onDismissNotice }: { chat: Chat; status: EarnStatus; commands?: readonly SlashCommand[]; roles?: readonly string[]; notice?: string | null; onDismissNotice?: () => void }) {
   if (status === "enabled")
     return (
       <div className="relative h-full" data-earn-chat>
+        {notice ? (
+          <div role="alert" className="absolute inset-x-0 top-3 z-10 mx-auto flex w-fit max-w-[90%] items-center gap-2 rounded-md border border-destructive/40 bg-background px-3 py-1.5 text-sm text-destructive shadow-sm" data-thread-error>
+            <span>{notice}</span>
+            {onDismissNotice ? (
+              <Button type="button" variant="ghost" size="sm" className="h-6 px-2" onClick={onDismissNotice}>
+                Dismiss
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
         <EarnThread chat={chat} commands={commands} roles={roles} />
       </div>
     )
@@ -1155,7 +1166,7 @@ export function EarnWorkspace({
   actions: LiquidityActions
   initialTab?: string | null
   isMobile?: boolean
-  historyOwner?: string | null // the signed-in user (a hash): none kept without one; older chats in this browser under it move to Mynt
+  historyOwner?: string | null // the key an older studio kept this user's chats under in this browser (a hash): only for moving those to Mynt
   initialThread?: string | null // ?thread=: a chat picked in the sidebar's Search chats, opened once known
 }) {
   const available = tabsFor(data.access)
@@ -1178,25 +1189,36 @@ export function EarnWorkspace({
     if (drafts.length > seenDrafts && available.includes("my-strategies")) setTab("my-strategies")
   }
 
-  // Past conversations: this thread is kept on Mynt for the user (lib/chat-sessions.ts) from its
-  // first question, again whenever a reply settles and whenever a draft's outcome changes (its key
-  // before it's sent, then sent or declined). A save that fails is tried again; the open chat is never
-  // lost for it. One picked from the list is read back and replaces the chat's messages, so the user
-  // carries on where they left it.
+  // Past conversations: this thread is kept on Mynt for the signed-in user (lib/chat-sessions.ts; Mynt
+  // knows who from the session, so nothing here waits on a key of the user's) from its first question,
+  // again whenever a reply settles and whenever a draft's outcome changes (its key before it's sent,
+  // then sent or declined). A save that fails is tried again; the open chat is never lost for it. One
+  // picked from the list is read back and replaces the chat's messages, so the user carries on where
+  // they left it.
   const [threadId, setThreadId] = useState(newThreadId)
   const [threads, setThreads] = useState<EarnThreadRecord[]>([])
+  const [notice, setNotice] = useState<string | null>(null)
   const reloadThreads = useCallback(async () => {
     const list = await listChats("earn")
     if (list) setThreads(list)
   }, [])
-  const saver = useMemo(() => new ChatSaver("earn", { onSaved: () => void reloadThreads() }), [reloadThreads])
+  const currentId = useRef(threadId)
+  currentId.current = threadId
+  const saver = useMemo(
+    () => new ChatSaver("earn", { onSaved: () => void reloadThreads(), onRefused: (id) => id === currentId.current && setNotice(SAVE_REFUSED) }),
+    [reloadThreads],
+  )
   useEffect(() => () => saver.dispose(), [saver])
-  // Once the user is known: chats an older studio kept in this browser go to Mynt, then the list is read.
+  // The user's chats, read once on load.
+  useEffect(() => {
+    void reloadThreads()
+  }, [reloadThreads])
+  // Chats an older studio kept in this browser (under the user's hashed key, once known) go to Mynt, then the list is read again.
   useEffect(() => {
     if (!historyOwner) return
     let live = true
-    void migrateLocalChats("earn", historyOwner).then(() => {
-      if (live) void reloadThreads()
+    void migrateLocalChats("earn", historyOwner).then((moved) => {
+      if (live && moved) void reloadThreads()
     })
     return () => {
       live = false
@@ -1205,47 +1227,56 @@ export function EarnWorkspace({
   const busy = chat.status === "streaming" || chat.status === "submitted"
   const savedFirst = useRef("")
   useEffect(() => {
-    if (!historyOwner || !chat.messages.length) return
+    if (!chat.messages.length) return
     const first = savedFirst.current !== threadId
     // While a reply streams, only the first question is saved (at once); the reply once it settles.
     if (busy && !first) return
     savedFirst.current = threadId
     const messages = busy ? chat.messages.filter((m, i, all) => !(i === all.length - 1 && m.role === "assistant")) : chat.messages
     saver.save(threadId, { messages, outcomes: savedOutcomes(outcomes) }, { now: first })
-  }, [historyOwner, busy, chat.messages, outcomes, threadId, saver])
+  }, [busy, chat.messages, outcomes, threadId, saver])
   const switchTo = (id: string, messages: UIMessage[], kept: Record<string, SavedOutcome>) => {
     if (busy) void chat.stop()
+    setNotice(null)
     savedFirst.current = messages.length ? id : ""
     chat.setMessages(messages)
     setThreadId(id)
     setOutcomes(restoredOutcomes(kept))
     setSeenDrafts(panelFrom(messages as never).drafts.length)
   }
+  // Opens a chat picked from Past conversations or a link: read back from Mynt, even the one already
+  // open (so it shows what was last saved). One that can't be read says so in the chat.
   const openThread = async (link: string) => {
     const id = sessionIdFor(link)
-    if (id === threadId) return
     const t = await loadChat(id)
-    if (!t) return
+    if (!t) {
+      setNotice(OPEN_FAILED)
+      return
+    }
+    // The open chat with a reply still coming, or something not yet saved, stays as it is: reopening it
+    // doesn't throw that away.
+    if (t.id === threadId && (busy || saver.isPending(t.id))) {
+      setNotice(null)
+      return
+    }
     saver.adopt(t.id, t)
     switchTo(t.id, t.messages, savedOutcomesFrom(t.outcomes))
   }
-  // A chat picked from the sidebar's Search chats arrives as ?thread=; it's opened once, when the user is known.
+  // A chat picked from the sidebar's Search chats arrives as ?thread=; it's opened once.
   const openedInitial = useRef(false)
   useEffect(() => {
-    if (openedInitial.current || !historyOwner || !initialThread) return
+    if (openedInitial.current || !initialThread) return
     openedInitial.current = true
     void openThread(initialThread)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [historyOwner, initialThread])
-  const history: EarnHistory | null = historyOwner
-    ? {
-        threads,
-        current: threadId,
-        onPick: (id) => void openThread(id),
-        onNew: () => switchTo(newThreadId(), [], {}),
-        search: searchEarnChats,
-      }
-    : null
+  }, [initialThread])
+  const history: EarnHistory = {
+    threads,
+    current: threadId,
+    onPick: (id) => void openThread(id),
+    onNew: () => switchTo(newThreadId(), [], {}),
+    search: searchEarnChats,
+  }
 
   const choose = (id: string) => {
     const t = id as EarnTab
@@ -1261,7 +1292,7 @@ export function EarnWorkspace({
       choose(t)
       setOpened(true)
     },
-    history: status === "enabled" && history ? () => setHistoryOpen(true) : undefined,
+    history: status === "enabled" ? () => setHistoryOpen(true) : undefined,
     newChat: () => switchTo(newThreadId(), [], {}),
   })
 
@@ -1283,8 +1314,8 @@ export function EarnWorkspace({
 
   const shell = (
     <ChatWorkspaceShell
-      chat={<EarnChat chat={chat} status={status} commands={commands} roles={earnRoles(data.access)} />}
-      chatCorner={status === "enabled" && history ? <PastConversations history={history} open={historyOpen} onOpenChange={setHistoryOpen} /> : null}
+      chat={<EarnChat chat={chat} status={status} commands={commands} roles={earnRoles(data.access)} notice={notice} onDismissNotice={() => setNotice(null)} />}
+      chatCorner={status === "enabled" ? <PastConversations history={history} open={historyOpen} onOpenChange={setHistoryOpen} /> : null}
       onOpenPanel={() => setOpened(true)}
       showPanel={opened || chat.messages.length > 0}
       tabs={available.map((t) => ({ id: t, label: TAB_LABELS[t], badge: t === "my-strategies" ? drafts.length : undefined, content: content(t), icon: TAB_ICONS[t] }))}

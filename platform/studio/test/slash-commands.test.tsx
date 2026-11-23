@@ -221,7 +221,8 @@ describe("slash commands in Earn's composer", () => {
   it("a builder sees My pools and Propose, not the liquidity provider's commands; /propose fills a proposal prompt", async () => {
     render(<Earn data={builderData} />);
     await type("/");
-    expect(names()).toEqual(["pools", "my-pools", "strategies", "new", "propose"]);
+    // /history is there for everyone signed in (not only with the browser's hashed key).
+    expect(names()).toEqual(["pools", "my-pools", "strategies", "history", "new", "propose"]);
     await type("/my");
     await press("Enter");
     expect(selectedTab()).toBe("my-pools");
@@ -265,7 +266,7 @@ describe("slash commands in Earn's composer", () => {
     await type("half a thought");
     expect(menu()).toBeNull();
     await act(async () => void fireEvent.click(button));
-    expect(names()).toHaveLength(6);
+    expect(names()).toHaveLength(7);
     expect(input().value).toBe("half a thought");
   });
 

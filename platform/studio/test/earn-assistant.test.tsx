@@ -701,9 +701,56 @@ describe("past conversations", () => {
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
   });
 
-  it("without a user to keep them for, there's no history button", () => {
+  // The hashed key only ever keyed this browser's old copies; Mynt knows the user from the session, so a
+  // user with no wallets list (no key) still keeps their chats and has Past conversations.
+  it("without the browser's hashed key (no wallets list), the chat is still saved and Past conversations is there", async () => {
+    server.seed("earn", thread(OLD, "Older question", "2026-11-20T10:00:00Z"));
     render(<Earn data={lpData} />);
-    expect(screen.queryByRole("button", { name: "Past conversations" })).toBeNull();
+    await settle();
+    expect(historyButton()).toBeTruthy();
+    await act(async () => void fireEvent.click(document.querySelector('[data-chip="$50k, 90-day lock-in, US credit"]')!));
+    await settle(100);
+    expect(server.posts.length).toBeGreaterThan(0);
+    expect(server.list("earn").map((t) => t.title)).toEqual(["$50k, 90-day lock-in, US credit", "Older question"]);
+    await act(async () => void fireEvent.click(historyButton()));
+    expect([...document.querySelectorAll('[data-dialog="history"] [data-thread-title]')].map((t) => t.textContent)).toEqual(["$50k, 90-day lock-in, US credit", "Older question"]);
+  });
+
+  it("picking the conversation already open reads it back again (not a no-op)", async () => {
+    server.seed("earn", thread(OLD, "Older question", "2026-11-20T10:00:00Z"));
+    render(<Earn data={lpData} />);
+    await settle();
+    await act(async () => void fireEvent.click(historyButton()));
+    await act(async () => void fireEvent.click(document.querySelector(`[data-dialog="history"] [data-thread="${OLD}"]`)!));
+    await settle();
+    expect(document.body.textContent).toContain("About Older question.");
+    // Mynt's copy changed meanwhile (another tab): picking the open one again shows it.
+    server.seed("earn", { ...thread(OLD, "Older question", "2026-11-20T10:00:00Z"), messages: [...msgs("Older question"), ...msgs("A later question")] });
+    await act(async () => void fireEvent.click(historyButton()));
+    await act(async () => void fireEvent.click(document.querySelector(`[data-dialog="history"] [data-thread="${OLD}"]`)!));
+    await settle();
+    expect(document.body.textContent).toContain("About A later question.");
+  });
+
+  it("a conversation that can't be read says so in the chat, and the open chat stays", async () => {
+    server.seed("earn", thread(OLD, "Older question", "2026-11-20T10:00:00Z"));
+    render(<Earn data={lpData} />);
+    await settle();
+    await act(async () => void fireEvent.click(historyButton()));
+    server.state.down = true;
+    await act(async () => void fireEvent.click(document.querySelector(`[data-dialog="history"] [data-thread="${OLD}"]`)!));
+    await settle();
+    const alert = document.querySelector("[data-thread-error]")!;
+    expect(alert.getAttribute("role")).toBe("alert");
+    expect(alert.textContent).toContain("Couldn't open that conversation. Try again.");
+    expect(document.body.textContent).not.toContain("About Older question.");
+    // Trying again once Mynt answers opens it, and the message goes.
+    server.state.down = false;
+    await act(async () => void fireEvent.click(historyButton()));
+    await act(async () => void fireEvent.click(document.querySelector(`[data-dialog="history"] [data-thread="${OLD}"]`)!));
+    await settle();
+    expect(document.body.textContent).toContain("About Older question.");
+    expect(document.querySelector("[data-thread-error]")).toBeNull();
   });
 });
 

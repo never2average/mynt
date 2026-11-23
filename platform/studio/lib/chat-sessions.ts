@@ -22,6 +22,7 @@ export type ChatKind = (typeof CHAT_KINDS)[number];
 // Mynt's limits (core/src/chat-sessions.ts), checked here too so junk stays off the wire.
 export const MAX_EVENTS_PER_SAVE = 100;
 export const MAX_TITLE = 200;
+export const LIST_LIMIT_MAX = 200;
 const TITLE_CHARS = 120;
 
 export const SessionId = z.string().uuid();
@@ -177,10 +178,12 @@ export function summariesFrom(body: unknown): ThreadSummary[] {
 }
 
 // The user's chats of a kind, newest first (null: couldn't be read just now). With a query, only the
-// ones whose title or words hold every word of it, each with the words around the match.
-export async function listChats(kind: ChatKind, opts: { query?: string; fetcher?: Fetcher } = {}): Promise<ThreadSummary[] | null> {
+// ones whose title or words hold every word of it, each with the words around the match. `limit`: how
+// many at most (Mynt lists 50 unless asked; 200, every one a user keeps of a kind, at most).
+export async function listChats(kind: ChatKind, opts: { query?: string; limit?: number; fetcher?: Fetcher } = {}): Promise<ThreadSummary[] | null> {
   const q = new URLSearchParams({ kind });
   if (opts.query?.trim()) q.set("q", opts.query.trim().slice(0, 200));
+  if (opts.limit) q.set("limit", String(Math.min(LIST_LIMIT_MAX, Math.max(1, Math.floor(opts.limit)))));
   try {
     const res = await (opts.fetcher ?? defaultFetch)(`/api/threads?${q}`, { cache: "no-store" });
     if (!res.ok) return null;
@@ -211,14 +214,15 @@ export async function deleteChat(id: string, fetcher: Fetcher = defaultFetch): P
   }
 }
 
-// ok: saved; retry: not saved, try again later (offline, Mynt unreachable); refused: Mynt won't keep it.
+// ok: saved; retry: not saved, try again later (offline, Mynt unreachable, signed out or roles being
+// read again); refused: it will never be kept as it is (too long, or a body Mynt or the studio rejects).
 export type SaveResult = "ok" | "retry" | "refused";
 export async function postSave(body: SaveRequest, fetcher: Fetcher = defaultFetch): Promise<SaveResult> {
   try {
     const text = JSON.stringify(body);
     const res = await fetcher("/api/threads", { method: "POST", headers: { "content-type": "application/json" }, body: text, keepalive: text.length < 60_000 });
     if (res.ok) return "ok";
-    return res.status === 413 || res.status === 422 || res.status === 400 || res.status === 403 ? "refused" : "retry";
+    return res.status === 413 || res.status === 422 || res.status === 400 ? "refused" : "retry";
   } catch {
     return "retry";
   }
@@ -255,7 +259,7 @@ export class ChatSaver {
 
   constructor(
     private kind: ChatKind,
-    private opts: { fetcher?: Fetcher; onSaved?: (id: string) => void } = {},
+    private opts: { fetcher?: Fetcher; onSaved?: (id: string) => void; onRefused?: (id: string) => void } = {},
   ) {
     // Closing the tab: what's waiting goes now (small saves as keepalive requests, which outlive the page).
     if (typeof window !== "undefined") window.addEventListener("pagehide", () => this.pending.size && void this.flush());
@@ -297,7 +301,10 @@ export class ChatSaver {
         const { result, synced } = await saveChat(this.kind, id, s, this.synced.get(id) ?? NOT_SYNCED, this.opts.fetcher);
         this.synced.set(id, synced);
         if (result === "ok") this.opts.onSaved?.(id);
-        else if (result === "refused") this.refused.add(id);
+        else if (result === "refused") {
+          this.refused.add(id);
+          this.opts.onRefused?.(id);
+        }
         else {
           if (!this.pending.has(id)) this.pending.set(id, s);
           retry = true;
@@ -324,6 +331,16 @@ export class ChatSaver {
     this.disposed = true;
   }
 }
+
+// The product chat whose drafts became this product (its metadata's product_ids), newest first; null if none.
+export function chatForProduct<T extends Pick<ThreadSummary, "id" | "metadata">>(chats: readonly T[], productId: string): T | null {
+  return chats.find((c) => Array.isArray(c.metadata.product_ids) && c.metadata.product_ids.includes(productId)) ?? null;
+}
+
+// What a chat that couldn't be opened says, in the chat.
+export const OPEN_FAILED = "Couldn't open that conversation. Try again.";
+// What a chat Mynt won't keep says (too long), so the user knows to start a new one.
+export const SAVE_REFUSED = "This conversation is too long to keep. Start a new one to keep what follows.";
 
 // ---- chats an older studio kept in this browser ----
 
