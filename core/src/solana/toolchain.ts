@@ -80,6 +80,41 @@ export function toolchainRecord(environment: { source: "snapshot" | "install"; s
 }
 export type ToolchainRecord = ReturnType<typeof toolchainRecord>;
 
+// Crates whose newest release the pinned platform tools' Cargo can't read, and the release a resolve without a
+// committed Cargo.lock gets instead (schemas/solana-lock-pins.json). Applied only to a lock Mynt resolves itself.
+export interface SolanaLockPin { crate: string; from: string; below: string; precise: string; why: string }
+export const LOCK_PINS_FILE = fileURLToPath(new URL("../../schemas/solana-lock-pins.json", import.meta.url));
+export function parseLockPins(text: string): SolanaLockPin[] {
+  const pins = JSON.parse(text)?.pins;
+  const version = /^\d+\.\d+\.\d+$/;
+  if (!Array.isArray(pins)) throw new Error("schemas/solana-lock-pins.json: pins must be a list");
+  return pins.map((p) => {
+    if (!/^[A-Za-z0-9_-]+$/.test(p?.crate) || ![p.from, p.below, p.precise].every((v) => version.test(v)) || typeof p.why !== "string")
+      throw new Error(`schemas/solana-lock-pins.json: a pin is malformed: ${JSON.stringify(p)}`);
+    return { crate: p.crate, from: p.from, below: p.below, precise: p.precise, why: p.why };
+  });
+}
+export const SOLANA_LOCK_PINS: readonly SolanaLockPin[] = parseLockPins(readFileSync(LOCK_PINS_FILE, "utf8"));
+
+// Resolving a workspace that commits no Cargo.lock, in Anchor's image with Mynt's settings (MYNT_LOCK_PINS and
+// CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback in the environment): the host Cargo resolves one, MSRV-aware from
+// each program's rust-version, then any crate on the pin list (schemas/solana-lock-pins.json) is moved back to a
+// release the platform tools' older Cargo can read. A committed Cargo.lock is used as it is. The fetch container
+// runs it, and so does scripts/solana-lock.mjs, which regenerates the Cargo.lock files Mynt commits.
+export const SOLANA_LOCK_RESOLVE = String.raw`if [ ! -f Cargo.lock ]; then
+  cargo generate-lockfile
+  for pin in $MYNT_LOCK_PINS; do
+    IFS=: read -r c from below precise <<< "$pin"
+    for v in $(sed -n "/^name = \"$c\"\$/{n;s/^version = \"\(.*\)\"\$/\1/p}" Cargo.lock); do
+      if [ "$(printf "%s\n%s\n" "$from" "$v" | sort -V | head -n1)" = "$from" ] && [ "$v" != "$below" ] && [ "$(printf "%s\n%s\n" "$v" "$below" | sort -V | head -n1)" = "$v" ]; then
+        echo "mynt: no Cargo.lock committed; pinning $c $v to $precise, a release the platform tools can build"
+        cargo update -p "$c@$v" --precise "$precise" || echo "mynt: could not pin $c $v to $precise"
+      fi
+    done
+  done
+fi`;
+export const lockPinsEnv = (pins: readonly SolanaLockPin[] = SOLANA_LOCK_PINS) => pins.map((p) => `${p.crate}:${p.from}:${p.below}:${p.precise}`).join(" ");
+
 const T = SOLANA_TOOLCHAIN;
 // What Mynt keeps of a build: the workspace exactly as it went into the build container (a build whose source is
 // larger fails, never keeps part of it), and the source of every dependency not on Mynt's crate allowlist.
@@ -274,7 +309,10 @@ json.dump(res, open(out, "w"))
 PY
   # Both cargos fetch: the host toolchain's (it resolves Cargo.lock) and the SBF platform tools' (the one cargo
   # build-sbf compiles with, which keeps its own crate cache), so the offline build finds every crate.
-  FETCH='set -e; for m in "$@"; do cargo fetch --manifest-path "$m"; for pc in /root/.cache/solana/*/platform-tools/rust/bin/cargo; do if [ -x "$pc" ]; then "$pc" fetch --manifest-path "$m"; fi; done; done'
+  # With no Cargo.lock committed, the host Cargo resolves one first: SOLANA_LOCK_RESOLVE, below.
+  FETCH='set -e
+${SOLANA_LOCK_RESOLVE}
+for m in "$@"; do cargo fetch --manifest-path "$m"; for pc in /root/.cache/solana/*/platform-tools/rust/bin/cargo; do if [ -x "$pc" ]; then "$pc" fetch --manifest-path "$m"; fi; done; done'
   BUILD='set -e; for m in "$@"; do cargo build-sbf --manifest-path "$m"; done'
   # The IDL, built in a container of its own (no network, a fresh copy of the same source and crates) after the
   # programs are out: building the IDL runs the workspace's code, which must never touch the built programs.
@@ -283,6 +321,7 @@ PY
   # rust-toolchain.toml can't swap it), and dependencies resolved to versions the platform tools can build. The
   # target dir is /mynt-target, outside /workdir and empty: nothing from the source can be a "fresh" artifact cargo
   # would reuse instead of compiling, and the programs, dep-info and IDL Mynt reads come only from there.
+  LOCK_PINS="${lockPinsEnv()}"
   COMMON=(--workdir /workdir -e RUSTUP_TOOLCHAIN=stable -e CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback
     -e PATH=/root/.local/share/solana/install/active_release/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)
   for w in "${"${"}WS[@]}"; do
@@ -353,11 +392,12 @@ PY
     committed=0; [ -f "$dir/Cargo.lock" ] && [ ! -L "$dir/Cargo.lock" ] && committed=1
     if ! skeleton "$dir" "$skel" >> "$log.build.log" 2>&1; then BUILD_FAIL+="$label: $(tail -c 400 "$log.build.log") "; rm -rf "$skel"; continue; fi
     fcid=$(docker create "${"${"}COMMON[@]}" -e RUSTC=rustc -e CARGO_BUILD_RUSTC=rustc -e RUSTC_WRAPPER= -e CARGO_BUILD_RUSTC_WRAPPER= \
-      -e RUSTC_WORKSPACE_WRAPPER= -e CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER= \
+      -e RUSTC_WORKSPACE_WRAPPER= -e CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER= -e MYNT_LOCK_PINS="$LOCK_PINS" \
       ${T.anchorImage} bash -c "$FETCH" _ "${"${"}manifests[@]}" 2>> "$log.build.log")
     if [ -z "$fcid" ] || ! tar -C "$skel" --transform 's,^\.$,workdir,;s,^\./,workdir/,' -cf - . | docker cp - "$fcid:/" >> "$log.build.log" 2>&1 \
        || ! docker start -a "$fcid" >> "$log.build.log" 2>&1; then
-      BUILD_FAIL+="$label: fetching its crates failed: $(tail -c 600 "$log.build.log" | tr -d '\r') "
+      hint=""; grep -q "edition2024\|requires rustc" "$log.build.log" && hint="a crate in Cargo.lock needs a newer Cargo than the platform tools' (pin it to an older release: cargo update -p <crate>@<version> --precise <older>, and commit Cargo.lock); "
+      BUILD_FAIL+="$label: $hint""fetching its crates failed: $(tail -c 600 "$log.build.log" | tr -d '\r') "
       [ -n "$fcid" ] && docker rm -f "$fcid" >/dev/null 2>&1; rm -rf "$skel"; continue
     fi
     rm -rf "$skel"

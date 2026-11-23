@@ -1,0 +1,12 @@
+{
+  "description": "Crates the pinned toolchain can't fetch at their newest release, and the release Mynt resolves instead when a program's source commits no Cargo.lock. The SBF platform tools' own Cargo (1.84 with Anchor 0.32.1) can't read a manifest that needs edition 2024, and the MSRV-aware resolver (incompatible-rust-versions = fallback, with each program's rust-version) can't avoid one that a compatible crate requires outright. Each pin moves any locked version from `from` up to (not including) `below` to `precise`. src/solana/toolchain.ts reads it; a committed Cargo.lock is never changed. Remove a pin when the toolchain moves to a Cargo that reads the newer release.",
+  "pins": [
+    {
+      "crate": "ahash",
+      "from": "0.8.13",
+      "below": "0.9.0",
+      "precise": "0.8.12",
+      "why": "ahash 0.8.13 (rust-version 1.60) requires getrandom 0.4 for wasm32, and getrandom 0.4 is edition 2024 (rust-version 1.85); a Cargo.lock lists every target's crates, so the platform tools' Cargo 1.84 fails to parse it. 0.8.12 needs only getrandom 0.3 (rust-version 1.63)."
+    }
+  ]
+}
