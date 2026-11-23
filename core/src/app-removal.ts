@@ -64,6 +64,8 @@ export const APP_REMOVAL_STEPS: { table: string; where: string; list?: string }[
   { table: "app_repositories", where: "t.app_id = $1", list: "repository" },
   // Its stage, target states and production sign-off requests (promotions.ts).
   { table: "app_target_segments", where: "t.app_id = $1" },
+  // Its risk register (risk-register.ts); each risk's history stays in the audit trail.
+  { table: "risk_register", where: "t.subject_type = 'app' AND t.subject_id = $1::text" },
   { table: "promotion_signoffs", where: "t.app_id = $1", list: "id" },
   { table: "app_promotions", where: "t.app_id = $1" },
   { table: "apps", where: "t.id = $1", list: "id" },

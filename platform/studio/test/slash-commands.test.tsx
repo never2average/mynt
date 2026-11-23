@@ -351,7 +351,7 @@ describe("slash commands in the builder chat", () => {
   it("lists the panel tabs by their ids, /ship and the agent prompts; no /new", async () => {
     render(<BuilderChat sent={[]} />);
     await type("/");
-    expect(names()).toEqual(["preview", "products", "agreements", "customers", "security", "pnl", "sdk", "activity", "ship", "fix", "add"]);
+    expect(names()).toEqual(["preview", "products", "agreements", "customers", "security", "risk", "pnl", "sdk", "activity", "ship", "fix", "add"]);
     await type("/fi");
     await press("Enter");
     await settle();
@@ -402,6 +402,28 @@ describe("slash commands in the builder chat", () => {
     await press("Enter");
     await settle();
     expect(container.querySelector(`[data-panel-tab="${tab}"]`)?.getAttribute("aria-selected")).toBe("true");
+    expect(sent).toEqual([]);
+  });
+
+  it.each(["security", "risk"])("/%s shows Security & risk (an app's risk register lives there; it has no Risk tab)", async (command) => {
+    const sent: string[] = [];
+    const { container } = render(
+      <TooltipProvider>
+        <SidebarProvider>
+          <ProjectWorkspaceShell projectId="app-1">
+            <BuilderChat sent={sent} />
+          </ProjectWorkspaceShell>
+        </SidebarProvider>
+      </TooltipProvider>,
+    );
+    await settle();
+    await type(`/${command}`);
+    await press("Enter");
+    await settle();
+    const tab = container.querySelector('[data-panel-tab="security"]');
+    expect(tab?.getAttribute("aria-selected")).toBe("true");
+    expect(tab?.textContent).toContain("Security & risk");
+    expect(container.querySelector('[data-panel-tab="risk"]')).toBeNull();
     expect(sent).toEqual([]);
   });
 });

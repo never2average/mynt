@@ -44,6 +44,7 @@ import {
 import { registerFirmTools, registerMarketplaceTools, registerRosterTools } from "./marketplace.js";
 import { registerLicenseProviderTools, registerSponsorshipBuilderTools } from "./sponsorships.js";
 import { registerAppAgreementTools } from "./app-agreements.js";
+import { registerRiskRegisterTools } from "./risk-register.js";
 import { registerAgreementEsignTools } from "./agreement-esign.js";
 import { registerEsignAdminTools, type EsignSettings } from "./esign-settings.js";
 import { registerAgreementAuditTools } from "./agreement-audits.js";
@@ -211,6 +212,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (user && has("admin") && typeof (ctx.esign as Partial<EsignSettings> | null | undefined)?.setKey === "function") registerEsignAdminTools(server, store, user, ctx.esign as EsignSettings);
   // Oversight audits a licence provider runs on an app under a program agreement with its firm (agreement-audits.ts).
   if (user && (has("developer") || has("license_provider"))) registerAgreementAuditTools(server, store, user, { app: has("developer"), counterparty: has("license_provider") });
+  // A risk register for apps and financial products: kept by the app's workspace or the product's firm, read by its sponsors (risk-register.ts).
+  if (user && (has("developer") || has("license_provider"))) registerRiskRegisterTools(server, store, user, { builder: has("developer"), sponsor: has("license_provider") });
   if (ctx.covenants && user && has("license_provider")) registerCovenantTools(server, store, user, ctx.covenants);
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds, ctx.identity ?? null);
   // Starting points for common finance apps, for start_build's kind (app-kinds.ts).

@@ -163,7 +163,7 @@ async function appProducts(store: Store, app: App) {
 }
 
 // The firms of the app's workspace's members (or its owner's, for an app in no workspace).
-async function memberFirms(store: Store, app: App): Promise<string[]> {
+export async function memberFirms(store: Store, app: App): Promise<string[]> {
   const { rows } = app.workspace_id
     ? await store.db.query(`SELECT DISTINCT u.entity_id FROM ${T}.workspace_members m JOIN ${T}.users u ON u.id = m.user_id WHERE m.workspace_id = $1 AND u.entity_id IS NOT NULL`, [app.workspace_id])
     : await store.db.query(`SELECT entity_id FROM ${T}.users WHERE id = $1 AND entity_id IS NOT NULL`, [app.owner_id]);

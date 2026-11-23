@@ -15,7 +15,7 @@ import { AppInfoTab } from "@/components/app-panel-tabs";
 import { APP_TABS, APP_TAB_LABELS, isAppTab, PANEL_TAB_EVENT, type AppTab } from "@/lib/app-panel";
 
 // The builder's right-hand tabs: the live preview (the default; its controls are in the top bar),
-// then the app's Products, Agreements, Customers, Security, P&L, SDK and Activity, each live and for
+// then the app's Products, Agreements, Customers, Security & risk, P&L, SDK and Activity, each live and for
 // this app only (no Licences tab: an app holds no licences, its products do).
 // Promoting is an action (the top bar's button and its sheet), not a tab.
 export const BUILDER_TABS = APP_TABS.map((id) => ({ id, label: APP_TAB_LABELS[id] }));

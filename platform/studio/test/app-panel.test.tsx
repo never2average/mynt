@@ -7,7 +7,7 @@ import { appProductsFrom, buildsFrom, buildStatusLabel, buildTone, eventsFrom, f
 import { ProjectConversationsProvider } from "@/lib/project-conversations-context";
 import { parseStudioCall } from "@/lib/studio-tools";
 
-// An app's information tabs (Products, Agreements, Customers, Security, P&L, SDK, Activity; no Licences tab: an app
+// An app's information tabs (Products, Agreements, Customers, Security & risk, P&L, SDK, Activity; no Licences tab: an app
 // holds no licences, its products do): what each shows with data,
 // with none, and before Mynt has its tool; that every read is for this app only; and that they're live.
 
@@ -33,6 +33,9 @@ const ALL = [
   { name: "get_app_customers", inputSchema: props("app_id") },
 ];
 const SPONSOR = "11111111-1111-4111-8111-111111111111";
+// Security & risk before Mynt has risk registers: the register and every signal say so.
+const NOT_HERE = { available: false as const, reason: "Risk registers come with Mynt's next update." };
+const NO_RISK = { register: NOT_HERE, signals: { fraud: NOT_HERE, vendors: NOT_HERE, conduct: NOT_HERE, products: NOT_HERE } };
 const AGREEMENTS = {
   app: { id: APP, name: "Cards" },
   can_manage: true,
@@ -267,6 +270,9 @@ describe("the app panel route", () => {
     expect(fake.calls.find((c) => c.name === "list_workspace_audit")?.args).toEqual({ workspace_id: WS, app_id: APP, class: "security" });
     expect(data.events?.map((e) => e.action)).toEqual(["api_key_created"]); // the other app's event is dropped
     expect(data.checks.map((c) => c.id)).toEqual(["build_verified", "audit_findings"]);
+    // Without list_risks on this Mynt, the register and its signals are not available yet, with why.
+    expect(data.register).toEqual({ available: false, reason: "Risk registers come with Mynt's next update." });
+    expect(data.signals.fraud.available).toBe(false);
     scoped();
     fake.tools = ALL.map((t) => (t.name === "list_workspace_audit" ? { ...t, inputSchema: props("workspace_id", "app_id") } : t));
     fake.calls = [];
@@ -386,8 +392,8 @@ describe("the tabs' content", () => {
   });
 
   it("Security, SDK and Activity: empty and not-available-yet states", () => {
-    expect(renderToStaticMarkup(<views.SecurityView data={{ available: true, events: [], eventsReason: null, checks: [], checksReason: "The app is in production: there's no next stage to check it for" }} />)).toContain("No security events for this app.");
-    expect(renderToStaticMarkup(<views.SecurityView data={{ available: true, events: null, eventsReason: "Security events come with Mynt's next update", checks: [], checksReason: null }} />)).toContain("Not available yet. Security events come");
+    expect(renderToStaticMarkup(<views.SecurityView data={{ available: true, ...NO_RISK, events: [], eventsReason: null, checks: [], checksReason: "The app is in production: there's no next stage to check it for" }} />)).toContain("No security events for this app.");
+    expect(renderToStaticMarkup(<views.SecurityView data={{ available: true, ...NO_RISK, events: null, eventsReason: "Security events come with Mynt's next update", checks: [], checksReason: null }} />)).toContain("Not available yet. Security events come");
     expect(renderToStaticMarkup(<views.SdkView data={{ available: true, products: [] }} />)).toContain("uses no products yet");
     expect(renderToStaticMarkup(<views.ActivityView data={{ available: true, builds: [], events: [], eventsReason: null }} />)).toContain("No builds yet.");
     expect(renderToStaticMarkup(<views.InfoTabBody tab="pnl" data={NOT_YET("The app's P&L comes with Mynt's next update.")} />)).toContain("Not available yet. The app&#x27;s P&amp;L comes");
@@ -439,6 +445,7 @@ describe("the tabs' layout, as the dashboard's", () => {
   it("Security: build checks as status dots, at most 10 events, View all to the security audits", () => {
     const data: AppSecurity = {
       available: true,
+      ...NO_RISK,
       events: Array.from({ length: 14 }, (_, i) => event(i)),
       eventsReason: null,
       checks: [

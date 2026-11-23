@@ -140,6 +140,14 @@ export function opsFrom(reply: unknown): Ops | null {
       ],
     },
     {
+      id: "risks",
+      title: "Risk registers",
+      rows: [
+        // Apps' and products' risks whose review date passed and that aren't closed (risk-register.ts).
+        { label: "Risk reviews overdue", value: isObj(reply.risks) ? String(count(reply.risks.overdue_reviews)) : NOT_MEASURED },
+      ],
+    },
+    {
       id: "backups",
       title: "Backups",
       rows: Object.entries(b).map(([k, x]) => ({ label: words(k), value: typeof x === "string" || typeof x === "number" || typeof x === "boolean" ? String(x) : x === null ? "—" : "See ops_status" })),

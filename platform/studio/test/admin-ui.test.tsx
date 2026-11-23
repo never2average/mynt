@@ -152,6 +152,9 @@ describe("each tab", () => {
     expect(html).toContain("Oversight audits overdue")
     const audits = admin.opsFrom({ attention: ["agreement audits: 2 overdue oversight audits (on 1 apps)"], agents: {}, agreement_audits: { overdue: 2, apps_flagged: 1 } })!
     expect(audits.sections.find((x) => x.id === "agreements")!.rows.slice(1).map((r) => r.value)).toEqual(["2", "1"])
+    // Overdue risk reviews on apps' and products' risk registers; a server without the register says Not measured.
+    expect(admin.opsFrom({ attention: [], agents: {}, risks: { overdue_reviews: 3, overdue: [] } })!.sections.find((x) => x.id === "risks")!.rows[0]).toEqual({ label: "Risk reviews overdue", value: "3" })
+    expect(audits.sections.find((x) => x.id === "risks")!.rows[0].value).toBe("Not measured")
     const quiet = admin.opsFrom({ attention: ["Nothing needs attention"], agents: {} })!
     expect(renderToStaticMarkup(<OverviewView ops={quiet} />)).toContain('data-attention="none"')
   })

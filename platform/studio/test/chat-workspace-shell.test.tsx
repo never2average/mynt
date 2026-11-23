@@ -67,8 +67,8 @@ describe("ChatWorkspaceShell", () => {
 });
 
 describe("an app's builder", () => {
-  it("renders the shared shell with Preview (the default), Products, Agreements, Customers, Security, P&L, SDK and Activity beside the chat; no Licences tab; Promote is an action, not a tab", async () => {
-    expect(BUILDER_TABS.map((t) => t.label)).toEqual(["Preview", "Products", "Agreements", "Customers", "Security", "P&L", "SDK", "Activity"]);
+  it("renders the shared shell with Preview (the default), Products, Agreements, Customers, Security & risk, P&L, SDK and Activity beside the chat; no Licences tab; Promote is an action, not a tab", async () => {
+    expect(BUILDER_TABS.map((t) => t.label)).toEqual(["Preview", "Products", "Agreements", "Customers", "Security & risk", "P&L", "SDK", "Activity"]);
     const { container } = render(
       <TooltipProvider>
         <SidebarProvider>

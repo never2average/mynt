@@ -64,7 +64,7 @@ const TAB_DESCRIPTIONS: Record<AppTab, string> = {
   products: "Open the products the app uses, with their sponsors",
   agreements: "Open the app's agreements with the firms behind its products",
   customers: "Open the customers and personas the app targets",
-  security: "Open the app's security checks",
+  security: "Open Security & risk: the risk register, infosec checks and signals",
   pnl: "Open the app's P&L",
   sdk: "Open the app's SDK",
   activity: "Open the app's activity",
@@ -75,11 +75,11 @@ const TAB_DESCRIPTIONS: Record<AppTab, string> = {
 // no /new: a message with no build selected may still steer the app's running build, so the chat
 // can't promise a fresh one.
 export const builderCommands = (projectId: string): SlashCommand[] => [
-  ...APP_TABS.map((tab) => ({
-    name: tab,
-    description: TAB_DESCRIPTIONS[tab],
-    run: () => window.dispatchEvent(new CustomEvent(PANEL_TAB_EVENT, { detail: { projectId, tab } })),
-  })),
+  ...APP_TABS.flatMap((tab) => {
+    const command = { name: tab, description: TAB_DESCRIPTIONS[tab], run: () => window.dispatchEvent(new CustomEvent(PANEL_TAB_EVENT, { detail: { projectId, tab } })) };
+    // /risk opens Security & risk too: an app's risk register lives there (it has no Risk tab of its own).
+    return tab === "security" ? [command, { ...command, name: "risk", description: "Open the app's risk register, on Security & risk" }] : [command];
+  }),
   {
     name: "ship",
     description: "Ship the build: the agent wraps up, then Mynt verifies and ships it",

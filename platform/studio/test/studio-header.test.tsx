@@ -326,6 +326,10 @@ describe("search", () => {
     expect(searchStudio(index, "budgeting agreements")[0].href).toBe("/a2?tab=agreements");
     expect(labels("crypto personas")).toEqual(["Apps:Crypto vault: Customers"]);
     expect(labels("round sponsors")).toEqual(["Apps:Round-up savings: Products"]);
+    // Security & risk, found by its old name and by what it holds (an app has no Risk tab of its own).
+    expect(labels("budgeting risk register")).toEqual(["Apps:Budgeting: Security & risk"]);
+    expect(searchStudio(index, "budgeting risk register")[0].href).toBe("/a2?tab=security");
+    expect(labels("crypto security")).toContain("Apps:Crypto vault: Security & risk");
     expect(labels("budg")).toEqual(["Apps:Budgeting"]);
     expect(searchStudio(index, "").some((i) => i.href.includes("?tab="))).toBe(false);
     expect(index.some((i) => /Licences$/.test(i.label) && i.group === "Apps")).toBe(false);

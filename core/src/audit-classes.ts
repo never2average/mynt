@@ -172,6 +172,9 @@ const OBLIGATIONS = [
   "decline_app_agreement",
   "sign_app_agreement",
   "terminate_app_agreement",
+  // the risk registers of apps and financial products: risks added and reviewed (risk-register.ts)
+  "add_risk",
+  "update_risk",
   // program agreements signed by e-signature: licence providers' templates, the documents, the signed copies read
   // (agreement-esign.ts)
   "upload_agreement_template",
