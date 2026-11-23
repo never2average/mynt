@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import type { NextConfig } from "next";
 import { frameSources } from "./lib/csp";
+import { STUDIO_REDIRECTS } from "./lib/redirects";
 
 const dev = process.env.NODE_ENV !== "production";
 
@@ -17,6 +18,10 @@ const nextConfig: NextConfig = {
   // Run the MCP SDK from node_modules on the server rather than bundling it.
   serverExternalPackages: ["@modelcontextprotocol/sdk"],
   poweredByHeader: false,
+  // Before the sign-in check runs (lib/redirects.ts), so a signed-out visitor to /connect lands on the docs.
+  async redirects() {
+    return STUDIO_REDIRECTS.map((r) => ({ ...r }));
+  },
   async headers() {
     return [
       {

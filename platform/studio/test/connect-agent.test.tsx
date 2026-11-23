@@ -47,6 +47,10 @@ describe("connect your agent", () => {
     }
     // next/navigation's redirect throws, carrying where it goes.
     expect(String((thrown as { digest?: string })?.digest ?? thrown)).toContain("/docs/connect");
+    // Before the sign-in check too: Next's config redirects run ahead of the proxy, so signed-out visitors land
+    // on the public docs page instead of the login.
+    const { STUDIO_REDIRECTS } = await import("@/lib/redirects");
+    expect(STUDIO_REDIRECTS).toContainEqual({ source: "/connect", destination: "/docs/connect", permanent: false });
   });
 
   it("picks the agent with the studio's line tabs", async () => {
