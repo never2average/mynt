@@ -4,8 +4,9 @@
 	request_header -X-Mynt-Client-IP
 	header X-Content-Type-Options nosniff
 	# Mynt's own paths that the blocks above don't name go to Mynt; everything else is the studio.
-	# Signed event deliveries from the sign-in provider (POST /webhooks/clerk); Mynt caps them at 1 MB itself.
-	@mynt_webhooks path /webhooks/*
+	# Signed event deliveries from the sign-in provider (POST /webhooks/clerk) and the e-signature service
+	# (POST /esign/webhook), and the e-signature frame origins (GET /esign/frame-origins); Mynt caps bodies at 1 MB itself.
+	@mynt_webhooks path /webhooks/* /esign/*
 	handle @mynt_webhooks {
 		request_body {
 			max_size 1MB
