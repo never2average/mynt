@@ -13,6 +13,30 @@ export function diffProducts(from: FinancialProduct, to: FinancialProduct) {
     .map((k) => ({ field: k, from: from[k], to: to[k] }));
 }
 
+// What a product's activity lists (list_product_activity): the audit entries about the product itself. Covenant
+// entries keep only what the product's firm already sees in its sponsorships (the rule type), never the
+// licence provider's observed figures or settings.
+export const PRODUCT_ACTIVITY = [
+  "product_promoted",
+  "product_demoted",
+  "product_archived",
+  "product_unarchived",
+  "product_drifted",
+  "product_drift_cleared",
+  "set_product_definition",
+  "set_product_composition",
+  "set_product_access",
+  "admin_set_product_composition",
+  "admin_set_product_status",
+  "covenant_paused_product",
+  "covenant_cleared",
+] as const;
+const ACTIVITY_KEYS = new Set(["from_stage", "to_stage", "reason", "stage", "version", "via", "unpublished", "left_sandbox_builds", "status", "access_mode", "components", "parties", "connections", "rule_type", "changes"]);
+function activityDetails(details: unknown): Record<string, unknown> {
+  if (typeof details !== "object" || details === null || Array.isArray(details)) return {};
+  return Object.fromEntries(Object.entries(details as Record<string, unknown>).filter(([k]) => ACTIVITY_KEYS.has(k)));
+}
+
 // Innovator: versions of their own published products. A new version is drafted from the live one,
 // then tested and published like a new product (test_product / publish_product act on the draft).
 export function registerVersioningTools(server: McpServer, store: Store, user: User, productFields: Record<string, z.ZodTypeAny>) {
@@ -83,6 +107,31 @@ export function registerVersioningTools(server: McpServer, store: Store, user: U
       return json({
         live_version: record.status === "published" ? record.version : null,
         versions: versions.map((v) => ({ version: v.version, status: v.status, changelog: v.changelog, test_passed: v.last_test?.passed ?? null, published_at: v.published_at })),
+      });
+    },
+  );
+
+  server.registerTool(
+    "list_product_activity",
+    {
+      title: "A product's activity",
+      description:
+        "Innovator: what happened to one of your products, newest first, from Mynt's audit trail: stage moves (with the reason for a move back), archiving and unarchiving, drift from its published composition and its clearing, definition, composition and access changes, an admin's status change, and a covenant pausing or clearing its sales (the rule type only, never the licence provider's figures). Each says who did it: you, a Mynt admin, Mynt itself, or another user. Versions are list_product_versions.",
+      inputSchema: { id: z.string(), limit: z.number().int().min(1).max(200).default(50) },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ id, limit }) => {
+      const record = await ownProduct(id);
+      if (!record) return fail(`No product of yours with id '${id}'`);
+      const entries = await store.auditFor(id, PRODUCT_ACTIVITY, limit);
+      return json({
+        product_id: id,
+        events: entries.map((e) => ({
+          at: e.created_at,
+          action: e.action,
+          actor: e.actor_id === null ? "mynt" : e.actor_id === user.id ? "you" : e.action.startsWith("admin_") ? "admin" : "another_user",
+          details: activityDetails(e.details),
+        })),
       });
     },
   );
