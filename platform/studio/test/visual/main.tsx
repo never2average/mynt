@@ -13,7 +13,7 @@ import { StudioShell } from "@/app/(studio)/studio-shell";
 import WorkspaceLayout from "@/app/(studio)/[projectId]/layout";
 import { Assistant } from "@/app/(studio)/[projectId]/assistant";
 import { ProjectWelcome } from "@/components/assistant-ui/project-welcome";
-import ConnectPage from "@/app/(studio)/connect/page";
+import { ConnectGuide } from "@/components/connect-guide";
 import NewAppPage from "@/app/(studio)/new/page";
 import { DashboardView } from "@/components/dashboard-view";
 import { InvestorView } from "@/components/investor-view";
@@ -415,7 +415,7 @@ const SCREENS: Record<string, { path: string; render: () => React.ReactNode }> =
   "settings-invitations": { path: "/settings", render: () => <Settings tab="invitations" /> },
   "settings-apps": { path: "/settings", render: () => <Settings tab="apps" /> },
   "settings-repositories": { path: "/settings", render: () => <Settings tab="repositories" /> },
-  connect: { path: "/connect", render: () => <ConnectPage /> },
+  connect: { path: "/docs/connect", render: () => <ConnectGuide /> },
   new: { path: "/new", render: () => <NewAppPage /> },
   app: { path: "/a1", render: () => <AppBuilder /> },
 };

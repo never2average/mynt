@@ -18,9 +18,8 @@
 // (lib/product-ideas.ts) instead of app ideas: a chip starts the chat with the idea as the first message, a
 // row's Use opens the sheet filled with the idea. A Build app message that clearly asks for a product
 // only offers the switch: what's sent in Build app is always a build.
-// Under the welcome, Recent lists the threads the user touched last (components/recent-threads.tsx,
-// lib/threads.ts): an app opens its page, a product chat comes back here in Create product with its
-// messages and drafts, a product opens the Products tab on it.
+// A product chat reopened from the sidebar or a link (?thread=, ?product=; lib/threads.ts) comes back here in
+// Create product with its messages and drafts; a product opens the Products tab on it.
 import { useChat } from "@ai-sdk/react"
 import { AssistantRuntimeProvider, useExternalStoreRuntime, type AppendMessage, type ThreadMessageLike } from "@assistant-ui/react"
 import { DefaultChatTransport, type ChatTransport, type UIMessage } from "ai"
@@ -31,9 +30,8 @@ import { Thread } from "@/components/assistant-ui/thread"
 import { ChatWelcome } from "@/components/chat-welcome"
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
 import { CreateProductSheet } from "@/components/create-product-sheet"
-import { RecentThreads } from "@/components/recent-threads"
 import { ChatSaver, listChats, loadChat, migrateLocalChats, newThreadId, sessionIdFor } from "@/lib/chat-sessions"
-import { announceThreads, mergeThreads, type AppThreadSource, type MyProduct, type OpenThreadDetail, type ProductChatRecord, type StudioThread } from "@/lib/threads"
+import { announceThreads, type AppThreadSource, type MyProduct, type OpenThreadDetail, type ProductChatRecord } from "@/lib/threads"
 import { EmptyRow, pagerOf } from "@/components/earn-view"
 import { COL, matches, PanelList, useFitRows, usePaged } from "@/components/list-layout"
 import { ModeToggle, ProductChat, type DraftCards } from "@/components/product-chat"
@@ -798,7 +796,7 @@ export function NewAppWorkspace({
   const productCommands = productModeCommands({ tab: open, buildApp: () => switchMode("build", { text: "" }) })
   const drafting = productChat.status === "submitted" || productChat.status === "streaming"
 
-  // ---- threads: Recent, View all, and reopening a product chat ----
+  // ---- threads: saving the product chat, and reopening one from the sidebar or a link ----
   // This product chat is kept on Mynt for the user (lib/chat-sessions.ts) from its first message, and
   // again whenever a reply settles or a draft of it is created. A save that fails is tried again; the
   // open chat is never lost for it.
@@ -849,10 +847,6 @@ export function NewAppWorkspace({
     setLocalMine((l) => [...l.filter((x) => x.id !== p.id), p])
     announceThreads({ products: true })
   }
-  const threads = useMemo(() => {
-    const mine = [...(myProducts ?? []).filter((p) => !localMine.some((l) => l.id === p.id)), ...localMine]
-    return mergeThreads(apps, chats, mine)
-  }, [apps, chats, myProducts, localMine])
   const [focus, setFocus] = useState<string | null>(null)
   // Reopens one of the user's product chats, read back from Mynt with the drafts it created (so none
   // is created twice). What it holds is already saved, so reopening it saves nothing.
@@ -881,13 +875,6 @@ export function NewAppWorkspace({
     setOpened(true)
     if (products?.some((p) => p.id === id && isPickable(p))) setPicked((p) => (p.includes(id) ? p : [...p, id]))
   }
-  const openThread = (t: StudioThread) => {
-    if (t.source === "app") {
-      if (onOpenApp) onOpenApp(t.href)
-      else if (typeof window !== "undefined") window.location.assign(t.href)
-    } else if (t.source === "chat") void restoreChat(t.id)
-    else focusProduct(t.id)
-  }
   // From the address (?thread=, ?product=) or the sidebar: once what it needs has loaded.
   const appliedOpen = useRef(0)
   useEffect(() => {
@@ -903,7 +890,6 @@ export function NewAppWorkspace({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openRequest?.n, historyOwner, products])
-  const recent = <RecentThreads threads={threads} onOpen={openThread} />
   const modeToggle = <ModeToggle mode={mode} onMode={(m) => switchMode(m)} />
   // Build app: what's typed clearly asks for a product, so Create product is offered (never switched to unasked).
   const suggestProduct = mode === "build" && !busy && !error && asksForProduct(text)
@@ -978,7 +964,7 @@ export function NewAppWorkspace({
               <Thread
                 welcome={
                   <ChatWelcome title={WELCOME_TITLE}>
-                    {recent}
+                    
                     {chips}
                   </ChatWelcome>
                 }
@@ -1015,7 +1001,7 @@ export function NewAppWorkspace({
                 cards={cards}
                 welcome={
                   <ChatWelcome title={PRODUCT_WELCOME_TITLE}>
-                    {recent}
+                    
                     {productChips}
                   </ChatWelcome>
                 }
