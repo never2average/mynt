@@ -129,7 +129,7 @@ describe("the routes", () => {
     fake.reply.list_my_licenses = { licences: [{ id: "l1", license_id: "money-transmitter", registration_number: "123", jurisdiction: "us-ny" }] };
     const body = await (await listRoute.GET()).json();
     expect(body.configured).toBe(false);
-    expect(body.agreements[0].app).toBe("Pay app");
+    expect(body.agreements[0].appName).toBe("Pay app");
     expect(body.licences).toEqual([{ id: "l1", label: "money-transmitter · 123 · us-ny" }]);
     expect(fake.calls.find((c) => c.name === "list_app_agreements")?.args).toEqual({});
     fake.session = session(["developer"]);

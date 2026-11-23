@@ -328,7 +328,7 @@ export function FirmAgreementsView({ data, onChanged, fetcher = (...a) => fetch(
               <TableBody>
                 {data.agreements.map((a) => (
                   <TableRow key={a.id} data-firm-agreement={a.id} data-status={a.statusKey}>
-                    <TableCell className="whitespace-normal font-medium">{a.app}</TableCell>
+                    <TableCell className="whitespace-normal font-medium">{a.appName}</TableCell>
                     <TableCell>{a.kind}</TableCell>
                     <TableCell className="whitespace-normal">
                       {a.status}

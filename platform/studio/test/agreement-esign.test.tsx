@@ -71,7 +71,7 @@ describe("reading Mynt's replies", () => {
     expect(t.configured).toBe(true);
     expect(t.templates[0]).toMatchObject({ name: "Program", version: 2, attachedTo: "A licence", file: "p.pdf", active: true });
     const rows = fromFirmAgreements({ agreements: [programRow()] })!;
-    expect(rows[0]).toMatchObject({ app: "Pay app", status: "Accepted: waiting for signatures", products: ["Card"] });
+    expect(rows[0]).toMatchObject({ appName: "Pay app", status: "Accepted: waiting for signatures", products: ["Card"] });
     expect(rows[0].signatures).toBe("You haven't signed; they signed (test mode)");
     expect(canSign("accepted", rows[0].esign, "counterparty")).toBe(true);
     expect(canSign("accepted", rows[0].esign, "app")).toBe(false);

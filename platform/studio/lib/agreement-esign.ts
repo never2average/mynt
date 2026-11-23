@@ -106,7 +106,7 @@ const STATUS: Record<string, string> = {
 
 export type FirmAgreementRow = {
   id: string;
-  app: string;
+  appName: string;
   kind: string;
   status: string;
   statusKey: string;
@@ -128,7 +128,7 @@ export function fromFirmAgreements(reply: unknown): FirmAgreementRow[] | null {
       return [
         {
           id,
-          app: (isObj(a.app) ? str(a.app.name) : null) ?? "An app",
+          appName: (isObj(a["app"]) ? str((a["app"] as Record<string, unknown>).name) : null) ?? "An app",
           kind: a.kind === "program" ? "Program agreement" : a.kind === "vendor" ? "Vendor contract" : a.kind === "data_sharing" ? "Data sharing" : "Agreement",
           status: STATUS[statusKey] ?? statusKey,
           statusKey,
