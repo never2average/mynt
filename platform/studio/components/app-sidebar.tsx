@@ -1,7 +1,8 @@
 "use client"
 
 // The studio's sidebar, laid out as shadcn/ui's sidebar-07 block (MIT), collapsible to icons:
-// the workspace switcher at the top, Dashboard, Licences (with Coverage as a tab), Audits and Workspace (its
+// the workspace switcher at the top, Dashboard, Licences (with Coverage as a tab), Marketplace (service providers'
+// standard services), Audits and Workspace (its
 // members, invitations, apps and settings), the workspace's apps in three folders by stage
 // (Production, Staging, Ideas: a rocket, a flask and a lightbulb) together with the user's financial
 // products, which go through the same stages, and the signed-in account at the foot, its Log out an icon
@@ -13,7 +14,7 @@
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
-import { Coins, FileBadge, History, LayoutDashboard, Settings } from "lucide-react"
+import { Blocks, Coins, FileBadge, History, LayoutDashboard, Settings } from "lucide-react"
 
 import { NavFolders } from "@/components/nav-folders"
 import { NavUser } from "@/components/nav-user"
@@ -45,6 +46,8 @@ type Account = { name: string | null; email: string | null }
 const PAGES = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/licences", label: "Licences", icon: FileBadge },
+  // Service providers' standard services, subscribed to by accepting their standard terms.
+  { href: "/marketplace", label: "Marketplace", icon: Blocks },
   { href: "/audits", label: "Audits", icon: History },
   { href: "/settings", label: "Settings", icon: Settings },
 ] as const

@@ -11,12 +11,14 @@
 // sections with headings, tables in a bordered box, and a View all row under a preview of a list.
 import { useCallback, useEffect, useRef, useState } from "react"
 import Link from "next/link"
-import { ChevronRight, FilePlus2, RefreshCw, Users } from "lucide-react"
+import { Blocks, ChevronRight, FilePlus2, RefreshCw, Users } from "lucide-react"
 
 import { KpiRow } from "@/components/charts"
 import { Panel, Section } from "@/components/dashboard-panels"
 import { PnlChart } from "@/components/pnl"
 import { AgreementActionButtons, AgreementActionSheet, ChoosePersonasSheet, ProgramCoverage, ProposeAgreementSheet } from "@/components/app-agreement-sheets"
+import { EndSubscriptionSheet } from "@/components/end-subscription-sheet"
+import { marketplaceHref } from "@/lib/marketplace"
 import { StageMark, StatusDot } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -42,6 +44,7 @@ import {
   type InfoTab,
   type PanelEvent,
   type TabData,
+  type VendorContractRow,
 } from "@/lib/app-panel"
 import { deltaOf, type Kpi } from "@/lib/dashboard-visual"
 import { CHECK_LABELS, CHECK_TONE } from "@/lib/promotions"
@@ -344,6 +347,7 @@ const dates = (from: string | null, to: string | null) => (from || to ? `${from 
 // introductions in progress. Status is always in words. Propose agreement is a labelled action.
 export function AgreementsTabView({ appId, data, onChanged }: { appId: string; data: AppAgreements; onChanged?: () => void }) {
   const [proposing, setProposing] = useState(false)
+  const [ending, setEnding] = useState<VendorContractRow | null>(null)
   const [acting, setActing] = useState<{ action: AgreementAction; row: AgreementRow } | null>(null)
   const coverage = data.coverage ?? []
   return (
@@ -414,7 +418,18 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
           <Quiet>No agreements yet.{data.canManage ? " Propose one to a firm sponsoring this app's products." : ""}</Quiet>
         )}
       </Section>
-      <Section id="app-vendor-contracts" title="Vendor contracts" description="The vendor services this app's workspace subscribes to.">
+      <Section
+        id="app-vendor-contracts"
+        title="Vendor contracts"
+        description="The service providers this app's workspace subscribes to, under their standard terms."
+        action={
+          <Button size="sm" variant="outline" asChild data-browse-vendors>
+            <Link href={marketplaceHref(appId)}>
+              <Blocks /> Browse vendors
+            </Link>
+          </Button>
+        }
+      >
         {data.vendorContracts.length ? (
           <TableBox>
             <Table>
@@ -424,7 +439,9 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
                   <TableHead>Kind</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Service</TableHead>
+                  <TableHead>Terms</TableHead>
                   <TableHead>Since</TableHead>
+                  {data.canManage && <TableHead>Actions</TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -434,14 +451,24 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
                     <TableCell>Vendor subscription</TableCell>
                     <TableCell>Active ({v.environment})</TableCell>
                     <TableCell className="whitespace-normal">{v.offering}</TableCell>
+                    <TableCell className="whitespace-normal" data-vendor-terms={v.termsVersion ?? (v.noStandardTerms ? "none" : "other-app")}>
+                      {v.termsVersion !== null ? `Standard terms v${v.termsVersion}` : v.noStandardTerms ? "No standard terms on file" : "Accepted for another app"}
+                    </TableCell>
                     <TableCell className="text-xs whitespace-nowrap tabular-nums">{when(v.since)}</TableCell>
+                    {data.canManage && (
+                      <TableCell>
+                        <Button size="sm" variant="outline" onClick={() => setEnding(v)} data-end-subscription={v.id}>
+                          End subscription
+                        </Button>
+                      </TableCell>
+                    )}
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
           </TableBox>
         ) : (
-          <Quiet>No vendor services subscribed.</Quiet>
+          <Quiet>No vendor services subscribed. Browse vendors to subscribe to a service provider&apos;s standard terms.</Quiet>
         )}
       </Section>
       <Section id="app-introductions" title="Introductions in progress" description="From Mynt's business-development agent: the other side is named once both have said yes.">
@@ -475,6 +502,7 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
         )}
       </Section>
       {data.canManage && <ProposeAgreementSheet appId={appId} data={data} open={proposing} onClose={() => setProposing(false)} onDone={() => onChanged?.()} />}
+      {data.canManage && <EndSubscriptionSheet contract={ending} onClose={() => setEnding(null)} onDone={() => onChanged?.()} />}
       {data.canManage && (
         <AgreementActionSheet
           url={acting ? `/api/apps/${encodeURIComponent(appId)}/agreements/${encodeURIComponent(acting.row.id)}` : ""}

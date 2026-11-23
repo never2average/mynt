@@ -173,6 +173,28 @@ export const STUDIO_TOOLS = {
       effective_to: auditDate.optional(),
     })
     .strict(),
+  // The Marketplace (/marketplace): service providers' standard services under their standard terms, subscribed to
+  // by accepting the current version for the apps it's for (click-through only: the studio never subscribes
+  // without terms), and ending a subscription (the app's Agreements tab's End subscription). A test credential
+  // goes to Mynt's key vault and is never read back; live credentials and going live stay with the MCP tools.
+  list_vendor_offerings: z
+    .object({
+      region: z.string().regex(/^[A-Z]{2}$/).optional(),
+      service_type: z.string().regex(/^[a-z][a-z0-9_]{0,59}$/).optional(),
+      category: z.enum(["identity", "kyc", "account_data", "analytics", "credit_bureau", "documents", "esign", "mandate", "fraud", "ramp", "other"]).optional(),
+    })
+    .strict(),
+  subscribe_vendor_service: z
+    .object({
+      offering_id: uuid,
+      accept_terms_version: z.number().int().min(1).max(1_000_000),
+      app_ids: z.array(uuid).min(1).max(20),
+      products: z.array(id).max(20).optional(),
+      test_credential: z.string().min(1).max(2000).optional(),
+      credential_label: z.string().trim().min(1).max(100).optional(),
+    })
+    .strict(),
+  unsubscribe_vendor_service: z.object({ subscription_id: uuid, reason: z.string().trim().min(3).max(2000).optional() }).strict(),
   get_app_customers: z.object({ app_id: id }).strict(),
   set_app_target_segments: z.object({ app_id: id, segments: z.array(z.object({ product_id: id, segment_id: id }).strict()).max(100) }).strict(),
   // Compliance pages (read-only): Coverage, Licences and Audits, for the selected workspace
