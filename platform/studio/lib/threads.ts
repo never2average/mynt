@@ -53,7 +53,8 @@ export const chatCreated = (c: Pick<ThreadSummary, "metadata">) => Array.isArray
 
 // ---- the list ----
 
-export const appHref = (id: string) => `/${encodeURIComponent(id)}`;
+// An app's page; with a build, that build's conversation (the app's builder chat as it was left).
+export const appHref = (id: string, conversationId?: string | null) => `/${encodeURIComponent(id)}${conversationId ? `/${encodeURIComponent(conversationId)}` : ""}`;
 export const chatHref = (id: string) => `/new?thread=${encodeURIComponent(id)}`;
 export const productHref = (id: string) => `/new?product=${encodeURIComponent(id)}`;
 

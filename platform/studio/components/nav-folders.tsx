@@ -8,8 +8,9 @@
 // and the open one can't be closed to none. It starts at the stage of the app on screen, else the
 // last one picked (remembered in this browser), else Production. Collapsed to icons, the three
 // icons stay, the open folder's marked as selected, and clicking one picks it and expands the
-// sidebar to show its items. An app opens its workspace view; a product opens the Build page's
-// Products tab on it (in place when that page is open).
+// sidebar to show its items. An app opens its workspace view on its newest build's conversation; a
+// product opens the Build page on the product chat that made it, with the product in the Products tab
+// (in place when that page is open, the one already open included). The item on screen is marked active.
 import Link from "next/link"
 import { useEffect, useState } from "react"
 import { AppWindow, ChevronRight, FlaskConical, Landmark, Lightbulb, Rocket, type LucideIcon } from "lucide-react"
@@ -60,25 +61,33 @@ function remember(stage: Stage) {
   }
 }
 
-/** The folder to open: the open app's stage, else the one remembered, else Production. */
-export function initialFolder(groups: Record<Stage, StagedApp[]> | null, activeAppId: string | undefined, saved: Stage | null): Stage {
-  const own = activeAppId && groups ? STAGES.find((s) => groups[s].some((a) => (a.kind ?? "app") === "app" && a.id === activeAppId)) : undefined
-  return own ?? saved ?? "production"
+// The stage of the app or product on screen, if it's in the folders.
+function stageOf(groups: Record<Stage, StagedApp[]> | null, activeAppId: string | undefined, activeProductId: string | undefined): Stage | undefined {
+  if (!groups) return undefined
+  const isActive = (a: StagedApp) => ((a.kind ?? "app") === "app" ? Boolean(activeAppId) && a.id === activeAppId : Boolean(activeProductId) && a.id === activeProductId)
+  return STAGES.find((s) => groups[s].some(isActive))
+}
+
+/** The folder to open: the open app's (or product's) stage, else the one remembered, else Production. */
+export function initialFolder(groups: Record<Stage, StagedApp[]> | null, activeAppId: string | undefined, saved: Stage | null, activeProductId?: string): Stage {
+  return stageOf(groups, activeAppId, activeProductId) ?? saved ?? "production"
 }
 
 export function NavFolders({
   groups,
   activeAppId,
+  activeProductId,
 }: {
   groups: Record<Stage, StagedApp[]> | null // null while loading
   activeAppId?: string
+  activeProductId?: string // the product open on the Build page (?product=, or picked here)
 }) {
   const { state, setOpen } = useSidebar()
   const collapsed = state === "collapsed"
-  const [active, setActive] = useState<Stage>(() => initialFolder(groups, activeAppId, null))
+  const [active, setActive] = useState<Stage>(() => initialFolder(groups, activeAppId, null, activeProductId))
 
-  // After mounting (localStorage is the browser's), and whenever another app is opened: its stage.
-  const appStage = activeAppId && groups ? STAGES.find((s) => groups[s].some((a) => (a.kind ?? "app") === "app" && a.id === activeAppId)) : undefined
+  // After mounting (localStorage is the browser's), and whenever another app or product is opened: its stage.
+  const appStage = stageOf(groups, activeAppId, activeProductId)
   useEffect(() => {
     setActive((current) => appStage ?? remembered() ?? current)
   }, [appStage])
@@ -137,9 +146,9 @@ export function NavFolders({
                       const label = THREAD_KIND_LABELS[kind]
                       return (
                         <SidebarMenuSubItem key={`${kind}:${item.id}`}>
-                          <SidebarMenuSubButton asChild isActive={kind === "app" && item.id === activeAppId}>
+                          <SidebarMenuSubButton asChild isActive={kind === "app" ? item.id === activeAppId : item.id === activeProductId}>
                             <Link
-                              href={kind === "app" ? appHref(item.id) : productHref(item.id)}
+                              href={kind === "app" ? appHref(item.id, item.conversationId) : productHref(item.id)}
                               aria-label={`${label}: ${item.name}`}
                               title={`${label} · ${APP_STATUS[stage]}`}
                               onClick={kind === "product" ? () => openThreadInPlace({ product: item.id }) : undefined}

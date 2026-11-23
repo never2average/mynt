@@ -34,7 +34,7 @@ import {
 import type { Invitation } from "@/lib/invitations"
 import { hasLiquidity } from "@/lib/liquidity"
 import { useStudioAccess } from "@/lib/use-liquidity-access"
-import { myProductsFrom, THREADS_UPDATED, type MyProduct, type ThreadsUpdatedDetail } from "@/lib/threads"
+import { myProductsFrom, OPEN_THREAD, openFromSearch, THREADS_UPDATED, type MyProduct, type OpenThreadDetail, type ThreadsUpdatedDetail } from "@/lib/threads"
 import { productStageOf } from "@/lib/products"
 import { groupByStage, STAGES, withWorkspace, type Stage, type StagedApp, type Workspace } from "@/lib/workspaces"
 
@@ -66,6 +66,7 @@ export type SidebarViewProps = {
   developer?: boolean // false: only Dashboard (and Earn for liquidity providers); no workspaces or apps
   workspaceSettings?: WorkspaceSettings // the switcher's Rename / Archive / Unarchive workspace
   products?: MyProduct[] | null // the user's own financial products, in the stage folders with the apps (null while loading)
+  activeProductId?: string // the product open on the Build page, marked in its folder
 }
 
 // The folders' items: the workspace's apps and the user's products, each in its stage.
@@ -76,7 +77,7 @@ export function stagedItems(groups: Record<Stage, StagedApp[]> | null, products:
 }
 
 // What the sidebar shows, from its data; rendered on the server by the tests.
-export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, workspaceSettings, products = null, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
+export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, workspaceSettings, products = null, activeProductId, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
   const appId = pathname.split("/").filter(Boolean)[0]
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -107,7 +108,7 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
             ))}
           </SidebarMenu>
         </SidebarGroup>
-        {developer && <NavFolders groups={stagedItems(groups, products)} activeAppId={appId} />}
+        {developer && <NavFolders groups={stagedItems(groups, products)} activeAppId={appId} activeProductId={pathname === "/new" ? activeProductId : undefined} />}
       </SidebarContent>
       <SidebarFooter>
         <NavUser user={account} />
@@ -131,8 +132,9 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const loadApps = useCallback(async () => {
     if (developer) try {
       const res = await fetch(withWorkspace("/api/projects", selected), { cache: "no-store" })
-      const data = (await res.json().catch(() => null)) as { projects?: StagedApp[] } | null
-      setGroups(groupByStage(res.ok ? (data?.projects ?? []).map((p) => ({ id: p.id, name: p.name, stage: p.stage })) : []))
+      const data = (await res.json().catch(() => null)) as { projects?: (StagedApp & { conversations?: { id: string }[] })[] } | null
+      // Each app with its newest build (conversations come newest first), which the sidebar opens.
+      setGroups(groupByStage(res.ok ? (data?.projects ?? []).map((p) => ({ id: p.id, name: p.name, stage: p.stage, conversationId: p.conversations?.[0]?.id ?? null })) : []))
     } catch {
       setGroups(groupByStage([]))
     }
@@ -169,6 +171,24 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
     }
   }, [developer])
 
+  // The product open on the Build page: from its address (?product=) when the page changes, and from
+  // the folders' in-place opens (the address may not have changed: the Build page was already open).
+  const [activeProductId, setActiveProductId] = useState<string | undefined>(undefined)
+  useEffect(() => {
+    // A click here (the event below) may come before the address has changed: it's kept until the address says otherwise.
+    const fromAddress = openFromSearch(window.location.search)?.product
+    setActiveProductId((picked) => (pathname === "/new" ? (fromAddress ?? picked) : undefined))
+  }, [pathname])
+  useEffect(() => {
+    const open = (e: Event) => {
+      const detail = (e as CustomEvent<OpenThreadDetail>).detail
+      if (detail?.product) setActiveProductId(detail.product)
+      else if (detail?.thread) setActiveProductId(undefined)
+    }
+    window.addEventListener(OPEN_THREAD, open)
+    return () => window.removeEventListener(OPEN_THREAD, open)
+  }, [])
+
   const create = useCallback(
     async (name: string) => {
       const res = await fetch("/api/workspaces", {
@@ -202,6 +222,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       developer={access ? developer : true}
       workspaceSettings={workspaceSettings}
       products={products}
+      activeProductId={activeProductId}
     />
   )
 }

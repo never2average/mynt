@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { readCapped, TOO_LARGE } from "@/lib/ai-route";
-import { ChatKindSchema, SaveRequest } from "@/lib/chat-sessions";
+import { ChatKindSchema, LIST_LIMIT_MAX, SaveRequest } from "@/lib/chat-sessions";
 import { asChatUser } from "@/lib/chat-sessions-server";
 import { fromOwnOrigin } from "@/lib/session";
 import { callStudioTool } from "@/lib/studio-server";
@@ -13,14 +13,17 @@ export const MAX_BODY_BYTES = 1024 * 1024;
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 // The signed-in user's own chats of a kind (?kind=product|earn), newest first, without their messages
-// (list_chat_sessions); ?q= keeps those whose title or words match, each with the words around the match.
+// (list_chat_sessions); ?limit= caps how many; ?q= keeps those whose title or words match, each with the words around the match.
 export async function GET(req: NextRequest) {
   if (!fromOwnOrigin(req)) return json({ error: "forbidden" }, 403);
   const kind = ChatKindSchema.safeParse(req.nextUrl.searchParams.get("kind"));
   if (!kind.success) return json({ error: "bad_request", message: "Say which chats: kind=product or kind=earn." }, 400);
   const query = req.nextUrl.searchParams.get("q")?.trim().slice(0, 200) || undefined;
+  // ?limit= (1 to 200): how many at most; Mynt's default (50) without it.
+  const asked = Number(req.nextUrl.searchParams.get("limit") ?? NaN);
+  const limit = Number.isInteger(asked) && asked >= 1 ? Math.min(LIST_LIMIT_MAX, asked) : undefined;
   return asChatUser("listing chats", async (mynt) => {
-    const reply = await callStudioTool(mynt, "list_chat_sessions", { kind: kind.data, ...(query ? { query } : {}) });
+    const reply = await callStudioTool(mynt, "list_chat_sessions", { kind: kind.data, ...(query ? { query } : {}), ...(limit ? { limit } : {}) });
     const sessions = isObj(reply) && Array.isArray(reply.sessions) ? reply.sessions : [];
     return json({
       threads: sessions.filter(isObj).map((s) => ({

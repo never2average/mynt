@@ -81,6 +81,15 @@ describe("the chat routes", () => {
     expect((await listRoute.GET(getReq("/api/threads?kind=other"))).status).toBe(400);
   });
 
+  it("?limit= asks Mynt for up to that many (200 at most); anything else is Mynt's default", async () => {
+    await listRoute.GET(getReq("/api/threads?kind=product&limit=200"));
+    await listRoute.GET(getReq("/api/threads?kind=product&limit=5000"));
+    await listRoute.GET(getReq("/api/threads?kind=product&limit=abc"));
+    await listRoute.GET(getReq("/api/threads?kind=product&limit=0"));
+    expect(called("list_chat_sessions").map((c) => c.args)).toEqual([{ kind: "product", limit: 200 }, { kind: "product", limit: 200 }, { kind: "product" }, { kind: "product" }]);
+    for (const c of fake.calls) expect(parseStudioCall(c.name, c.args)).not.toHaveProperty("error");
+  });
+
   it("save: starts the session (or finds it), then appends the events, as the user", async () => {
     const body = { id: ID, kind: "earn", title: "Park $500", events: [message("u1", "user", "Park $500"), { type: "outcome", client_id: "o:d1:k", payload: { draft_id: "d1", key: "key-1234567", sent: null } }] };
     const res = await listRoute.POST(req("/api/threads", "POST", body));

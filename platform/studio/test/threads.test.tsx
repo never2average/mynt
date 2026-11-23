@@ -162,7 +162,7 @@ function fakeTransport(sent: string[]): ChatTransport<UIMessage> {
 const settle = async (ms = 30) => act(async () => void (await new Promise((r) => setTimeout(r, ms))));
 const modeOf = () => document.querySelector("[data-new-app-chat]")!.getAttribute("data-mode");
 
-function workspace(opts: { onOpenApp?: (href: string) => void; sent?: string[]; openRequest?: { thread?: string; product?: string; n: number } } = {}) {
+function workspace(opts: { onOpenApp?: (href: string) => void; sent?: string[]; openRequest?: { thread?: string; product?: string; n: number }; owner?: string | null } = {}) {
   return (
     <NewAppWorkspace
       products={PRODUCTS}
@@ -172,7 +172,7 @@ function workspace(opts: { onOpenApp?: (href: string) => void; sent?: string[]; 
       transport={fakeTransport(opts.sent ?? [])}
       apps={APPS}
       myProducts={MINE}
-      historyOwner={OWNER}
+      historyOwner={opts.owner === undefined ? OWNER : opts.owner}
       onOpenApp={opts.onOpenApp}
       openRequest={opts.openRequest ?? null}
     />
@@ -240,6 +240,76 @@ describe("threads on the Build page", () => {
       [2, "message", "assistant"],
     ]);
   });
+
+  // The hashed key only ever keyed this browser's old copies (and /api/products may not answer with it):
+  // Mynt knows the user from the session, so saving and reopening never wait on it.
+  it("without the browser's hashed key, a product chat is still saved, and a ?thread= still opens", async () => {
+    const sent: string[] = [];
+    seedChats();
+    render(workspace({ sent, owner: null, openRequest: { thread: C2, n: 1 } }));
+    await settle(60);
+    expect(modeOf()).toBe("product");
+    expect(screen.getByText("About A card for students")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Message input"), { target: { value: "Lower the fee" } });
+    await act(async () => void fireEvent.keyDown(screen.getByLabelText("Message input"), { key: "Enter" }));
+    await settle(100);
+    expect(sent).toEqual(["Lower the fee"]);
+    expect(server.posts.length).toBeGreaterThan(0);
+    expect(server.list("product").find((c) => c.id === C2)!.messages.map((m) => m.parts[0].type === "text" && m.parts[0].text)).toEqual(["A card for students", "About A card for students", "Lower the fee", "What should it be called?"]);
+  });
+
+  it("a product picked opens the product chat that created it, with its messages, and shows the product", async () => {
+    seedChats();
+    render(workspace({ owner: null, openRequest: { product: "student-card", n: 1 } }));
+    await settle(60);
+    expect(modeOf()).toBe("product");
+    expect(screen.getByText("About A card for students")).toBeTruthy();
+    expect(screen.queryByText("About A green savings account")).toBeNull();
+    expect(document.querySelector('[data-panel-tab][aria-selected="true"]')?.getAttribute("data-panel-tab")).toBe("products");
+    // Opening it saves nothing.
+    expect(server.posts).toEqual([]);
+  });
+
+  it("a product with no chat (made by hand) opens a new product chat with 'Continue with' and its name in the composer", async () => {
+    seedChats();
+    render(workspace({ owner: null, openRequest: { product: "green-savings", n: 1 } }));
+    await settle(60);
+    expect(modeOf()).toBe("product");
+    expect((screen.getByLabelText("Message input") as HTMLTextAreaElement).value).toBe("Continue with Green Savings: ");
+    expect(screen.queryByText("About A card for students")).toBeNull();
+    const row = document.querySelector('[data-product-row="green-savings"]') as HTMLElement;
+    expect(row.getAttribute("data-focused")).toBe("true");
+  });
+
+  it("from the sidebar while the page is open: a second product right after the first, then the open one again, each opens", async () => {
+    seedChats();
+    server.seed("product", { id: uuid("c3"), title: "Dollar account chat", updatedAt: "2026-11-22T12:00:00Z", messages: msgsOf("c3", "A dollar account"), outcomes: { d9: { product_id: "dollar-account" } }, metadata: { product_ids: ["dollar-account"] } });
+    const { rerender } = render(workspace({ owner: null, openRequest: { product: "student-card", n: 1 } }));
+    // The second click comes before the first has finished opening: the second wins.
+    rerender(workspace({ owner: null, openRequest: { product: "dollar-account", n: 2 } }));
+    await settle(80);
+    expect(screen.getByText("About A dollar account")).toBeTruthy();
+    expect(screen.queryByText("About A card for students")).toBeNull();
+    rerender(workspace({ owner: null, openRequest: { product: "student-card", n: 3 } }));
+    await settle(60);
+    expect(screen.getByText("About A card for students")).toBeTruthy();
+    // The one already open, clicked again, is read back again (Mynt's copy may have moved on in another tab).
+    server.seed("product", { id: C2, title: "A card for students", updatedAt: "2026-11-23T12:00:00Z", messages: [...msgsOf("c2", "A card for students"), ...msgsOf("c2b", "Add a cashback")], outcomes: { "draft-1": { product_id: "student-card" } }, metadata: { product_ids: ["student-card"] } });
+    rerender(workspace({ owner: null, openRequest: { product: "student-card", n: 4 } }));
+    await settle(60);
+    expect(screen.getByText("About Add a cashback")).toBeTruthy();
+  });
+
+  it("a product chat that can't be read says so in the chat", async () => {
+    seedChats();
+    server.state.down = true;
+    render(workspace({ owner: null, openRequest: { thread: C1, n: 1 } }));
+    await settle(60);
+    expect(modeOf()).toBe("product");
+    const alert = document.querySelector("[data-thread-error]")!;
+    expect(alert.getAttribute("role")).toBe("alert");
+    expect(alert.textContent).toBe("Couldn't open that conversation. Try again.");
+  });
 });
 
 // ---- saving to Mynt, and the chats an older studio kept in this browser ----
@@ -279,6 +349,32 @@ describe("product chats on Mynt", () => {
     await settle(20);
     expect(server.posts).toHaveLength(1);
     expect(saver.isPending(C1)).toBe(false);
+    saver.dispose();
+  });
+
+  it("a refusal is told to the page; a 401 or 403 (signed out, roles being read again) is tried again, not given up on", async () => {
+    const refused: string[] = [];
+    let status = 403;
+    const posts: string[] = [];
+    const fetcher = (async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") posts.push(url);
+      return status === 200 ? server.fetcher(url, init) : new Response(JSON.stringify({ error: "x" }), { status });
+    }) as typeof fetch;
+    const saver = new ChatSaver("product", { fetcher, onRefused: (id) => refused.push(id) });
+    saver.save(C1, snap(1), { now: true });
+    await act(async () => void (await saver.flush()));
+    expect(saver.isPending(C1)).toBe(true);
+    status = 401;
+    await act(async () => void (await saver.flush()));
+    expect(saver.isPending(C1)).toBe(true);
+    status = 200;
+    await act(async () => void (await saver.flush()));
+    expect(server.list("product").map((c) => c.id)).toEqual([C1]);
+    expect(refused).toEqual([]);
+    status = 422;
+    saver.save(C2, snap(1), { now: true });
+    await act(async () => void (await saver.flush()));
+    expect(refused).toEqual([C2]);
     saver.dispose();
   });
 
@@ -369,6 +465,22 @@ describe("the sidebar's threads", () => {
     window.removeEventListener("mynt:open-thread", listen);
     document.removeEventListener("click", stay);
     expect(seen).toEqual([{ product: "green-savings" }]);
+  });
+
+  it("an app opens its newest build's conversation; the app or product on screen is marked active, in its folder", () => {
+    window.localStorage.setItem("mynt_studio_folder", "staging");
+    const withBuilds = groupByStage(APPS.map(({ id, name, stage }) => ({ id, name, stage, conversationId: id === "app-2" ? "build-9" : null })));
+    const { unmount } = render(withSidebar(<NavFolders groups={stagedItems(withBuilds, MINE)} activeProductId="green-savings" />));
+    // The product's folder (Ideas) is the one open, though Staging was remembered.
+    const product = screen.getByRole("link", { name: "Financial product: Green Savings" });
+    expect(product.getAttribute("data-active")).toBe("true");
+    const app = screen.getByRole("link", { name: "App: Rent ready" });
+    expect(app.getAttribute("href")).toBe("/app-2/build-9");
+    expect(app.getAttribute("data-active")).toBe("false");
+    unmount();
+    render(withSidebar(<NavFolders groups={stagedItems(withBuilds, MINE)} activeAppId="app-2" />));
+    expect(screen.getByRole("link", { name: "App: Rent ready" }).getAttribute("data-active")).toBe("true");
+    expect(screen.getByRole("link", { name: "Financial product: Green Savings" }).getAttribute("data-active")).toBe("false");
   });
 
   it("collapsed: the three folder icons stay; clicking one expands the sidebar on its apps and products", async () => {
