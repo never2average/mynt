@@ -33,24 +33,18 @@ describe("connect your agent", () => {
     }
   });
 
-  it("the plug button opens the docs' Connect your agent page; /connect sends old links there", async () => {
+  it("the plug button opens /connect, where the docs' Connect your agent page is served; /docs/connect sends people there", async () => {
     render(<TooltipProvider><ConnectAgentButton /></TooltipProvider>);
     const button = document.querySelector("[data-connect-agent-open]")!;
-    expect(button.getAttribute("href")).toBe("/docs/connect");
+    expect(button.getAttribute("href")).toBe("/connect");
     expect(button.getAttribute("aria-label")).toBe("Connect your agent");
-    const { default: ConnectPage } = await import("@/app/(studio)/connect/page");
-    let thrown: unknown;
-    try {
-      ConnectPage();
-    } catch (e) {
-      thrown = e;
-    }
-    // next/navigation's redirect throws, carrying where it goes.
-    expect(String((thrown as { digest?: string })?.digest ?? thrown)).toContain("/docs/connect");
-    // Before the sign-in check too: Next's config redirects run ahead of the proxy, so signed-out visitors land
-    // on the public docs page instead of the login.
-    const { STUDIO_REDIRECTS } = await import("@/lib/redirects");
-    expect(STUDIO_REDIRECTS).toContainEqual({ source: "/connect", destination: "/docs/connect", permanent: false });
+    // Ahead of the file routes and the sign-in check (next.config.ts): /connect shows the docs' page at its own
+    // address, and the docs' address redirects to it.
+    const { STUDIO_REDIRECTS, STUDIO_REWRITES } = await import("@/lib/redirects");
+    expect(STUDIO_REWRITES).toContainEqual({ source: "/connect", destination: "/docs/connect" });
+    expect(STUDIO_REDIRECTS).toContainEqual({ source: "/docs/connect", destination: "/connect", permanent: false });
+    const { pageNeedsSignIn } = await import("@/lib/page-gate");
+    expect(pageNeedsSignIn("/connect")).toBe(false);
   });
 
   it("picks the agent with the studio's line tabs", async () => {

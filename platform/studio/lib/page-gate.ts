@@ -6,7 +6,8 @@
 export const OPEN_PAGES = new Set(["/signin-error", "/signed-out"]);
 
 // Mynt's docs (/docs and every page under it, app/docs): public, for anyone deciding whether to build on Mynt.
-export const isDocsPath = (pathname: string) => pathname === "/docs" || pathname.startsWith("/docs/");
+// /connect is the docs' Connect your agent page at its own address.
+export const isDocsPath = (pathname: string) => pathname === "/docs" || pathname.startsWith("/docs/") || pathname === "/connect";
 
 // The brand files Next serves from app/ (icon.tsx, apple-icon.tsx, opengraph-image.tsx,
 // manifest.ts), which the signed-out pages, browsers and link previews fetch without a sign-in.

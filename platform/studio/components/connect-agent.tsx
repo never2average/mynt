@@ -152,7 +152,7 @@ export function ConnectAgentButton() {
     <Tooltip>
       <TooltipTrigger asChild>
         <Button asChild variant="outline" size="icon" className="size-8 shrink-0 p-0">
-          <Link href="/docs/connect" aria-label="Connect your agent" data-connect-agent-open>
+          <Link href="/connect" aria-label="Connect your agent" data-connect-agent-open>
             <Plug />
           </Link>
         </Button>

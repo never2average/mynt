@@ -415,7 +415,7 @@ const SCREENS: Record<string, { path: string; render: () => React.ReactNode }> =
   "settings-invitations": { path: "/settings", render: () => <Settings tab="invitations" /> },
   "settings-apps": { path: "/settings", render: () => <Settings tab="apps" /> },
   "settings-repositories": { path: "/settings", render: () => <Settings tab="repositories" /> },
-  connect: { path: "/docs/connect", render: () => <ConnectGuide /> },
+  connect: { path: "/connect", render: () => <ConnectGuide /> },
   new: { path: "/new", render: () => <NewAppPage /> },
   app: { path: "/a1", render: () => <AppBuilder /> },
 };
