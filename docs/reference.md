@@ -1276,17 +1276,30 @@ Where e-signature is configured, a program agreement is signed on the licence pr
 
 `list_app_agreements` shows each program agreement's `signed_by_esignature` and `signature_document` (its status, test mode, template, whether each side has signed, the signed copy's hashes). Every step is audited, in the obligations class: `upload_agreement_template`, `retire_agreement_template`, `esign_document_created`, `esign_document_failed`, `open_agreement_signing`, `esign_signer_signed`, `esign_completed`, `esign_declined`, `esign_canceled`, `esign_expired`, `download_agreement_document`.
 
-**Settings** (names only; values live in the server's environment file):
+**Setting it up (admins, in Mynt Studio).** Nobody edits the server's environment. A Mynt admin opens **Settings → E-signature** and does the rest there.
+
+1. Picks the service (`signwell`), pastes its API key into the password field and presses **Check and save key**. Mynt checks the key with a cheap authenticated read of the key's own account. A key the service refuses isn't kept. An accepted key is sealed under `MYNT_VAULT_KEY` in Mynt's database (`platform_secrets`, one row per key). It's never returned, shown or logged: the section shows only "Key set on <date> by <admin>".
+2. Mynt then registers the service's webhook to `<PUBLIC_URL>/esign/webhook`, reusing one already pointing there, and seals the webhook's id the same way. The service signs its events with that id (HMAC-SHA256 of the event's `type@time`). **Re-register webhook** does this again. Without an https `PUBLIC_URL` the key is kept, and the section says the webhook waits for one.
+3. **Test mode** is a switch, on by default. On: documents are free and not legally binding, for trying the whole flow. Off: documents are legally binding and count towards the service's billing. Documents already made keep the mode they were made in.
+4. **Remove key** deletes the webhook at the service, then the stored key and webhook id. Program agreements are then signed by hand.
+
+The section shows whether e-signature is on, the key's line, the mode, whether the webhook is registered, and when Mynt last received an event.
+
+The admin tools behind it are `get_esign_settings`, `set_esign_api_key`, `register_esign_webhook`, `remove_esign_api_key` and `set_esign_test_mode`. They are for admins only and never return a secret. They are audited in the security class without any value: `set_esign_api_key`, `set_esign_api_key_refused`, `register_esign_webhook`, `register_esign_webhook_refused`, `remove_esign_api_key` and `set_esign_test_mode`.
+
+**Environment overrides** (names only). Where set, these win over what's stored, so a deployment that set them keeps working:
 
 | Setting | What |
 |---|---|
-| `ESIGN_PROVIDER` | The adapter: `signwell`. Unset, e-signature is off: the tools say "E-signature isn't configured on this deployment yet" and the manual flow stays. |
-| `SIGNWELL_API_KEY` | Secret. The service's API key, sent only in its `X-Api-Key` header. |
-| `SIGNWELL_WEBHOOK_ID` | Secret. The id of the webhook registered for `<PUBLIC_URL>/esign/webhook`. The service signs each event with it (HMAC-SHA256 of the event's `type@time`). Unset, events are refused, and state is read back only when someone opens a signing link or a signed copy. |
-| `ESIGN_TEST_MODE` | On unless set to `off`. Test-mode documents are free and not legally binding, and the agreement shows `test_mode: true`. Turn it off only when the operator is ready for real signatures. |
-| `MYNT_VAULT_KEY` | Required to keep templates and signed copies. |
+| `ESIGN_PROVIDER` | The adapter (`signwell`), over the stored choice. |
+| `SIGNWELL_API_KEY` | Secret. Over the stored key. |
+| `SIGNWELL_WEBHOOK_ID` | Secret. Over the stored webhook id. |
+| `ESIGN_TEST_MODE` | `off` for live documents, over the switch. |
+| `MYNT_VAULT_KEY` | Required to keep the key, the webhook id, templates and signed copies. |
 
-Mynt Studio frames the signing page only from the origins in `ESIGN_FRAME_SRC` (Studio's setting, an https origin). Without it, the sheet offers to open the signing page in a new tab instead.
+Without a key anywhere, e-signature is off. The tools then say "E-signature isn't configured on this deployment yet" and the manual flow stays.
+
+**The signing frame.** The adapter lists the origins the service's signing pages come from. `get_agreement_signing_link` says whether the link's origin is one of them (`signing_origin_allowed`). Mynt publishes the list at `GET /esign/frame-origins`, which is public, names no secret, and is empty while e-signature is off. Mynt Studio reads it every few minutes and allows exactly those origins in its Content-Security-Policy `frame-src`, so the Sign sheet frames the signing page. `ESIGN_FRAME_SRC` (Studio's setting) can add origins. A link from anywhere else is offered in a new tab instead.
 
 ## Approved money rails
 

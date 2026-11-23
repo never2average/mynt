@@ -88,7 +88,7 @@
       "id": "admin",
       "title": "Admin & governance",
       "summary": "Regions and the regulatory model, categories, take rates, invitations, oversight and operations.",
-      "tools": 31
+      "tools": 36
     }
   ],
   "roles": [
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
-      "tools": 364,
+      "tools": 369,
       "get_started": [
         {
           "tool": "define_region",
@@ -7354,6 +7354,22 @@
       }
     },
     {
+      "name": "get_esign_settings",
+      "title": "E-signature settings",
+      "description": "Admin: how e-signature is set up here: the provider, whether its API key is set (by whom and when, or by the server's environment), whether its webhook is registered and where it points, test mode, and when Mynt last received an event. Never the key or the webhook's id.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "get_exploration",
       "title": "An exploration",
       "description": "Innovator: an exploration's status, leaderboard, dataset assumptions and spend. Without job_id, your firm's recent explorations.",
@@ -11522,6 +11538,22 @@
       }
     },
     {
+      "name": "register_esign_webhook",
+      "title": "Re-register the e-signature webhook",
+      "description": "Admin: register the e-signature service's webhook to this server again (reusing one already pointing here), with the stored key. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "register_firm",
       "title": "Register a firm",
       "description": "Admin: add a legal entity to Mynt by hand, with no members yet (e.g. a vendor). Then invite_user its people and add_entity_member them to it.",
@@ -11978,6 +12010,30 @@
         },
         "required": [
           "app_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "remove_esign_api_key",
+      "title": "Remove the e-signature API key",
+      "description": "Admin: delete the stored e-signature API key and webhook id, deleting the webhook at the service first. E-signature then stays off (and program agreements are signed by hand) unless the server's environment sets a key. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "confirm": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "confirm"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -14060,6 +14116,62 @@
         "required": [
           "entity_id",
           "status"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "set_esign_api_key",
+      "title": "Set the e-signature API key",
+      "description": "Admin: set the e-signature service's API key. Mynt checks it with the service, keeps it sealed (never shown again), then registers the service's webhook to this server (reusing one already pointing here). The server's environment, where it sets a key, still takes precedence. Audited without the key.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "signwell"
+            ]
+          },
+          "api_key": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 500,
+            "pattern": "^[\\x21-\\x7e]+$"
+          }
+        },
+        "required": [
+          "provider",
+          "api_key"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "set_esign_test_mode",
+      "title": "E-signature test mode",
+      "description": "Admin: turn the e-signature service's test mode on or off. On (the default): documents are free and not legally binding, for trying the flow. Off: documents are legally binding and count towards the service's billing. Documents already made keep the mode they were made in. ESIGN_TEST_MODE in the server's environment, where set, takes precedence. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "test_mode": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "test_mode"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }

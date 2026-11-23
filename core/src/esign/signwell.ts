@@ -13,7 +13,8 @@ import {
 } from "./provider.js";
 
 // The SignWell adapter (https://developers.signwell.com): REST over HTTPS with the API key in X-Api-Key, nothing else
-// of Mynt's sent. Settings, by name only: SIGNWELL_API_KEY (secret) and SIGNWELL_WEBHOOK_ID (secret: SignWell signs
+// of Mynt's sent. The key and the webhook id are set by an admin in Mynt Studio (esign-settings.ts), sealed in Mynt's
+// database, with SIGNWELL_API_KEY and SIGNWELL_WEBHOOK_ID in the environment as overrides (SignWell signs
 // each webhook event with its webhook's id as the HMAC key). Mynt's outbound rules: a fixed https base, a time limit
 // on every call, size caps on what comes back, and SignWell's own error text never passed on (it may echo what was
 // sent). The key is never logged or put in an error.
