@@ -6,6 +6,7 @@
 // Pure: the route reads Mynt's replies into these shapes, and the tabs and the tests share them.
 import { CHECK_LABELS, type PromotionCheck } from "./promotions";
 import { productStageOf } from "./products";
+import type { RiskRegister, Unavailable } from "./risk-register";
 import type { Stage } from "./workspaces";
 
 type Obj = Record<string, unknown>;
@@ -59,7 +60,8 @@ export type TableRowData = { key: string; cells: string[]; href?: string };
 // A section: a table, or why Mynt can't fill it ("Not available: …"). `empty` is what an answered,
 // empty list says (Mynt answered: there are none), never shown for a section Mynt couldn't answer.
 export type TabSection = { id: string; title: string; columns: string[]; rows: TableRowData[] | null; reason?: string; empty?: string; note?: string };
-export type ProductTabData = { available: true; sections: TabSection[] };
+// The Risk tab also carries the product's risk register, shown above its sections with its Add risk and Review risk actions.
+export type ProductTabData = { available: true; sections: TabSection[]; register?: RiskRegister | Unavailable };
 
 export const section = (id: string, title: string, columns: string[], rows: TableRowData[], empty: string, note?: string): TabSection => ({ id, title, columns, rows, empty, ...(note ? { note } : {}) });
 export const unavailable = (id: string, title: string, columns: string[], reason: string): TabSection => ({ id, title, columns, rows: null, reason });

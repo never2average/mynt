@@ -33,6 +33,7 @@ import {
   type WorkspaceProduct,
 } from "./product-panel";
 import { fromPromotionChecks } from "./promotions";
+import { loadRegister } from "./risk-register-server";
 import { nextProductStage } from "./products";
 import { callStudioTool, isAuthError, listMyntTools } from "./studio-server";
 import { appHref } from "./threads";
@@ -81,12 +82,14 @@ export async function loadProductTab(mynt: Client, product: WorkspaceProduct, ta
       return { available: true, sections: customerSections(d.definition) };
     }
     case "risk": {
-      const [d, sponsorships, health, covenants, breaches] = await Promise.all([
+      const [d, sponsorships, health, covenants, breaches, risks] = await Promise.all([
         definition(),
         read("list_my_sponsorships", { product_id: id }),
         read("list_product_health", { product_id: id, limit: 12 }),
         read("list_covenants", { product_id: id }),
         read("list_covenant_breaches", { product_id: id, open_only: true }),
+        // The product's risk register, kept by its own firm (read-only for its sponsors).
+        loadRegister(mynt, { type: "product", id }),
       ]);
       const sections: TabSection[] = [];
       if (d?.definition) sections.push(...riskModelSections(d.definition));
@@ -105,7 +108,7 @@ export async function loadProductTab(mynt: Client, product: WorkspaceProduct, ta
           ? unavailable("health", "Product health", ["Snapshot", "Status"], has("list_product_health") ? "Mynt didn't answer with this product's health record." : "Product health comes with Mynt's next update.")
           : section("health", "Product health", ["Snapshot", "Period", "Status", "Source", "Verified", "Fingerprint"], healthRows(health, id), "No health snapshot for this product yet: it's recorded once a licence provider sponsors it.", has("get_product_health") ? undefined : HEALTH_NUMBERS_ONLY),
       );
-      return { available: true, sections };
+      return { available: true, sections, register: risks.register };
     }
     case "compliance": {
       const next = product.archived ? null : nextProductStage(product.stage);

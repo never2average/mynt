@@ -15,8 +15,8 @@
     {
       "id": "apps",
       "title": "Apps & developers",
-      "summary": "Register apps, read a product's developer contract, make an app's agreements with the firms behind its products, and start from app kinds and ideas.",
-      "tools": 30
+      "summary": "Register apps, read a product's developer contract, make an app's agreements with the firms behind its products, keep apps' and products' risk registers, and start from app kinds and ideas.",
+      "tools": 33
     },
     {
       "id": "builds",
@@ -122,7 +122,7 @@
     {
       "role": "developer",
       "summary": "the builder role, under its other name: builds apps (keys, webhooks, SDKs, journeys, GTM campaigns) with coding agents Mynt verifies and hosts, and composes and publishes products too. The same tools as innovator. Also a consumer.",
-      "tools": 234,
+      "tools": 237,
       "get_started": [
         {
           "tool": "list_buildable_products",
@@ -149,7 +149,7 @@
     {
       "role": "innovator",
       "summary": "the builder role: composes, tests, publishes and versions financial products from regulated primitives, decides who may build on them, and builds apps on them. Needn't be licensed: a licence provider can sponsor a product under its licences. The same tools as developer. Also a consumer.",
-      "tools": 234,
+      "tools": 237,
       "get_started": [
         {
           "tool": "create_entity",
@@ -203,7 +203,7 @@
     {
       "role": "license_provider",
       "summary": "a firm, added by an admin, holding licences (verified by admins) that sponsor builders' products: it approves, declines or revokes sponsorship of a product's component under a held licence, in the jurisdictions it covers. A peer of builders.",
-      "tools": 79,
+      "tools": 80,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
-      "tools": 359,
+      "tools": 362,
       "get_started": [
         {
           "tool": "define_region",
@@ -655,6 +655,92 @@
         },
         "required": [
           "kind"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "add_risk",
+      "title": "Add a risk to a register",
+      "description": "Add a risk to an app's or a financial product's risk register: the app's workspace owners and admins, or the product's own firm. Give a title, a category (security, fraud, vendor, conduct, operational, compliance, credit, liquidity, other), how likely it is and how bad it would be (1-5 each; the score is their product: 1-4 low, 5-9 medium, 10-14 high, 15-25 critical), and optionally a description, the mitigation, its owner (a member of the app's workspace or the product's firm; you by default) and the date it's next reviewed by. It starts open. Audited.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "subject_type": {
+            "type": "string",
+            "enum": [
+              "app",
+              "product"
+            ]
+          },
+          "subject_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "The app's id, or the product's id"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 200
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "security",
+              "fraud",
+              "vendor",
+              "conduct",
+              "operational",
+              "compliance",
+              "credit",
+              "liquidity",
+              "other"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "likelihood": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "impact": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "mitigation": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "owner_user_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "review_by": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          }
+        },
+        "required": [
+          "subject_type",
+          "subject_id",
+          "title",
+          "category",
+          "likelihood",
+          "impact"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -10171,6 +10257,74 @@
       }
     },
     {
+      "name": "list_risks",
+      "title": "A risk register",
+      "description": "An app's or a financial product's risk register: each risk with its category, likelihood × impact score and level, owner, mitigation, status, review-by date and whether that review is overdue, newest first, with counts by status. Any member of the app's workspace reads an app's; the product's own firm, and the licence providers sponsoring it (read-only), read a product's. can_manage says whether you may add and review risks. Filter by status, category or overdue_only. With risk_id: that one risk and its history (every change, from the audit trail). For an app, signals lists what Mynt measures around it, each a list or not available with why: fraud, vendors (failing conformance, erroring calls, ended subscriptions or contracts), conduct (open findings from marketing and complaints audits of its agreements) and products (sales paused by a covenant, or drifted).",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "license_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "subject_type": {
+            "type": "string",
+            "enum": [
+              "app",
+              "product"
+            ]
+          },
+          "subject_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "mitigating",
+              "accepted",
+              "closed"
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "security",
+              "fraud",
+              "vendor",
+              "conduct",
+              "operational",
+              "compliance",
+              "credit",
+              "liquidity",
+              "other"
+            ]
+          },
+          "overdue_only": {
+            "default": false,
+            "type": "boolean"
+          },
+          "risk_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "subject_type",
+          "subject_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "list_sdk_releases",
       "title": "Releases of an SDK",
       "description": "Developer: every release of one of your SDKs, newest first, with what it was generated from and whether it's stale.",
@@ -16238,6 +16392,70 @@
         },
         "required": [
           "id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "update_risk",
+      "title": "Review a risk",
+      "description": "Review a risk on a register you keep (see add_risk): change its status (open, mitigating, accepted, closed), mitigation, likelihood and impact, owner, or the date it's next reviewed by. Accepting or closing a risk needs a note saying why. Only what you pass changes; every change is audited with what it was and what it became, and list_risks with risk_id shows that history.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "risk_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "mitigating",
+              "accepted",
+              "closed"
+            ]
+          },
+          "mitigation": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "likelihood": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "impact": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "owner_user_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "review_by": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "note": {
+            "description": "Why: needed to accept or close a risk",
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "risk_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }

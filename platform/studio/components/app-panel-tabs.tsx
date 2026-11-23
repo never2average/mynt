@@ -1,7 +1,7 @@
 "use client"
 
 // An app's information tabs in the builder's right-hand panel: Products, Agreements, Customers,
-// Security, P&L, SDK and Activity (lib/app-panel.ts). There's no Licences tab: an app holds no
+// Security & risk, P&L, SDK and Activity (lib/app-panel.ts). There's no Licences tab: an app holds no
 // licences, its products do (the Products tab shows each one's sponsor and states). Each is live while it's on screen: read when it's opened or the
 // page comes back into view, and every 30 seconds while both are visible (never while the page
 // is hidden), with when it was last read. Every request names this app. Tabs only show
@@ -18,6 +18,7 @@ import { Panel, Section } from "@/components/dashboard-panels"
 import { PnlChart } from "@/components/pnl"
 import { ChoosePersonasSheet, ProposeAgreementSheet } from "@/components/app-agreement-sheets"
 import { StageMark, StatusDot } from "@/components/promotion-view"
+import { RiskRegisterSection, SignalSection } from "@/components/risk-register"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -41,6 +42,7 @@ import {
   type TabData,
 } from "@/lib/app-panel"
 import { deltaOf, type Kpi } from "@/lib/dashboard-visual"
+import { SIGNAL_COLUMNS } from "@/lib/risk-register"
 import { CHECK_LABELS, CHECK_TONE } from "@/lib/promotions"
 import { cn } from "@/lib/utils"
 import type { Stage } from "@/lib/workspaces"
@@ -496,9 +498,17 @@ export function CustomersTabView({ appId, data, onChanged }: { appId: string; da
   )
 }
 
-export function SecurityView({ data }: { data: AppSecurity }) {
+// Security & risk: the app's risk register (Add risk and Review risk, each a labelled button opening a sheet), its
+// information security (Mynt's build checks and security events), then the signals Mynt measures around it: fraud,
+// vendors, conduct and its products. Each is a table, or "Not available." with why; never a 0 for what isn't measured.
+export function SecurityView({ data, appId = "", onChanged }: { data: AppSecurity; appId?: string; onChanged?: () => void }) {
   return (
     <div className="flex flex-col gap-5" data-app-security>
+      <RiskRegisterSection subject={{ type: "app", id: appId }} data={data.register} onChanged={onChanged} />
+      <h2 className="text-sm font-semibold" data-infosec>
+        Infosec
+      </h2>
+      <p className="-mt-3 text-xs text-muted-foreground">Mynt verifies every build outside the agent&apos;s sandbox (tests, types, a secrets scan, a static scan, dependencies) and, where audits are on, has it audited independently. On Mynt&apos;s hosting the app&apos;s key is added on the way out and never stored on its machine.</p>
       <Section id="app-build-checks" title="Build checks">
         {data.checks.length ? (
           <ul className="flex flex-col divide-y text-sm">
@@ -520,6 +530,31 @@ export function SecurityView({ data }: { data: AppSecurity }) {
         <Events events={data.events} reason={data.eventsReason} empty="No security events for this app." />
         <ViewAll href="/audits?tab=security" />
       </Section>
+      <SignalSection id="fraud" title="Fraud" description="Fraud and velocity signals from the app's customer sessions." columns={SIGNAL_COLUMNS.fraud} signal={data.signals.fraud} empty="No fraud signals for this app." />
+      <SignalSection
+        id="vendors"
+        title="Vendors"
+        description="The vendor services this app's workspace relies on that are failing conformance or erroring, and subscriptions or contracts that have ended."
+        columns={SIGNAL_COLUMNS.vendors}
+        signal={data.signals.vendors}
+        empty="No vendor service of this app's is failing, and no vendor contract has ended."
+      />
+      <SignalSection
+        id="conduct"
+        title="Conduct"
+        description="Open findings from oversight audits of this app's agreements: marketing and complaints."
+        columns={SIGNAL_COLUMNS.conduct}
+        signal={data.signals.conduct}
+        empty="No open marketing or complaints findings."
+      />
+      <SignalSection
+        id="products"
+        title="From products"
+        description="This app's products with new sales paused by a licence provider's covenant, or drifted from their published composition."
+        columns={SIGNAL_COLUMNS.products}
+        signal={data.signals.products}
+        empty="None of this app's products is paused or drifted."
+      />
     </div>
   )
 }
@@ -612,7 +647,7 @@ export function InfoTabBody({ tab, data, appId = "", onChanged }: { tab: InfoTab
   if (tab === "agreements") return <AgreementsTabView appId={appId} data={data as AppAgreements} onChanged={onChanged} />
   if (tab === "customers") return <CustomersTabView appId={appId} data={data as AppCustomers} onChanged={onChanged} />
   if (tab === "pnl") return <PnlView pnl={data as AppPnl} />
-  if (tab === "security") return <SecurityView data={data as AppSecurity} />
+  if (tab === "security") return <SecurityView appId={appId} data={data as AppSecurity} onChanged={onChanged} />
   if (tab === "sdk") return <SdkView data={data as AppSdk} />
   return <ActivityView data={data as AppActivity} />
 }

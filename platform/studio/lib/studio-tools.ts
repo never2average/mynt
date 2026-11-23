@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ChatKindSchema, SessionEvent, SessionId, SessionMetadata } from "./chat-sessions";
 import { isCalendarDate } from "./compliance";
 import { HORIZONS, LIQUIDITY, PRODUCT_ACTIONS, PRODUCT_LINES, ProductId, RETURN_TYPES, RISK_LEVELS } from "./products";
+import { RISK_CATEGORIES, RISK_STATUSES } from "./risk-register";
 import { CLUSTER, SIGNATURE, SOLANA_ADDRESS } from "./wallets";
 
 // Which of Mynt's tools the studio may call for the signed-in user, with what arguments. Mynt
@@ -38,6 +39,11 @@ const solanaAddress = z.string().regex(SOLANA_ADDRESS);
 const devnet = z.literal(CLUSTER);
 const baseUnits = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const seconds = z.number().int().min(0).max(10 * 365 * 86_400);
+// Risk registers (lib/risk-register.ts): an app's or a product's, scores 1-5.
+const riskSubject = z.enum(["app", "product"]);
+const riskCategory = z.enum(RISK_CATEGORIES);
+const riskStatus = z.enum(RISK_STATUSES);
+const riskScore = z.number().int().min(1).max(5);
 // An app kind's id, as Mynt's kind files name them (core/schemas/app-kind.schema.json).
 export const appKindId = z.string().regex(/^[a-z][a-z0-9-]{1,39}$/);
 
@@ -169,6 +175,44 @@ export const STUDIO_TOOLS = {
     .strict(),
   get_app_customers: z.object({ app_id: id }).strict(),
   set_app_target_segments: z.object({ app_id: id, segments: z.array(z.object({ product_id: id, segment_id: id }).strict()).max(100) }).strict(),
+  // Risk registers: an app's (its Security & risk tab) and a financial product's (its Risk tab). Add risk and
+  // Review risk are labelled buttons opening a sheet; Mynt decides who keeps which register (can_manage).
+  list_risks: z
+    .object({
+      subject_type: riskSubject,
+      subject_id: id,
+      status: riskStatus.optional(),
+      category: riskCategory.optional(),
+      overdue_only: z.boolean().optional(),
+      risk_id: uuid.optional(),
+    })
+    .strict(),
+  add_risk: z
+    .object({
+      subject_type: riskSubject,
+      subject_id: id,
+      title: z.string().trim().min(3).max(200),
+      category: riskCategory,
+      likelihood: riskScore,
+      impact: riskScore,
+      description: z.string().trim().max(4000).optional(),
+      mitigation: z.string().trim().max(4000).optional(),
+      owner_user_id: uuid.optional(),
+      review_by: auditDate.optional(),
+    })
+    .strict(),
+  update_risk: z
+    .object({
+      risk_id: uuid,
+      status: riskStatus.optional(),
+      mitigation: z.string().trim().max(4000).optional(),
+      likelihood: riskScore.optional(),
+      impact: riskScore.optional(),
+      owner_user_id: uuid.optional(),
+      review_by: auditDate.optional(),
+      note: z.string().trim().max(2000).optional(),
+    })
+    .strict(),
   // Compliance pages (read-only): Coverage, Licences and Audits, for the selected workspace
   // (no workspace_id for the implicit Personal one).
   get_compliance_coverage: z.object({ workspace_id: workspaceId.optional() }).strict(),

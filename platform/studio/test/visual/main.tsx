@@ -34,6 +34,7 @@ import { fromClassAudit, fromObligations } from "@/lib/audit-classes";
 import { fromPools, fromPositions, fromWithdrawals, type LiquidityData } from "@/lib/liquidity";
 import { appProductsFrom, fromAgreements, fromCustomers, fromPnl as appPnl } from "@/lib/app-panel";
 import type { Draft } from "@/lib/earn";
+import { registerFrom, signalsFrom } from "@/lib/risk-register";
 
 const q = new URLSearchParams(window.location.search);
 const screenId = q.get("screen") ?? "dashboard";
@@ -260,6 +261,20 @@ const APP_CUSTOMERS = {
   products: [{ id: "p1", name: "Card", segments: [{ id: "retail", name: "Retail savers", customer_kind: "individual", targeted: true }] }],
   customers: { live: { customers_with_sessions: null, customers_in_vault: null, reason: "No live client sessions yet" }, sandbox: { customers_with_sessions: 3, customers_in_vault: 2, reason: null } },
 };
+const APP_RISKS = {
+  can_manage: true,
+  risks: [
+    { id: "r1", title: "Session tokens could leak in logs", category: "security", likelihood: 3, impact: 4, owner: { user_id: "u2", name: "Ines" }, mitigation: "Scrub logs", status: "mitigating", review_by: "2026-10-01", overdue: true },
+    { id: "r2", title: "KYC vendor outage", category: "vendor", likelihood: 2, impact: 3, owner: null, mitigation: null, status: "open", review_by: null, overdue: false },
+  ],
+  counts: { open: 1, mitigating: 1, accepted: 0, closed: 0, overdue: 1 },
+  signals: {
+    fraud: { available: false, reason: "Not measured yet: Mynt records no fraud or velocity signals from customer sessions." },
+    vendors: { available: true, rows: [{ subscription_id: "v1", vendor: "KYC Works", offering: "Identity check", issue: "conformance_failed", detail: "The service's latest conformance run failed", since: "2026-11-12T00:00:00Z" }] },
+    conduct: { available: false, reason: "Not available yet: oversight audits of agreements come with Mynt's next update." },
+    products: { available: true, rows: [] },
+  },
+};
 const ev = (i: number) => ({ at: `2026-11-${String(10 + (i % 10)).padStart(2, "0")}T10:00:00Z`, action: `api_key_created`, actor: "Ines", details: null });
 const panel: Record<string, unknown> = {
   pnl: appPnl(APP_PNL),
@@ -275,6 +290,8 @@ const panel: Record<string, unknown> = {
       { id: "audit_findings", label: "No open critical findings", status: "fail", detail: "1 high finding", fix: null },
     ],
     checksReason: null,
+    register: registerFrom(APP_RISKS, [{ userId: "u2", name: "Ines" }]),
+    signals: signalsFrom(APP_RISKS),
   },
   sdk: { available: true, products: [{ productId: "p1", name: "Card", version: "3", action: "issuance", access: "public", permitted: ["deep_link"], notPermitted: [], fields: ["name"], handOff: null, generatedClients: null, hasContract: false, error: null }] },
   activity: { available: true, builds: [{ id: "b0", status: "failed", goal: "Fix the ledger sync", at: "2026-11-12T00:00:00Z" }, { id: "b1", status: "succeeded", goal: "Add a card screen", at: "2026-11-11T00:00:00Z" }], events: [ev(1)], eventsReason: null },

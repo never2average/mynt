@@ -8,6 +8,7 @@ import { z } from "zod";
 import type { Db } from "./db.js";
 import { namesMoneyMovement } from "./money-rails.js";
 import { QUOTA_PATTERN } from "./transient.js";
+import { overdueRiskReviews } from "./risk-register.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 
@@ -234,7 +235,10 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
   const rotatedOnOffboard = (await exists("audit_log"))
     ? Number((await db.query(`SELECT count(*)::int AS n FROM financial_products.audit_log WHERE action = 'webhook_secret_rotated_on_offboard' AND created_at > now() - make_interval(hours => $1)`, [hours])).rows[0]?.n ?? 0)
     : 0;
+  // Risk registers (risk-register.ts): risks whose review date has passed and that aren't closed.
+  const risks = (await exists("risk_register")) ? await overdueRiskReviews(db) : { count: 0, risks: [] };
   const attention = [
+    ...(risks.count ? [`risks: ${risks.count} risk review(s) overdue (review date passed, not closed) on apps' or products' risk registers; their keepers review them with update_risk`] : []),
     ...(offboards.length ? [`workspaces: ${offboards.length} offboarding(s) gave up after repeated failures (someone may keep access): retry_offboard once the provider is back`] : []),
     ...(orgMissing.length ? [`workspaces: ${orgMissing.length} workspace(s) frozen because their organization was deleted in the identity provider; their owners relink (relink_workspace_org) or archive (archive_workspace) them`] : []),
     ...(orgSync?.halted_at ? [`workspaces: the organization reconcile stopped itself (${orgSync.halted_reason}); nothing was changed. Check the identity provider; it resumes on its own once the numbers look normal`] : []),
@@ -268,7 +272,7 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...(covenants.blocked_webhooks ? [`covenants: ${covenants.blocked_webhooks} firm webhook(s) blocked: their creator can no longer receive covenant alerts, so a member with the licence-provider role must create them again (list_firm_webhooks)`] : []),
     ...(covenantTimerIdle ? [`covenants: ${covenants.active_rules} rule(s), but the covenant timer ${covenants.timer_last_ran ? `last ran ${covenants.timer_last_ran}` : "has never run"}`] : []),
   ];
-  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors: { ...vendors, money_name_mismatches: moneyNameMismatches }, solana, product_health: productHealth, covenants, workspaces: { failed_offboards: offboards, webhook_secrets_rotated_on_offboard: rotatedOnOffboard, org_missing: orgMissing, org_backfill_pending: backfillPending, org_sync: orgSync }, backups: backups.section };
+  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors: { ...vendors, money_name_mismatches: moneyNameMismatches }, solana, product_health: productHealth, covenants, workspaces: { failed_offboards: offboards, webhook_secrets_rotated_on_offboard: rotatedOnOffboard, org_missing: orgMissing, org_backfill_pending: backfillPending, org_sync: orgSync }, risks: { overdue_reviews: risks.count, overdue: risks.risks }, backups: backups.section };
 }
 
 export function registerOpsTools(server: McpServer, db: Db) {

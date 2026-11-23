@@ -4,7 +4,7 @@
 // name and stage, then the labelled Move to staging / Move to production / Move back and Archive, each
 // opening its sheet: components/product-stage-sheet.tsx and components/product-archive-sheet.tsx, as on
 // the Build page's Products tab), the product's chat on the left and its tabs on the right: Terms,
-// Customers, Risk, Compliance, Integrations, Apps and Activity (lib/product-panel.ts). Tabs only show;
+// Customers, Risk (its risk register first), Compliance, Integrations, Apps and Activity (lib/product-panel.ts). Tabs only show;
 // every action is a labelled button opening a sheet. Each tab is live while it's on screen: read when it's
 // opened or the page comes back into view, and every 30 seconds while both are visible, with when it was
 // last read; whatever Mynt can't answer says why, never 0 or an empty table.
@@ -27,6 +27,7 @@ import { CreateProductSheet } from "@/components/create-product-sheet"
 import { productTransport } from "@/components/new-app-workspace"
 import { ProductArchiveSheet, type ArchiveMode } from "@/components/product-archive-sheet"
 import { ProductChat, type DraftCards } from "@/components/product-chat"
+import { RiskRegisterSection } from "@/components/risk-register"
 import { demoteMove, ProductStageSheet, promoteMove, type ProductMove } from "@/components/product-stage-sheet"
 import { NewAppButton } from "@/components/site-header"
 import { DeveloperOnly } from "@/components/studio-gates"
@@ -232,7 +233,7 @@ export function TabSectionView({ section }: { section: TabSection }) {
   )
 }
 
-export function ProductTabBody({ data }: { data: ProductTabData | NotYet }) {
+export function ProductTabBody({ data, productId = "", onChanged }: { data: ProductTabData | NotYet; productId?: string; onChanged?: () => void }) {
   if (!data.available)
     return (
       <p className="rounded-lg border border-dashed px-4 py-8 text-center text-sm text-muted-foreground" data-not-yet>
@@ -241,6 +242,7 @@ export function ProductTabBody({ data }: { data: ProductTabData | NotYet }) {
     )
   return (
     <div className="flex flex-col gap-6">
+      {data.register && <RiskRegisterSection subject={{ type: "product", id: productId }} data={data.register} onChanged={onChanged} />}
       {data.sections.map((s) => (
         <TabSectionView key={s.id} section={s} />
       ))}
@@ -277,7 +279,7 @@ export function ProductInfoTab({ productId, tab, active, refresh = 0 }: { produc
             {state.message}
           </p>
         )}
-        {state.kind === "ready" && <ProductTabBody data={state.data} />}
+        {state.kind === "ready" && <ProductTabBody data={state.data} productId={productId} onChanged={() => void reload()} />}
       </div>
     </div>
   )

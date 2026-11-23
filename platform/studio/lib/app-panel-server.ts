@@ -13,6 +13,8 @@ import {
   type TabData,
 } from "./app-panel";
 import { fromPromotionChecks, nextStage, type PromotionTarget } from "./promotions";
+import { signalsFrom, unavailable } from "./risk-register";
+import { loadRegister, NO_REGISTER_YET } from "./risk-register-server";
 import { callStudioTool, isAuthError, listMyntTools } from "./studio-server";
 import { stageOf, type Stage } from "./workspaces";
 
@@ -96,10 +98,14 @@ export async function loadPanelTab(mynt: Client, app: PanelApp, tab: InfoTab): P
       return fromCustomers(await read("get_app_customers", { app_id: app.id })) ?? NOT_YET("Mynt didn't answer with the app's customers.");
     }
     case "security": {
-      const [audit, checks] = await Promise.all([auditFor(true), checksFor()]);
-      if (!audit.events && !checks && !tool("list_workspace_audit") && !tool("get_promotion_checks")) return NOT_YET("Security information comes with Mynt's next update.");
+      const [audit, checks, risks] = await Promise.all([auditFor(true), checksFor(), loadRegister(mynt, { type: "app", id: app.id }, { workspaceId: app.workspaceId })]);
+      if (!audit.events && !checks && !tool("list_workspace_audit") && !tool("get_promotion_checks") && !tool("list_risks")) return NOT_YET("Security and risk information comes with Mynt's next update.");
+      // Without the register, the signals that come with it aren't available either: said so, each with why.
+      const none = unavailable(risks.register.available ? NO_REGISTER_YET : risks.register.reason);
       return {
         available: true,
+        register: risks.register,
+        signals: risks.reply === null ? { fraud: none, vendors: none, conduct: none, products: none } : signalsFrom(risks.reply),
         events: audit.events,
         eventsReason: audit.reason,
         checks: checks?.checks.filter((c) => SECURITY_CHECKS.includes(c.id)) ?? [],

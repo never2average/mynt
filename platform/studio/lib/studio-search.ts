@@ -69,6 +69,7 @@ export const APP_SEARCH_TABS = [
   { tab: "products", label: "Products", keywords: "products sponsors sponsor licence provider states" },
   { tab: "agreements", label: "Agreements", keywords: "agreements program contract vendor data sharing introductions partners sign" },
   { tab: "customers", label: "Customers", keywords: "customers personas segments target audience" },
+  { tab: "security", label: "Security & risk", keywords: "security risk risks register infosec fraud vendors conduct mitigation" },
 ] as const;
 
 export type SearchGroup = "Pages" | "Apps" | "Financial products" | "Members" | "Licences" | "Audit actions";

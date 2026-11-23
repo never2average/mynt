@@ -1,10 +1,11 @@
 // An app's right-hand panel in the builder (beside its chat): besides Preview, the information
-// tabs Products, Agreements, Customers, Security, P&L, SDK and Activity, each read live from Mynt
+// tabs Products, Agreements, Customers, Security & risk, P&L, SDK and Activity, each read live from Mynt
 // and only for this app. There's no Licences tab: an app holds no licences, its products do.
 // Tabs show information; anything that changes state (promoting, moving back, setting target
 // states) is a labelled action elsewhere (the top bar's Promote button and its sheet). Pure: the
 // route reads Mynt's replies into these shapes, and the tabs and the tests share them.
 import { CHECK_LABELS, type PromotionCheck } from "./promotions";
+import type { AppSignals, RiskRegister, Unavailable } from "./risk-register";
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -19,7 +20,7 @@ export const APP_TAB_LABELS: Record<AppTab, string> = {
   products: "Products",
   agreements: "Agreements",
   customers: "Customers",
-  security: "Security",
+  security: "Security & risk",
   pnl: "P&L",
   sdk: "SDK",
   activity: "Activity",
@@ -242,11 +243,18 @@ export function fromCustomers(reply: unknown): AppCustomers | null {
 /** A count Mynt measured, or "Not measured": never 0 for want of data. */
 export const countText = (n: number | null) => (n === null ? "Not measured" : String(n));
 
-// ---- Security ----
+// ---- Security & risk ----
+//
+// The app's risk register (list_risks for the app: Add risk and Review risk are labelled buttons opening a sheet),
+// its information security (Mynt's build checks and security-class audit events), and the signals Mynt measures
+// around it: fraud, its vendors, conduct findings and its products (lib/risk-register.ts). There's no separate Risk
+// tab for an app: its risks are here.
 
 export type PanelEvent = { at: string; action: string; actor: string | null; details: string | null };
 export type AppSecurity = {
   available: true;
+  register: RiskRegister | Unavailable;
+  signals: AppSignals;
   // Security-class audit events about this app, when Mynt classifies its audit trail; else null with why.
   events: PanelEvent[] | null;
   eventsReason: string | null;

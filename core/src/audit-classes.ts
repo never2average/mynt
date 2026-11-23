@@ -165,6 +165,9 @@ const OBLIGATIONS = [
   "decline_app_agreement",
   "sign_app_agreement",
   "terminate_app_agreement",
+  // the risk registers of apps and financial products: risks added and reviewed (risk-register.ts)
+  "add_risk",
+  "update_risk",
   // covenants on sponsorships
   "set_covenant",
   "set_covenant_refused",
