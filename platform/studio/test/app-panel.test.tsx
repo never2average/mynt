@@ -134,6 +134,16 @@ vi.mock("@/lib/tokens", () => ({
           return ok(AGREEMENTS);
         case "get_app_customers":
           return ok(CUSTOMERS);
+        case "list_agreement_audits":
+          return ok({
+            agreements: [],
+            requirements: [],
+            audits: [
+              { id: "x1", agreement_id: "g1", app_id: APP, due_at: "2026-11-10T23:59:59Z", status: "in_progress", overdue: true, findings: [], requirement: { name: "Quarterly complaints review", kind: "complaints_review" } },
+              { id: "x2", agreement_id: "g1", app_id: APP, due_at: "2027-01-31T23:59:59Z", status: "scheduled", overdue: false, findings: [], requirement: { name: "Annual compliance review", kind: "compliance_review" } },
+              { id: "x3", agreement_id: "g1", app_id: APP, due_at: "2026-08-10T23:59:59Z", status: "passed", overdue: false, findings: [], requirement: { name: "Quarterly complaints review", kind: "complaints_review" } },
+            ],
+          });
         default:
           return ok({});
       }
@@ -230,6 +240,16 @@ describe("the app panel route", () => {
     scoped();
     fake.tools = ALL.filter((t) => t.name !== "list_app_agreements");
     expect((await get("agreements")).body.data).toEqual({ available: false, reason: "Agreements come with Mynt's next update." });
+  });
+
+  it("Agreements: each agreement's oversight audits (count, next due, overdue) where Mynt has them; no column otherwise", async () => {
+    expect(((await get("agreements")).body.data as unknown as AppAgreements).audits).toBeNull();
+    fake.tools = [...ALL, { name: "list_agreement_audits", inputSchema: props("app_id", "side") }];
+    fake.calls = [];
+    const data = (await get("agreements")).body.data as unknown as AppAgreements;
+    expect(fake.calls.find((c) => c.name === "list_agreement_audits")?.args).toEqual({ app_id: APP, side: "app" });
+    expect(data.audits).toEqual({ g1: { count: 3, nextDue: "2026-11-10T23:59:59Z", overdue: 1 } });
+    scoped();
   });
 
   it("Customers: the personas from this app's products, and counts only where measured", async () => {
@@ -339,6 +359,15 @@ describe("the tabs' content", () => {
     expect(viewer).toContain("No agreements yet.");
     expect(viewer).toContain("business-development agent isn&#x27;t running here");
     expect(fromAgreements({ nope: true })).toBeNull();
+  });
+
+  it("Agreements: an Audits column with the count, next due and overdue in words, linking to Audits filtered to the agreement", () => {
+    const data = fromAgreements(AGREEMENTS)!;
+    expect(renderToStaticMarkup(<views.AgreementsTabView appId={APP} data={data} />)).not.toContain("data-agreement-audits");
+    const html = renderToStaticMarkup(<views.AgreementsTabView appId={APP} data={{ ...data, audits: { g1: { count: 3, nextDue: "2026-11-10T23:59:59Z", overdue: 1 } } }} />);
+    expect(html).toContain(">Audits</th>");
+    expect(html).toMatch(/data-agreement-audits="g1"[^]*3 audits, next due 2026-11-10[^]*1 overdue[^]*href="\/audits\?tab=agreements&amp;agreement=g1"[^]*View audits/);
+    expect(html).toMatch(/data-agreement-audits="g2"[^]*None yet/);
   });
 
   it("Customers: counts read Not measured, never 0; targeted personas; a labelled Choose personas button", () => {

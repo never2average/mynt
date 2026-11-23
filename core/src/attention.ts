@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { Db } from "./db.js";
 import { effectiveStages, stageChecks, staleSignoff } from "./promotions.js";
 import { PENDING } from "./repo-approvals.js";
+import { overdueAuditsOfApps } from "./agreement-audits.js";
 import type { Store, User } from "./store.js";
 import { workspaceLicences } from "./workspace-compliance.js";
 import { workspaceRole, type WorkspaceRole } from "./workspaces.js";
@@ -209,6 +210,18 @@ export async function workspaceAttention(store: Store, user: Pick<User, "id">, w
         });
   }
 
+  // Oversight audits under the apps' agreements past their due date and not closed: each flags its app.
+  for (const a of await overdueAuditsOfApps(store, ids, new Date(now)))
+    items.push({
+      id: `agreement_audit_overdue:${a.id}`,
+      kind: "agreement_audit_overdue",
+      severity: "high",
+      title: `${name.get(a.app_id)}: ${a.name} is overdue`,
+      detail: `${a.counterparty ?? "The licence provider"}'s oversight audit was due ${a.due_at.slice(0, 10)} and isn't closed; submit its evidence or answer its findings`,
+      href: `/audits?tab=agreements&agreement=${a.agreement_id}`,
+      at: a.due_at,
+    });
+
   // The other firm's side of the apps' agreements, lately: accepted, declined, signed or ended by it (app-agreements.ts).
   // This is how the app's side hears of them; their own actions they know. Signing is the owners' and admins' to do.
   if (ids.length) {
@@ -319,7 +332,7 @@ export function registerAttentionTools(server: McpServer, store: Store, user: Us
     {
       title: "What needs attention in a workspace",
       description:
-        "Developer (any member): what needs attention in one workspace, for your role in it, most severe first. Everyone: the workspace frozen or being archived, failed and blocked builds, production apps whose checks now fail (a program agreement that ended or expired among them: the app stays in production, flagged), what the other firm did lately with the apps' agreements (accepted, declined, signed or ended them), licences behind its products expiring within 30 days, and your own repository connections waiting for an admin. Owners and admins also: join requests (people not on Mynt who joined its organization), offboarding that didn't finish, webhooks turned off or whose receivers need a new secret, and production sign-offs asked, decided or no longer counting (a Mynt admin outside the workspace decides them). Each item has a studio link (href).",
+        "Developer (any member): what needs attention in one workspace, for your role in it, most severe first. Everyone: the workspace frozen or being archived, failed and blocked builds, production apps whose checks now fail (a program agreement that ended or expired among them: the app stays in production, flagged), what the other firm did lately with the apps' agreements (accepted, declined, signed or ended them), oversight audits under its apps' agreements past their due date and not closed, licences behind its products expiring within 30 days, and your own repository connections waiting for an admin. Owners and admins also: join requests (people not on Mynt who joined its organization), offboarding that didn't finish, webhooks turned off or whose receivers need a new secret, and production sign-offs asked, decided or no longer counting (a Mynt admin outside the workspace decides them). Each item has a studio link (href).",
       inputSchema: { workspace_id: z.string() },
       annotations: { readOnlyHint: true },
     },

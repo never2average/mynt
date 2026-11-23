@@ -27,6 +27,14 @@ export const AUDIT_CLASS_HELP: Record<AuditClass, string> = {
 };
 export const auditClassOf = (v: unknown): AuditClass => (AUDIT_CLASSES.includes(v as AuditClass) ? (v as AuditClass) : "security");
 
+// The Audits page's tabs: the four classes, with Agreement audits (oversight audits licence providers
+// run on apps under program agreements, lib/agreement-audits.ts) after Licence obligations. It's a tab
+// of its own so the regulator's obligations keep their register's schema.
+export const AUDITS_TABS = ["security", "obligations", "agreements", "financial", "workspace"] as const;
+export type AuditsTab = (typeof AUDITS_TABS)[number];
+export const AUDITS_TAB_LABELS: Record<AuditsTab, string> = { ...AUDIT_CLASS_LABELS, agreements: "Agreement audits" };
+export const auditsTabOf = (v: unknown): AuditsTab => (AUDITS_TABS.includes(v as AuditsTab) ? (v as AuditsTab) : "security");
+
 // ---- rows ----
 
 export type AuditRow = {

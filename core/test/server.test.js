@@ -47,6 +47,8 @@ const DEVELOPER_TOOLS = [
   "enable_webhook",
   // an app's agreements with the firms behind its products, and the customers it targets
   "get_app_customers", "list_app_agreements", "propose_app_agreement", "set_app_target_segments", "sign_app_agreement", "terminate_app_agreement",
+  // the app side of oversight audits under those agreements: read them, submit evidence, answer findings
+  "get_agreement_audit", "list_agreement_audits", "respond_to_agreement_audit_finding", "submit_agreement_audit_evidence",
 ];
 const INNOVATOR_TOOLS = [
   "create_product", "list_my_products", "publish_product", "test_product", "unpublish_product", "update_product",
