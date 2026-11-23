@@ -199,12 +199,12 @@ describe("Financial product ideas", () => {
     expect(chipProductIdeas([], 0.5)).toEqual([]);
   });
 
-  it("a chip's first message names the product, who it's for, where, and its features", () => {
+  it("a chip's first message asks to define the named product, with the problem it answers, where, and its features", () => {
     const [idea] = productIdeasFrom(PRODUCT_IDEAS);
     const message = productIdeaMessage(idea);
-    expect(message).toContain("Product no-penalty-cd");
+    expect(message.startsWith("Help me define Product no-penalty-cd.")).toBe(true);
+    expect(message).toContain("The problem it answers: People who need no-penalty-cd.");
     expect(message).toContain("What no-penalty-cd is, factually.");
-    expect(message).toContain("People who need no-penalty-cd");
     expect(message).toContain("US, account operations, deposits");
     expect(message).toContain("- Second feature of no-penalty-cd");
   });

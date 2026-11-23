@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import type { NextConfig } from "next";
 import { frameSources } from "./lib/csp";
+import { STUDIO_REDIRECTS, STUDIO_REWRITES } from "./lib/redirects";
 
 const dev = process.env.NODE_ENV !== "production";
 
@@ -17,6 +18,14 @@ const nextConfig: NextConfig = {
   // Run the MCP SDK from node_modules on the server rather than bundling it.
   serverExternalPackages: ["@modelcontextprotocol/sdk"],
   poweredByHeader: false,
+  // lib/redirects.ts: /connect shows the docs' Connect your agent page (a rewrite, ahead of the file routes, so the
+  // address stays /connect), and /docs/connect redirects there.
+  async redirects() {
+    return STUDIO_REDIRECTS.map((r) => ({ ...r }));
+  },
+  async rewrites() {
+    return { beforeFiles: STUDIO_REWRITES.map((r) => ({ ...r })), afterFiles: [], fallback: [] };
+  },
   async headers() {
     return [
       {

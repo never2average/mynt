@@ -149,7 +149,7 @@ describe("the New app page", () => {
     await act(async () => {
       await new Promise((r) => setTimeout(r, 20));
     });
-    expect([...document.querySelectorAll("[data-product-chip]")].map((c) => c.textContent).sort()).toEqual(productIdeas.map((i) => i.label).sort());
+    expect([...document.querySelectorAll("[data-product-chip]")].map((c) => c.textContent).sort()).toEqual(productIdeas.map((i) => i.productName).sort());
     expect(chipIds()).toEqual([]);
   });
 

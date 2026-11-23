@@ -279,11 +279,13 @@ describe("product ideas in Financial product mode", () => {
     expect(appChips()).toEqual([]);
     const lines = chips.slice(0, 3).map((id) => IDEAS.find((i) => i.id === id)!.productLine);
     expect(new Set(lines)).toEqual(new Set(["account_operations", "wealth", "credit"]));
-    // Each chip is labelled by who needs the product, with its name and summary as the tooltip.
-    const first = document.querySelector(`[data-product-chip="${chips[0]}"]`)!;
-    const idea = IDEAS.find((i) => i.id === chips[0])!;
-    expect(first.textContent).toBe(idea.label);
-    expect(first.getAttribute("title")).toBe(`${idea.productName}: ${idea.summary}`);
+    // Each chip is named by its draft product name, with the problem it answers as the tooltip.
+    for (const id of chips) {
+      const chip = document.querySelector(`[data-product-chip="${id}"]`)!;
+      const idea = IDEAS.find((i) => i.id === id)!;
+      expect(chip.textContent).toBe(idea.productName);
+      expect(chip.getAttribute("title")).toBe(idea.label);
+    }
   });
 
   it("a chip starts the product chat with the idea as the first message, and starts no build", async () => {
@@ -301,7 +303,7 @@ describe("product ideas in Financial product mode", () => {
     expect(productChips()).toEqual([]);
   });
 
-  it("Templates lists every product idea (Idea, What it is, Product line), and Use opens the Create product sheet filled with it", async () => {
+  it("Templates lists every product idea (Product, For, Product line), and Use opens the Create product sheet filled with it", async () => {
     productIdeas = IDEAS;
     await loaded();
     await act(async () => void fireEvent.click(option("product")));
@@ -309,12 +311,18 @@ describe("product ideas in Financial product mode", () => {
     await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Open Templates" })));
     await settle();
     const panel = document.querySelector('[data-panel-content="templates"]') as HTMLElement;
-    expect([...panel.querySelectorAll("th")].map((h) => h.textContent)).toEqual(["Idea", "What it is", "Product line", ""]);
+    expect([...panel.querySelectorAll("th")].map((h) => h.textContent)).toEqual(["Product", "For", "Product line", ""]);
     expect(panel.querySelectorAll("[data-product-idea-row]").length).toBeGreaterThan(0);
     expect(panel.querySelector("[data-template-row]")).toBeNull();
     const row = panel.querySelector('[data-product-idea-row="no-penalty-cd"]') as HTMLElement;
-    expect(row.textContent).toContain("Gig workers avoid CDs in case they need the cash early");
-    expect(row.textContent).toContain("A factual line about no-penalty-cd.");
+    // Product is the draft name; For is the problem it answers, with the whole sentence as its tooltip.
+    const cells = row.querySelectorAll("td");
+    expect(cells[0].textContent).toBe("Draft no-penalty-cd");
+    expect(cells[0].getAttribute("title")).toBe("A factual line about no-penalty-cd.");
+    const problem = row.querySelector("[data-product-idea-problem]")!;
+    expect(cells[1].contains(problem)).toBe(true);
+    expect(problem.textContent).toBe("Gig workers avoid CDs in case they need the cash early");
+    expect(problem.getAttribute("title")).toBe("Gig workers avoid CDs in case they need the cash early");
     expect(row.textContent).toContain("account operations");
 
     await act(async () => void fireEvent.click(within(row).getByRole("button", { name: "Use" })));

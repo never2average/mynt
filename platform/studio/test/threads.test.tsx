@@ -11,7 +11,6 @@ import type { ChatTransport, UIMessage, UIMessageChunk } from "ai";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { NewAppWorkspace, type NewAppProduct } from "@/components/new-app-workspace";
-import { RecentThreads, ThreadsDialog } from "@/components/recent-threads";
 import { NavFolders } from "@/components/nav-folders";
 import { stagedItems } from "@/components/app-sidebar";
 import { Sidebar, SidebarContent, SidebarProvider } from "@/components/ui/sidebar";
@@ -135,56 +134,6 @@ describe("the threads list", () => {
   });
 });
 
-describe("Recent and View all", () => {
-  const list = mergeThreads(APPS, CHATS, MINE);
-
-  it("Recent shows at most six, each with its type, name, status and when", () => {
-    render(<RecentThreads threads={list} onOpen={() => undefined} now={NOW} />);
-    const items = document.querySelectorAll("[data-recent-thread]");
-    expect(items).toHaveLength(6);
-    expect([...items].map((i) => i.getAttribute("data-recent-thread"))).toEqual(list.slice(0, 6).map((t) => t.key));
-    const first = items[0] as HTMLElement;
-    expect(first.getAttribute("aria-label")).toBe("App: Rent ready");
-    expect(first.querySelector("[data-thread-kind]")?.textContent).toBe("App");
-    expect(first.querySelector("[data-thread-status]")?.textContent).toBe("Idea");
-    expect(first.querySelector("[data-thread-updated]")?.textContent).toBe("1 h ago");
-    expect((items[1] as HTMLElement).querySelector("[data-thread-kind]")?.textContent).toBe("Financial product");
-    expect(screen.getByRole("button", { name: "View all" })).toBeTruthy();
-  });
-
-  it("Recent is left out until there is a thread", () => {
-    render(<RecentThreads threads={[]} onOpen={() => undefined} />);
-    expect(document.querySelector("[data-recent]")).toBeNull();
-  });
-
-  it("View all lists every thread with a search box and All · Apps · Financial products", async () => {
-    const onOpen = vi.fn();
-    render(<RecentThreads threads={list} onOpen={onOpen} now={NOW} />);
-    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "View all" })));
-    const dialog = document.querySelector("[data-dialog=threads]") as HTMLElement;
-    expect(dialog).not.toBeNull();
-    const rows = () => [...dialog.querySelectorAll("[data-thread-row]")].map((r) => r.getAttribute("data-thread-row"));
-    expect(rows()).toEqual(list.map((t) => t.key));
-    const filters = within(dialog).getByRole("radiogroup", { name: "Show" });
-    expect([...filters.querySelectorAll("[role=radio]")].map((b) => b.textContent)).toEqual(["All", "Apps", "Financial products"]);
-    await act(async () => void fireEvent.click(within(filters).getByRole("radio", { name: "Apps" })));
-    expect(rows()).toEqual(["app:app-2", "app:app-1", "app:app-3"]);
-    await act(async () => void fireEvent.click(within(filters).getByRole("radio", { name: "Financial products" })));
-    expect(rows()).toEqual(["product:green-savings", "chat:c1", "product:dollar-account", "chat:c2"]);
-    fireEvent.change(within(dialog).getByLabelText("Search threads"), { target: { value: "student" } });
-    expect(rows()).toEqual(["chat:c2"]);
-    fireEvent.change(within(dialog).getByLabelText("Search threads"), { target: { value: "nothing like it" } });
-    expect(dialog.querySelector("[data-no-threads]")?.textContent).toBe("No threads match.");
-  });
-
-  it("picking a row opens it and closes the list", async () => {
-    const onOpen = vi.fn();
-    render(<ThreadsDialog open onOpenChange={() => undefined} threads={list} onOpen={onOpen} />);
-    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Financial product: Green Savings" })));
-    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ key: "product:green-savings" }));
-  });
-});
-
 // ---- on the Build page ----
 
 const PRODUCTS: NewAppProduct[] = [
@@ -212,7 +161,6 @@ function fakeTransport(sent: string[]): ChatTransport<UIMessage> {
 }
 const settle = async (ms = 30) => act(async () => void (await new Promise((r) => setTimeout(r, ms))));
 const modeOf = () => document.querySelector("[data-new-app-chat]")!.getAttribute("data-mode");
-const recentKeys = () => [...document.querySelectorAll("[data-recent-thread]")].map((e) => e.getAttribute("data-recent-thread"));
 
 function workspace(opts: { onOpenApp?: (href: string) => void; sent?: string[]; openRequest?: { thread?: string; product?: string; n: number } } = {}) {
   return (
@@ -232,24 +180,18 @@ function workspace(opts: { onOpenApp?: (href: string) => void; sent?: string[]; 
 }
 
 describe("threads on the Build page", () => {
-  it("Recent sits under the welcome, above the idea chips; an app opens its page", async () => {
+  it("the Build page has no Recent section or View all (threads are in the sidebar)", async () => {
     seedChats();
-    const onOpenApp = vi.fn();
-    render(workspace({ onOpenApp }));
+    render(workspace());
     await settle();
-    const welcome = document.querySelector("[data-chat-welcome]")!;
-    expect(welcome.querySelector("[data-recent]")).not.toBeNull();
-    expect(recentKeys()).toHaveLength(6);
-    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "App: Rent ready" })));
-    expect(onOpenApp).toHaveBeenCalledWith("/app-2");
+    expect(document.querySelector("[data-recent]")).toBeNull();
+    expect(document.querySelector("[data-recent-thread]")).toBeNull();
+    expect(screen.queryByRole("button", { name: "View all" })).toBeNull();
   });
 
   it("a product chat comes back in Create product with its messages, read from Mynt", async () => {
     seedChats();
-    render(workspace());
-    await settle();
-    expect(modeOf()).toBe("build");
-    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Financial product: A green savings account" })));
+    render(workspace({ openRequest: { thread: C1, n: 1 } }));
     await settle(60);
     expect(modeOf()).toBe("product");
     expect(screen.getByText("About A green savings account")).toBeTruthy();
@@ -270,9 +212,7 @@ describe("threads on the Build page", () => {
   });
 
   it("a product opens the Products tab on it", async () => {
-    render(workspace());
-    await settle();
-    await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Financial product: Green Savings" })));
+    render(workspace({ openRequest: { product: "green-savings", n: 1 } }));
     await settle();
     const row = document.querySelector('[data-product-row="green-savings"]') as HTMLElement;
     expect(row).not.toBeNull();
@@ -280,11 +220,10 @@ describe("threads on the Build page", () => {
     expect((screen.getByLabelText("Search products") as HTMLInputElement).value).toBe("Green Savings");
   });
 
-  it("a first message in Create product makes a thread that's in Recent next time", async () => {
+  it("a first message in Create product saves the chat on Mynt", async () => {
     const sent: string[] = [];
     render(workspace({ sent }));
     await settle();
-    expect(recentKeys().some((k) => k?.startsWith("chat:"))).toBe(false);
     await act(async () => void fireEvent.click(document.querySelector('[data-mode-option="product"]') as HTMLElement));
     await settle();
     fireEvent.change(screen.getByLabelText("Message input"), { target: { value: "A savings account for nurses" } });
@@ -300,11 +239,6 @@ describe("threads on the Build page", () => {
       [1, "message", "user"],
       [2, "message", "assistant"],
     ]);
-    cleanup();
-    render(workspace());
-    await settle();
-    expect(recentKeys()[0]).toBe(`chat:${saved[0].id}`);
-    expect(screen.getByRole("button", { name: "Financial product: A savings account for nurses" })).toBeTruthy();
   });
 });
 
@@ -365,8 +299,6 @@ describe("product chats on Mynt", () => {
     expect(kept[0].messages).toEqual(old[0].messages);
     // Only this user's left the browser.
     expect(Object.keys(JSON.parse(window.localStorage.getItem(LEGACY_KEYS.product)!))).toEqual(["someone-else"]);
-    // They're in Recent, the one with a product as Created.
-    expect(screen.getByRole("button", { name: "Financial product: A card for students" }).querySelector("[data-thread-status]")?.textContent).toBe("Created");
     // Run again (another tab had the same copy): nothing added twice.
     const events = kept.map((c) => c.events.length);
     window.localStorage.setItem(LEGACY_KEYS.product, stored);
