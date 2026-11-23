@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Session } from "@/lib/session-store";
-import { agreementFileType, canDownload, canSign, esignFrameSources, esignOf, fromFirmAgreements, fromTemplates, framable } from "@/lib/agreement-esign";
-import { fromAgreements } from "@/lib/app-panel";
+import { agreementFileType, canDownload, canSign, esignFrameSources, esignOf, fromTemplates, framable } from "@/lib/agreement-esign";
+import { agreementActions, fromAgreements } from "@/lib/app-panel";
+import { lpAgreementsFrom } from "@/lib/lp-agreements";
 import { contentSecurityPolicy } from "@/lib/csp";
 
 // Program agreements signed by e-signature in the studio: a licence provider's templates (Upload agreement template,
@@ -40,6 +41,7 @@ vi.mock("@/lib/tokens", () => ({
 }));
 
 const ui = await import("@/components/agreement-esign");
+const lp = await import("@/components/lp-agreements-view");
 
 const session = (roles: string[]) => ({ id: "s", createdAt: 0, lastSeen: 0, tokens: { access_token: "t", token_type: "Bearer" }, roles, rolesAt: Date.now() }) as Session;
 beforeEach(() => {
@@ -70,9 +72,11 @@ describe("reading Mynt's replies", () => {
     const t = fromTemplates({ e_signature_configured: true, test_mode: true, templates: [{ id: TEMPLATE, name: "Program", version: 2, sponsorship_id: null, licence_id: "l1", file_name: "p.pdf", sha256: "a".repeat(64), active: true, created_at: "2026-11-20T00:00:00Z" }] })!;
     expect(t.configured).toBe(true);
     expect(t.templates[0]).toMatchObject({ name: "Program", version: 2, attachedTo: "A licence", file: "p.pdf", active: true });
-    const rows = fromFirmAgreements({ agreements: [programRow()] })!;
+    // The licence provider's rows (the Licences page's Agreements tab): Sign is its turn on the e-signature document.
+    const rows = lpAgreementsFrom({ agreements: [programRow()] })!;
     expect(rows[0]).toMatchObject({ appName: "Pay app", status: "Accepted: waiting for signatures", products: ["Card"] });
     expect(rows[0].signatures).toBe("You haven't signed; they signed (test mode)");
+    expect(rows[0].actions).toEqual(["sign", "end"]);
     expect(canSign("accepted", rows[0].esign, "counterparty")).toBe(true);
     expect(canSign("accepted", rows[0].esign, "app")).toBe(false);
     expect(canDownload(rows[0].esign)).toBe(false);
@@ -86,6 +90,7 @@ describe("reading Mynt's replies", () => {
     const app = fromAgreements({ can_manage: true, agreements: [programRow()], products: [], vendor_contracts: [], introductions: null })!;
     expect(app.agreements[0].esign?.appSigned).toBe(true);
     expect(app.agreements[0].signatures).toBe("You signed; they haven't signed (test mode)");
+    expect(agreementActions(app.agreements[0], "app")).toEqual(["end"]);
   });
 
   it("files by their bytes; signing pages framed only from the allowed origins, which the policy lists", () => {
@@ -104,28 +109,37 @@ describe("reading Mynt's replies", () => {
 });
 
 describe("the views", () => {
-  it("a licence provider's Agreements page: both tables, labelled actions, test mode and not-configured notes", () => {
-    const data = { configured: true, testMode: true, templates: fromTemplates({ templates: [{ id: TEMPLATE, name: "Program", version: 1, active: true, file_name: "p.pdf", sha256: "c".repeat(64) }] })!.templates, agreements: fromFirmAgreements({ agreements: [programRow()] })!, licences: [] };
-    const html = renderToStaticMarkup(<ui.FirmAgreementsView data={data} />);
-    expect(html).toContain("Upload agreement template");
-    expect(html).toContain("data-agreement-sign");
-    expect(html).toContain("Retire");
-    expect(html).toContain("test mode");
-    expect(html).not.toContain("Download signed copy");
-    const off = renderToStaticMarkup(<ui.FirmAgreementsView data={{ ...data, configured: false, templates: [], agreements: [] }} />);
+  it("the Licences page's Agreements tab: Sign opens the e-signature sheet, the signed copy once held; the templates section", () => {
+    const rows = lpAgreementsFrom({ agreements: [programRow(), programRow({ id: "55555555-5555-4555-8555-555555555555", status: "signed", signature_document: { status: "completed", signers: {}, signed_copy: { sha256: "d".repeat(64) } } })] })!;
+    const html = renderToStaticMarkup(<lp.LpAgreementsView rows={rows} />);
+    expect(html).toContain('data-agreement-action="sign"');
+    expect(html).toContain("Download signed copy");
+    expect(html).toContain("/api/agreements/55555555-5555-4555-8555-555555555555/document?part=signed");
+    expect(html).toContain("part=certificate");
+    const data = { configured: true, testMode: true, templates: fromTemplates({ templates: [{ id: TEMPLATE, name: "Program", version: 1, active: true, file_name: "p.pdf", sha256: "c".repeat(64) }] })!.templates, licences: [] };
+    const t = renderToStaticMarkup(<ui.AgreementTemplatesSection data={data} />);
+    expect(t).toContain("Upload agreement template");
+    expect(t).toContain("Retire");
+    expect(t).toContain("test mode");
+    const off = renderToStaticMarkup(<ui.AgreementTemplatesSection data={{ ...data, configured: false, templates: [] }} />);
     expect(off).toContain("E-signature isn&#x27;t configured on this deployment yet");
     expect(off).toContain("data-no-templates");
   });
 
-  it("row actions: Sign while it's the side's turn, Download signed copy once Mynt holds it", () => {
+  it("Sign on an e-signature row opens the signing sheet, not the manual one", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ ok: true, url: "https://sign.service.test/embed/1", framable: false }), { status: 200 }));
+    render(<lp.LpAgreementsView rows={lpAgreementsFrom({ agreements: [programRow()] })!} fetcher={fetcher as unknown as typeof fetch} />);
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-agreement-action="sign"]')!);
+    });
+    expect(fetcher).toHaveBeenCalledWith(`/api/agreements/${AGREEMENT}/signing-link`, { method: "POST" });
+    expect(await screen.findByText("Open the signing page")).toBeTruthy();
+  });
+
+  it("the signed copy's links: only once Mynt holds it", () => {
     const signed = esignOf(programRow({ status: "signed", signature_document: { status: "completed", signers: {}, signed_copy: { sha256: "d".repeat(64) } } }));
-    const html = renderToStaticMarkup(<ui.AgreementRowActions agreementId={AGREEMENT} esign={signed} statusKey="signed" side="app" />);
-    expect(html).toContain("Download signed copy");
-    expect(html).toContain(`/api/agreements/${AGREEMENT}/document?part=signed`);
-    expect(html).toContain("part=certificate");
-    expect(html).not.toContain("data-agreement-sign");
-    const member = renderToStaticMarkup(<ui.AgreementRowActions agreementId={AGREEMENT} esign={esignOf(programRow({ signature_document: { status: "pending", signers: {} } }))} statusKey="accepted" side="app" canAct={false} />);
-    expect(member).not.toContain("data-agreement-sign");
+    expect(renderToStaticMarkup(<ui.SignedCopyLinks agreementId={AGREEMENT} esign={signed} />)).toContain("Download signed copy");
+    expect(renderToStaticMarkup(<ui.SignedCopyLinks agreementId={AGREEMENT} esign={esignOf(programRow())} />)).toBe("");
   });
 
   it("the signing sheet frames an allowed page, and otherwise offers it in a new tab", () => {

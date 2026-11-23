@@ -1,23 +1,25 @@
 "use client"
 
 // Program agreements signed by e-signature, in the studio (lib/agreement-esign.ts):
-// - Upload agreement template (a licence provider's Agreements page): a labelled button opening a sheet with the
+// - Upload agreement template (the Licences page's Agreements tab, for licence providers): a labelled button opening a sheet with the
 //   template's name, what it's attached to (a licence, or the firm's default), the file (PDF or DOCX, at most 5 MB)
 //   and notes on where fields go. Mynt keeps the file sealed, with its SHA-256; versions never change.
-// - Sign (either side's agreement rows): a sheet with the signer's embedded signing page, framed only from an origin
+// - Sign, where e-signature is configured (either side's agreement rows, in place of the manual Sign): a sheet with the signer's embedded signing page, framed only from an origin
 //   the deployment allows (ESIGN_FRAME_SRC), otherwise offered in a new tab. Only Mynt decides who signs.
 // - Download signed copy: the PDF Mynt keeps once both have signed, and the audit certificate beside it.
 // Mynt checks everything again and may refuse; its reason is shown in its own words. Views render on the server
 // for the tests.
 import { useCallback, useEffect, useState } from "react"
-import { Download, FilePlus2, PenLine } from "lucide-react"
+import { Download, FilePlus2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { AGREEMENT_FILE_MAX_BYTES, agreementFileType, canDownload, canSign, type EsignInfo, type FirmAgreementRow, type TemplateRow } from "@/lib/agreement-esign"
+import { AGREEMENT_FILE_MAX_BYTES, agreementFileType, canDownload, type EsignInfo, type TemplateRow } from "@/lib/agreement-esign"
 
 const field = "rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+// One function for the default, so a sheet that fetches when it opens doesn't fetch again on every render.
+const browserFetch: typeof fetch = (...a) => fetch(...a)
 const signedOut = (status: number | undefined) => {
   if (status === 401 && typeof window !== "undefined") window.dispatchEvent(new Event("mynt:signed-out"))
 }
@@ -206,7 +208,7 @@ export function SigningView({ signing }: { signing: Signing }) {
   )
 }
 
-export function SigningSheet({ agreementId, open, onClose, fetcher = (...a) => fetch(...a) }: { agreementId: string; open: boolean; onClose: () => void; fetcher?: typeof fetch }) {
+export function SigningSheet({ agreementId, open, onClose, fetcher = browserFetch }: { agreementId: string; open: boolean; onClose: () => void; fetcher?: typeof fetch }) {
   const [signing, setSigning] = useState<Signing>({ state: "loading" })
   const load = useCallback(async () => {
     setSigning({ state: "loading" })
@@ -235,55 +237,57 @@ export function SigningSheet({ agreementId, open, onClose, fetcher = (...a) => f
   )
 }
 
-// The labelled actions on an agreement row, for the side looking at it.
-export function AgreementRowActions({ agreementId, esign, statusKey, side, canAct = true, onChanged }: { agreementId: string; esign: EsignInfo | null; statusKey: string; side: "app" | "counterparty"; canAct?: boolean; onChanged?: () => void }) {
-  const [signing, setSigning] = useState(false)
-  const sign = canAct && canSign(statusKey, esign, side)
-  const download = canDownload(esign)
-  if (!sign && !download) return <span className="text-xs text-muted-foreground">—</span>
+// Download signed copy and Download certificate, once Mynt holds the signed copy (either party's members).
+export function SignedCopyLinks({ agreementId, esign }: { agreementId: string; esign: EsignInfo | null }) {
+  if (!canDownload(esign)) return null
   const href = (part: string) => `/api/agreements/${encodeURIComponent(agreementId)}/document?part=${part}`
   return (
-    <div className="flex flex-wrap gap-2" data-agreement-actions={agreementId}>
-      {sign && (
-        <Button size="sm" variant="outline" onClick={() => setSigning(true)} data-agreement-sign={agreementId}>
-          <PenLine /> Sign
-        </Button>
-      )}
-      {download && (
-        <>
-          <Button size="sm" variant="outline" asChild>
-            <a href={href("signed")} data-agreement-download={agreementId}>
-              <Download /> Download signed copy
-            </a>
-          </Button>
-          <Button size="sm" variant="ghost" asChild>
-            <a href={href("certificate")} data-agreement-certificate={agreementId}>
-              Download certificate
-            </a>
-          </Button>
-        </>
-      )}
-      {sign && (
-        <SigningSheet
-          agreementId={agreementId}
-          open={signing}
-          onClose={() => {
-            setSigning(false)
-            onChanged?.()
-          }}
-        />
-      )}
+    <div className="flex flex-wrap gap-1.5" data-signed-copy={agreementId}>
+      <Button size="sm" variant="outline" className="h-7" asChild>
+        <a href={href("signed")} data-agreement-download={agreementId}>
+          <Download /> Download signed copy
+        </a>
+      </Button>
+      <Button size="sm" variant="ghost" className="h-7" asChild>
+        <a href={href("certificate")} data-agreement-certificate={agreementId}>
+          Download certificate
+        </a>
+      </Button>
     </div>
   )
 }
 
 const when = (v: string | null) => (v ? v.slice(0, 10) : "—")
 
-export type FirmAgreements = { configured: boolean; testMode: boolean | null; templates: TemplateRow[]; agreements: FirmAgreementRow[]; licences: Licence[] }
+export type AgreementTemplates = { configured: boolean; testMode: boolean | null; templates: TemplateRow[]; licences: Licence[] }
+type TemplatesState = { kind: "loading" } | { kind: "unsupported" } | { kind: "error"; message: string } | { kind: "ready"; data: AgreementTemplates }
 
-// A licence provider's Agreements page: the agreements apps made with its firm (Sign, Download signed copy), and its
-// agreement templates (Upload agreement template, Retire).
-export function FirmAgreementsView({ data, onChanged, fetcher = (...a) => fetch(...a) }: { data: FirmAgreements; onChanged?: () => void; fetcher?: typeof fetch }) {
+/** The templates section's data, from /api/agreements/templates, read again after an upload or a retirement. */
+export function useAgreementTemplates(enabled: boolean): { state: TemplatesState; reload: () => void } {
+  const [state, setState] = useState<TemplatesState>({ kind: "loading" })
+  const [tick, setTick] = useState(0)
+  const reload = useCallback(() => setTick((t) => t + 1), [])
+  useEffect(() => {
+    if (!enabled) return
+    let live = true
+    void (async () => {
+      const res = await fetch("/api/agreements/templates", { cache: "no-store" }).catch(() => null)
+      signedOut(res?.status)
+      const body = (await res?.json().catch(() => null)) as (AgreementTemplates & { message?: string }) | null
+      if (!live) return
+      if (res?.status === 501) return setState({ kind: "unsupported" })
+      setState(res?.ok && body && Array.isArray(body.templates) ? { kind: "ready", data: body } : { kind: "error", message: body?.message ?? "Couldn't reach Mynt. Please try again." })
+    })()
+    return () => {
+      live = false
+    }
+  }, [enabled, tick])
+  return { state, reload }
+}
+
+// The licence provider's agreement templates, on the Licences page's Agreements tab below the agreements: whether
+// e-signature is on (and in test mode), the firm's templates (Retire), and Upload agreement template.
+export function AgreementTemplatesSection({ data, onChanged, fetcher = (...a) => fetch(...a) }: { data: AgreementTemplates; onChanged?: () => void; fetcher?: typeof fetch }) {
   const [uploading, setUploading] = useState(false)
   const [retireError, setRetireError] = useState<string | null>(null)
   const retire = async (id: string) => {
@@ -295,10 +299,21 @@ export function FirmAgreementsView({ data, onChanged, fetcher = (...a) => fetch(
     onChanged?.()
   }
   return (
-    <div className="flex flex-col gap-6" data-firm-agreements>
+    <section className="flex flex-col gap-3" aria-labelledby="agreement-templates" data-agreement-templates>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2 id="agreement-templates" className="text-base font-semibold">
+            Agreement templates
+          </h2>
+          <p className="text-sm text-muted-foreground">Your firm&apos;s program agreement, by licence, which apps sign by e-signature. The newest version of each is used.</p>
+        </div>
+        <Button size="sm" onClick={() => setUploading(true)} data-upload-template>
+          <FilePlus2 /> Upload agreement template
+        </Button>
+      </div>
       {!data.configured && (
         <p className="rounded-md border px-3 py-2 text-sm text-muted-foreground" data-esign-not-configured>
-          E-signature isn&apos;t configured on this deployment yet. You can upload templates now; until it&apos;s on, both sides record their signatures by hand.
+          E-signature isn&apos;t configured on this deployment yet. You can upload templates now; until it&apos;s on, both sides sign by hand (Sign).
         </p>
       )}
       {data.configured && data.testMode && (
@@ -306,115 +321,61 @@ export function FirmAgreementsView({ data, onChanged, fetcher = (...a) => fetch(
           E-signature is in test mode: documents signed now aren&apos;t legally binding.
         </p>
       )}
-      <section className="flex flex-col gap-3" aria-labelledby="firm-agreements">
-        <div>
-          <h2 id="firm-agreements" className="text-base font-semibold">
-            Agreements with apps
-          </h2>
-          <p className="text-sm text-muted-foreground">Program agreements apps proposed to your firm. Sign them here once you&apos;ve accepted them.</p>
-        </div>
-        {data.agreements.length ? (
-          <div className="overflow-x-auto rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>App</TableHead>
-                  <TableHead>Kind</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Products covered</TableHead>
-                  <TableHead>Actions</TableHead>
+      {retireError && (
+        <p role="alert" className="text-sm text-destructive">
+          {retireError}
+        </p>
+      )}
+      {data.templates.length ? (
+        <div className="overflow-x-auto rounded-lg border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Version</TableHead>
+                <TableHead>Attached to</TableHead>
+                <TableHead>File</TableHead>
+                <TableHead>SHA-256</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Uploaded</TableHead>
+                <TableHead>Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.templates.map((t) => (
+                <TableRow key={t.id} data-template={t.id} data-active={t.active}>
+                  <TableCell className="whitespace-normal font-medium">
+                    {t.name}
+                    {t.notes && <div className="text-xs text-muted-foreground">{t.notes}</div>}
+                  </TableCell>
+                  <TableCell className="tabular-nums">{t.version}</TableCell>
+                  <TableCell>{t.attachedTo}</TableCell>
+                  <TableCell className="whitespace-normal">{t.file ?? "—"}</TableCell>
+                  <TableCell className="font-mono text-xs" title={t.sha256 ?? undefined}>
+                    {t.sha256 ? `${t.sha256.slice(0, 12)}…` : "—"}
+                  </TableCell>
+                  <TableCell>{t.active ? "In use" : "Retired"}</TableCell>
+                  <TableCell className="text-xs tabular-nums">{when(t.createdAt)}</TableCell>
+                  <TableCell>
+                    {t.active ? (
+                      <Button size="sm" variant="outline" className="h-7" onClick={() => void retire(t.id)} data-retire-template={t.id}>
+                        Retire
+                      </Button>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
                 </TableRow>
-              </TableHeader>
-              <TableBody>
-                {data.agreements.map((a) => (
-                  <TableRow key={a.id} data-firm-agreement={a.id} data-status={a.statusKey}>
-                    <TableCell className="whitespace-normal font-medium">{a.appName}</TableCell>
-                    <TableCell>{a.kind}</TableCell>
-                    <TableCell className="whitespace-normal">
-                      {a.status}
-                      {a.signatures && <div className="text-xs text-muted-foreground">{a.signatures}</div>}
-                    </TableCell>
-                    <TableCell className="whitespace-normal">{a.products.join(", ") || "—"}</TableCell>
-                    <TableCell>
-                      <AgreementRowActions agreementId={a.id} esign={a.esign} statusKey={a.statusKey} side="counterparty" onChanged={onChanged} />
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">No agreements with apps yet.</p>
-        )}
-      </section>
-      <section className="flex flex-col gap-3" aria-labelledby="firm-templates">
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <h2 id="firm-templates" className="text-base font-semibold">
-              Agreement templates
-            </h2>
-            <p className="text-sm text-muted-foreground">Your firm&apos;s program agreement, by licence. The newest version of each is used.</p>
-          </div>
-          <Button size="sm" onClick={() => setUploading(true)} data-upload-template>
-            <FilePlus2 /> Upload agreement template
-          </Button>
+              ))}
+            </TableBody>
+          </Table>
         </div>
-        {retireError && (
-          <p role="alert" className="text-sm text-destructive">
-            {retireError}
-          </p>
-        )}
-        {data.templates.length ? (
-          <div className="overflow-x-auto rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Version</TableHead>
-                  <TableHead>Attached to</TableHead>
-                  <TableHead>File</TableHead>
-                  <TableHead>SHA-256</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Uploaded</TableHead>
-                  <TableHead>Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {data.templates.map((t) => (
-                  <TableRow key={t.id} data-template={t.id} data-active={t.active}>
-                    <TableCell className="whitespace-normal font-medium">
-                      {t.name}
-                      {t.notes && <div className="text-xs text-muted-foreground">{t.notes}</div>}
-                    </TableCell>
-                    <TableCell className="tabular-nums">{t.version}</TableCell>
-                    <TableCell>{t.attachedTo}</TableCell>
-                    <TableCell className="whitespace-normal">{t.file ?? "—"}</TableCell>
-                    <TableCell className="font-mono text-xs" title={t.sha256 ?? undefined}>
-                      {t.sha256 ? `${t.sha256.slice(0, 12)}…` : "—"}
-                    </TableCell>
-                    <TableCell>{t.active ? "In use" : "Retired"}</TableCell>
-                    <TableCell className="text-xs tabular-nums">{when(t.createdAt)}</TableCell>
-                    <TableCell>
-                      {t.active ? (
-                        <Button size="sm" variant="outline" onClick={() => void retire(t.id)} data-retire-template={t.id}>
-                          Retire
-                        </Button>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">—</span>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        ) : (
-          <p className="text-sm text-muted-foreground" data-no-templates>
-            No templates yet. Upload your firm&apos;s program agreement so apps can sign it.
-          </p>
-        )}
-      </section>
+      ) : (
+        <p className="text-sm text-muted-foreground" data-no-templates>
+          No templates yet. Upload your firm&apos;s program agreement so apps can sign it.
+        </p>
+      )}
       <UploadTemplateSheet licences={data.licences} open={uploading} onClose={() => setUploading(false)} onDone={() => onChanged?.()} fetcher={fetcher} />
-    </div>
+    </section>
   )
 }

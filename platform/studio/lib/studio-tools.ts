@@ -154,8 +154,13 @@ export const STUDIO_TOOLS = {
   request_promotion_signoff: z.object({ app_id: id }).strict(),
   // An app's Products, Agreements and Customers tabs: its products with their sponsors, its agreements with the firms
   // behind them (Propose agreement), and the personas it targets (Choose personas). Apps hold no licences themselves.
-  // Without app_id: a licence provider's Agreements page, the agreements apps made with its firm.
+  // Without app_id: the Licences page's Agreements tab, a licence provider's list of what apps proposed to its firm.
   list_app_agreements: z.object({ app_id: id.optional(), status: z.enum(["proposed", "accepted", "signed", "declined", "terminated"]).optional() }).strict(),
+  // Each side's row actions: the licence provider accepts or declines (Accept / Decline), either side signs (Sign) and
+  // either side ends one with a reason (End agreement; Withdraw for the app's own proposal). Mynt decides who may.
+  respond_to_app_agreement: z.object({ agreement_id: uuid, decision: z.enum(["accept", "decline"]), note: z.string().trim().max(2000).optional() }).strict(),
+  sign_app_agreement: z.object({ agreement_id: uuid }).strict(),
+  terminate_app_agreement: z.object({ agreement_id: uuid, reason: z.string().trim().min(3).max(2000) }).strict(),
   propose_app_agreement: z
     .object({
       app_id: id,

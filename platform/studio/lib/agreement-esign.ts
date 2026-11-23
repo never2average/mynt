@@ -96,50 +96,6 @@ export function fromTemplates(reply: unknown): { templates: TemplateRow[]; confi
   };
 }
 
-const STATUS: Record<string, string> = {
-  proposed: "Proposed: waiting for your answer",
-  accepted: "Accepted: waiting for signatures",
-  signed: "Signed",
-  declined: "Declined",
-  terminated: "Ended",
-};
-
-export type FirmAgreementRow = {
-  id: string;
-  appName: string;
-  kind: string;
-  status: string;
-  statusKey: string;
-  products: string[];
-  esign: EsignInfo | null;
-  signatures: string | null;
-};
-
-// A licence provider's view: the agreements apps made with its firm (list_app_agreements without app_id).
-export function fromFirmAgreements(reply: unknown): FirmAgreementRow[] | null {
-  if (!isObj(reply) || !Array.isArray(reply.agreements)) return null;
-  return arr(reply.agreements)
-    .filter(isObj)
-    .flatMap((a): FirmAgreementRow[] => {
-      const id = str(a.id);
-      if (!id) return [];
-      const statusKey = str(a.status) ?? "unknown";
-      const esign = esignOf(a);
-      return [
-        {
-          id,
-          appName: (isObj(a["app"]) ? str((a["app"] as Record<string, unknown>).name) : null) ?? "An app",
-          kind: a.kind === "program" ? "Program agreement" : a.kind === "vendor" ? "Vendor contract" : a.kind === "data_sharing" ? "Data sharing" : "Agreement",
-          status: STATUS[statusKey] ?? statusKey,
-          statusKey,
-          products: arr(a.products).map((p) => (isObj(p) ? (str(p.name) ?? str(p.id)) : str(p))).filter((p): p is string => Boolean(p)),
-          esign,
-          signatures: esign && statusKey === "accepted" ? esignStatusLine(esign, "counterparty") : null,
-        },
-      ];
-    });
-}
-
 // Whether a row offers Sign / Download signed copy, for the side looking at it.
 export const canSign = (statusKey: string, e: EsignInfo | null, side: "app" | "counterparty") =>
   Boolean(e?.byEsign && statusKey === "accepted" && !(side === "app" ? e.appSigned : e.counterpartySigned));

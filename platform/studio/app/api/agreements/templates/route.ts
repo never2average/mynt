@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { AGREEMENT_FILE_MAX_BYTES, agreementFileType } from "@/lib/agreement-esign";
+import { AGREEMENT_FILE_MAX_BYTES, agreementFileType, fromTemplates } from "@/lib/agreement-esign";
 import { asAgreementParty, hasTool, NOT_YET } from "@/lib/agreement-esign-server";
 import { fromOwnOrigin } from "@/lib/session";
 import { callStudioTool } from "@/lib/studio-server";
@@ -18,6 +18,24 @@ const Fields = z
     notes: z.preprocess((v) => (v === "" ? undefined : v), STUDIO_TOOLS.upload_agreement_template.shape.notes),
   })
   .strict();
+
+// GET: the licence provider's agreement templates for the Licences page's Agreements tab, whether e-signature is on
+// (and in test mode), and its firm's licences for the Upload agreement template sheet. Licence providers only.
+export async function GET() {
+  return asAgreementParty(
+    "reading a firm's agreement templates",
+    async (mynt) => {
+      if (!(await hasTool(mynt, "list_agreement_templates"))) return NOT_YET;
+      const [templates, licences] = await Promise.all([callStudioTool(mynt, "list_agreement_templates", { include_retired: true }), callStudioTool(mynt, "list_my_licenses", {}).catch(() => null)]);
+      const t = fromTemplates(templates);
+      const lics = (licences && typeof licences === "object" && Array.isArray((licences as { licences?: unknown }).licences) ? (licences as { licences: Record<string, unknown>[] }).licences : [])
+        .filter((l) => typeof l?.id === "string")
+        .map((l) => ({ id: l.id as string, label: [l.license_id, l.registration_number, l.jurisdiction].filter((x) => typeof x === "string" && x).join(" · ") || "Licence" }));
+      return json({ configured: t?.configured ?? false, testMode: t?.testMode ?? null, templates: t?.templates ?? [], licences: lics });
+    },
+    true,
+  );
+}
 
 // POST (multipart/form-data): upload a template. Same origin and a signed-in licence provider only.
 export async function POST(req: Request) {

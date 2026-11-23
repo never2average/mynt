@@ -123,16 +123,22 @@ describe("the routes", () => {
     expect((await documentRoute.GET(new Request(`http://studio.test/api/agreements/${AGREEMENT}/document`), { params: Promise.resolve({ agreementId: AGREEMENT }) })).status).toBe(501);
   });
 
-  it("the Agreements page's data: licence providers only", async () => {
+  it("the Agreements tab's templates section: licence providers only; their agreements stay #297's route", async () => {
     fake.reply.list_agreement_templates = { e_signature_configured: false, templates: [] };
-    fake.reply.list_app_agreements = { agreements: [programRow()] };
     fake.reply.list_my_licenses = { licences: [{ id: "l1", license_id: "money-transmitter", registration_number: "123", jurisdiction: "us-ny" }] };
-    const body = await (await listRoute.GET()).json();
+    const body = await (await templatesRoute.GET()).json();
     expect(body.configured).toBe(false);
-    expect(body.agreements[0].appName).toBe("Pay app");
+    expect(body.templates).toEqual([]);
     expect(body.licences).toEqual([{ id: "l1", label: "money-transmitter · 123 · us-ny" }]);
-    expect(fake.calls.find((c) => c.name === "list_app_agreements")?.args).toEqual({});
+    expect(fake.calls.find((c) => c.name === "list_agreement_templates")?.args).toEqual({ include_retired: true });
+    // The Licences page's Agreements tab reads the rows (with each one's e-signature) from /api/agreements.
+    fake.reply.list_app_agreements = { agreements: [programRow()] };
+    const rows = (await (await listRoute.GET()).json()).agreements;
+    expect(rows[0].esign).toMatchObject({ byEsign: true, appSigned: true, counterpartySigned: false });
     fake.session = session(["developer"]);
-    expect((await listRoute.GET()).status).toBe(403);
+    expect((await templatesRoute.GET()).status).toBe(403);
+    fake.tools = [];
+    fake.session = session(["license_provider"]);
+    expect((await templatesRoute.GET()).status).toBe(501);
   });
 });
