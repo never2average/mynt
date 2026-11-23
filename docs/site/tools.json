@@ -2654,7 +2654,7 @@
     {
       "name": "create_app_idea",
       "title": "Add an app idea",
-      "description": "Admin: add a specific app idea on an app kind, offered on New app. Its label is a plain problem statement (who, and the problem), the pitch says what the app does about it, and the goal is where the build starts. Refused if the kind isn't there, a line or category isn't the kind's, the text is about lending, insurance, investing, trading or cards, promises or projects earnings, yields, returns or guarantees, gives advice ('not advice' is fine), or frames users as sellers of goods. Factual words about the products (interest, rate, matures, retirement, fund) are fine.",
+      "description": "Admin: add a specific app idea on an app kind, offered on New app. Its chip_label is the chip's short label (1 to 34 characters on one line, plain words saying what the app is), the problem is a plain problem statement (who, and the problem) shown as the chip's tooltip, the pitch says what the app does about it, and the goal is where the build starts. Refused if the kind isn't there, a line or category isn't the kind's, the text is about lending, insurance, investing, trading or cards, promises or projects earnings, yields, returns or guarantees, gives advice ('not advice' is fine), or frames users as sellers of goods. Factual words about the products (interest, rate, matures, retirement, fund) are fine.",
       "area": "apps",
       "roles": [
         "admin"
@@ -2674,11 +2674,17 @@
             "pattern": "^[a-z][a-z0-9-]{1,39}$",
             "description": "An app kind's id (list_app_kinds)"
           },
+          "chip_label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 34,
+            "description": "The chip's label on the Build page: 1 to 34 characters on one line, plain words saying what the app is (\"Two-key household fund\"). The problem is the chip's tooltip"
+          },
           "problem": {
             "type": "string",
             "minLength": 10,
             "maxLength": 80,
-            "description": "The label: who has the problem and what it is, in plain words (\"Roommates chase each other for their share of rent and bills\"). No product names"
+            "description": "The problem: who has the problem and what it is, in plain words (\"Roommates chase each other for their share of rent and bills\"). No product names"
           },
           "pitch": {
             "type": "string",
@@ -2742,6 +2748,7 @@
         "required": [
           "id",
           "kind",
+          "chip_label",
           "problem",
           "pitch",
           "goal",
@@ -3316,7 +3323,7 @@
     {
       "name": "create_product_idea",
       "title": "Add a financial product idea",
-      "description": "Admin: add an idea for a new financial product, offered in the Build page's Financial product mode. Refused if its region, product line or category has no products Mynt runs there (US: account_operations/deposits, wealth/retirement, wealth/mutual_funds, credit/bonds), if any text promises, projects or advises (earnings, yields, returns, a percentage, guarantees, 'risk-free', beating inflation, recommendations, advice), frames the people it serves as sellers of goods, or is about lending, insurance or crypto.",
+      "description": "Admin: add an idea for a new financial product, offered in the Build page's Financial product mode, with a chip_label of 1 to 34 characters for its chip. Refused if its region, product line or category has no products Mynt runs there (US: account_operations/deposits, wealth/retirement, wealth/mutual_funds, credit/bonds), if any text promises, projects or advises (earnings, yields, returns, a percentage, guarantees, 'risk-free', beating inflation, recommendations, advice), frames the people it serves as sellers of goods, or is about lending, insurance or crypto.",
       "area": "apps",
       "roles": [
         "admin"
@@ -3330,6 +3337,12 @@
             "type": "string",
             "pattern": "^[a-z][a-z0-9-]{1,39}$",
             "description": "A short slug, unique across product ideas"
+          },
+          "chip_label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 34,
+            "description": "The chip's label on the Build page: 1 to 34 characters on one line, plain words, usually a shortened product name (\"Goal-locked savings pots\"). The product name and label are the chip's tooltip"
           },
           "label": {
             "type": "string",
@@ -3437,6 +3450,7 @@
         },
         "required": [
           "id",
+          "chip_label",
           "label",
           "product_name",
           "summary",
@@ -8457,7 +8471,7 @@
     {
       "name": "list_app_ideas",
       "title": "App ideas",
-      "description": "Developer: specific finance apps to start from, each on an app kind (list_app_kinds): the problem it solves as its label, a one-line pitch saying what the app does about it, a goal to start the build from and edit, the kind's product lines it builds on and, optionally, the product categories in them it's for. Pass the idea's kind as start_build's kind and its goal as the goal. Only active ideas, unless an admin passes include_retired.",
+      "description": "Developer: specific finance apps to start from, each on an app kind (list_app_kinds): a short chip_label (at most 34 characters, what the Build page's chip shows; null on an idea added before chip labels until an admin fills it), the problem it solves, a one-line pitch saying what the app does about it, a goal to start the build from and edit, the kind's product lines it builds on and, optionally, the product categories in them it's for. Pass the idea's kind as start_build's kind and its goal as the goal. Only active ideas, unless an admin passes include_retired.",
       "area": "apps",
       "roles": [
         "developer",
@@ -9612,7 +9626,7 @@
     {
       "name": "list_product_ideas",
       "title": "Financial product ideas",
-      "description": "Builder: ideas for new financial products a licensed firm could define, offered on the Build page's Financial product mode. Each has a label (who needs it and what for), a draft product name, a one-line summary, the product line, category and region it sits in, its key features and, optionally, the Create product sheet's risk level, liquidity, typical horizon and return type. They are starting points to edit, not products: create_product defines one. Only active ideas, unless an admin passes include_retired.",
+      "description": "Builder: ideas for new financial products a licensed firm could define, offered on the Build page's Financial product mode. Each has a short chip_label (at most 34 characters, what the Build page's chip shows; null on an idea added before chip labels until an admin fills it), a label (who needs it and what for), a draft product name, a one-line summary, the product line, category and region it sits in, its key features and, optionally, the Create product sheet's risk level, liquidity, typical horizon and return type. They are starting points to edit, not products: create_product defines one. Only active ideas, unless an admin passes include_retired.",
       "area": "apps",
       "roles": [
         "developer",
@@ -13346,7 +13360,7 @@
     {
       "name": "seed_app_ideas",
       "title": "Add Mynt's shipped app ideas",
-      "description": "Admin: add a set of the app ideas that ship with Mynt that aren't in the database yet: seed 'v1' (the default, workspaces/coding-build/templates/ideas.seed.json) or 'v2' (ideas.v2.seed.json: sharper ideas on the same products, with new ids). Safe to run again: an idea already there, edited or retired, is never overwritten. With replace: true, every active idea not in that set is then retired (never deleted; update_app_idea with status 'active' brings one back), and the retired ids are returned. Mynt never does this on its own.",
+      "description": "Admin: add a set of the app ideas that ship with Mynt that aren't in the database yet: seed 'v1' (the default, workspaces/coding-build/templates/ideas.seed.json) or 'v2' (ideas.v2.seed.json: sharper ideas on the same products, with new ids). Safe to run again: an idea already there, edited or retired, is never overwritten. With replace: true, every active idea not in that set is then retired (never deleted; update_app_idea with status 'active' brings one back), and the retired ids are returned. With labels_only: true, nothing is added or retired: each idea of the set already in the database that has no chip_label gets the set's (filled), one that has a chip_label keeps it (kept), and ids not in the database are listed (missing). Mynt never does this on its own.",
       "area": "apps",
       "roles": [
         "admin"
@@ -13367,6 +13381,10 @@
           "replace": {
             "description": "Retire every active idea that isn't in the set (never deletes)",
             "type": "boolean"
+          },
+          "labels_only": {
+            "description": "Only fill in the set's chip_label on its ideas already there that have none; adds, retires and changes nothing else",
+            "type": "boolean"
           }
         },
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -13375,7 +13393,7 @@
     {
       "name": "seed_product_ideas",
       "title": "Add Mynt's shipped financial product ideas",
-      "description": "Admin: add the financial product ideas that ship with Mynt (workspaces/coding-build/templates/product-ideas.seed.json) that aren't in the database yet. Safe to run again: an idea already there, edited or retired, is never overwritten. Mynt never does this on its own.",
+      "description": "Admin: add the financial product ideas that ship with Mynt (workspaces/coding-build/templates/product-ideas.seed.json) that aren't in the database yet. Safe to run again: an idea already there, edited or retired, is never overwritten. With labels_only: true, nothing is added: each shipped idea already in the database that has no chip_label gets the seed's (filled), one that has a chip_label keeps it (kept), and ids not in the database are listed (missing). Mynt never does this on its own.",
       "area": "apps",
       "roles": [
         "admin"
@@ -13384,7 +13402,12 @@
       "access_from": "name",
       "inputSchema": {
         "type": "object",
-        "properties": {},
+        "properties": {
+          "labels_only": {
+            "description": "Only fill in the seed's chip_label on its ideas already there that have none; adds and changes nothing else",
+            "type": "boolean"
+          }
+        },
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
     },
@@ -15339,7 +15362,7 @@
     {
       "name": "update_app_idea",
       "title": "Change an app idea",
-      "description": "Admin: change some of an app idea's fields (the ones you leave out stay). The idea as it would then be is checked whole, as create_app_idea checks it. status 'active' brings back a retired idea.",
+      "description": "Admin: change some of an app idea's fields (the ones you leave out stay). The idea as it would then be is checked whole, as create_app_idea checks it, so an idea added before chip labels needs a chip_label to change anything else. status 'active' brings back a retired idea.",
       "area": "apps",
       "roles": [
         "admin"
@@ -15358,11 +15381,17 @@
             "pattern": "^[a-z][a-z0-9-]{1,39}$",
             "description": "An app kind's id (list_app_kinds)"
           },
+          "chip_label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 34,
+            "description": "The chip's label on the Build page: 1 to 34 characters on one line, plain words saying what the app is (\"Two-key household fund\"). The problem is the chip's tooltip"
+          },
           "problem": {
             "type": "string",
             "minLength": 10,
             "maxLength": 80,
-            "description": "The label: who has the problem and what it is, in plain words (\"Roommates chase each other for their share of rent and bills\"). No product names"
+            "description": "The problem: who has the problem and what it is, in plain words (\"Roommates chase each other for their share of rent and bills\"). No product names"
           },
           "pitch": {
             "type": "string",
@@ -15634,7 +15663,7 @@
     {
       "name": "update_product_idea",
       "title": "Change a financial product idea",
-      "description": "Admin: change some of a product idea's fields (the ones you leave out stay). The idea as it would then be is checked whole, as create_product_idea checks it. status 'active' brings back a retired idea.",
+      "description": "Admin: change some of a product idea's fields (the ones you leave out stay). The idea as it would then be is checked whole, as create_product_idea checks it, so an idea added before chip labels needs a chip_label to change anything else. status 'active' brings back a retired idea.",
       "area": "apps",
       "roles": [
         "admin"
@@ -15647,6 +15676,12 @@
           "id": {
             "type": "string",
             "pattern": "^[a-z][a-z0-9-]{1,39}$"
+          },
+          "chip_label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 34,
+            "description": "The chip's label on the Build page: 1 to 34 characters on one line, plain words, usually a shortened product name (\"Goal-locked savings pots\"). The product name and label are the chip's tooltip"
           },
           "label": {
             "type": "string",

@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { addProductIdeas, listProductIdeas, PRODUCT_IDEA_SCOPES, PRODUCT_IDEAS_SEED_PATH, productIdeaErrors, seedProductIdeas, updateProductIdea } from "../dist/product-ideas.js";
+import { addProductIdeas, fillProductIdeaChipLabels, listProductIdeas, PRODUCT_IDEA_SCOPES, PRODUCT_IDEAS_SEED_PATH, productIdeaErrors, seedProductIdeas, updateProductIdea } from "../dist/product-ideas.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
 import { CATALOG } from "./helpers.js";
@@ -68,6 +68,15 @@ test("a product idea is refused outside the US scopes, and for promises, project
   assert.match(errs({ product_line: "wealth", category: "mutual_funds" }), /^$/);
   assert.match(errs({ id: "Bad Id" }), /the id is/);
   assert.match(errs({ label: "x".repeat(81) }), /the label is 10 to 80 characters/);
+  // The chip label: required, at most 34 characters, one line, and checked like the rest.
+  assert.match(errs({ chip_label: "" }), /the chip label is 1 to 34 characters, not 0/);
+  assert.match(errs({ chip_label: undefined }), /the chip label is 1 to 34 characters, not 0/);
+  assert.match(errs({ chip_label: "x".repeat(35) }), /the chip label is 1 to 34 characters, not 35/);
+  assert.equal(errs({ chip_label: "x".repeat(34) }), "");
+  assert.match(errs({ chip_label: "Two\nlines" }), /the chip label is one line/);
+  assert.match(errs({ chip_label: "Risk-free CD" }), /the chip label says 'Risk-free'/);
+  assert.match(errs({ chip_label: "CD for merchants" }), /the chip label says 'merchants'/);
+  assert.match(errs({ chip_label: "CD-backed loan" }), /the chip label says 'loan'/);
   assert.match(errs({ summary: "Two lines\nof summary for the product" }), /the summary is one line/);
   assert.match(errs({ key_features: ["Only one feature"] }), /2 to 6 key features, not 1/);
   assert.match(errs({ key_features: ["Same feature", "same feature"] }), /listed twice/);
@@ -113,7 +122,7 @@ test("product ideas are in Postgres: not seeded on startup, added by seed_produc
 
   const all = (await call(dev, "list_product_ideas")).body.ideas;
   assert.equal(all.length, SEED.ideas.length);
-  assert.deepEqual(Object.keys(all[0]).sort(), ["category", "id", "key_features", "label", "liquidity", "product_line", "product_name", "region", "return_type", "risk_level", "summary", "typical_horizon"]);
+  assert.deepEqual(Object.keys(all[0]).sort(), ["category", "chip_label", "id", "key_features", "label", "liquidity", "product_line", "product_name", "region", "return_type", "risk_level", "summary", "typical_horizon"]);
   const deposits = (await call(dev, "list_product_ideas", { product_line: "account_operations" })).body.ideas;
   assert.ok(deposits.length >= 3 && deposits.every((i) => i.category === "deposits"));
   assert.equal(deposits[0].id, "gig-worker-no-penalty-cd", "sort orders a line's ideas");
@@ -133,6 +142,7 @@ test("product ideas are in Postgres: not seeded on startup, added by seed_produc
   // Create: checked, unique.
   const fresh = {
     id: "joint-household-mma",
+    chip_label: "Joint household account",
     label: "Couples want one savings account they both see and both fund",
     product_name: "Joint Household Money Market Account",
     summary: "A joint money market account where each holder sees every move and can add money from their own bank account.",
@@ -172,4 +182,48 @@ test("the store functions: seeding is idempotent and leaves edited rows alone", 
   assert.deepEqual(inserted, []);
   assert.equal(kept.length, ideas.length);
   assert.equal((await listProductIdeas(store.db, { productLine: "credit" })).find((i) => i.id === "tips-ladder-bundle").summary, "One purchase of TIPS with one rung maturing each year over a span the holder picks.");
+});
+
+test("every shipped product idea has a plain chip label under 35 characters, unique, and shorter than its product name", () => {
+  const ideas = seedProductIdeas();
+  for (const i of ideas) {
+    assert.ok(i.chip_label.length > 0 && i.chip_label.length < 35, `${i.id}: '${i.chip_label}' is ${i.chip_label.length} characters`);
+    assert.doesNotMatch(i.chip_label, /[\r\n]/);
+    assert.ok(i.chip_label.length <= i.product_name.length || i.product_name.length < 35, `${i.id}: no longer than the name it shortens`);
+  }
+  assert.equal(new Set(ideas.map((i) => i.chip_label)).size, ideas.length, "no two chips share a label");
+});
+
+test("labels only: seed_product_ideas fills in missing chip labels on rows already there, never overwrites one, adds nothing", async () => {
+  const store = await openStore();
+  const admin = await connect(store, (await store.createUser("Ada", ["admin"])).user);
+  const dev = await connect(store, (await store.createUser("Dev", ["developer"])).user);
+  // Before anything is seeded: every id is missing, and nothing is added.
+  assert.deepEqual((await call(admin, "seed_product_ideas", { labels_only: true })).body, { filled: [], kept: [], missing: SEED.ideas.map((i) => i.id) });
+  assert.deepEqual(await listProductIdeas(store.db, { includeRetired: true }), []);
+  assert.equal((await call(admin, "seed_product_ideas")).body.inserted.length, SEED.ideas.length);
+  await store.db.query(`UPDATE financial_products.product_ideas SET chip_label = NULL WHERE id IN ('goal-locked-mma', 'tips-ladder-bundle', 'business-cash-sweep-mmf')`);
+  await store.db.query(`UPDATE financial_products.product_ideas SET chip_label = 'Sweep for business cash' WHERE id = 'business-cash-sweep-mmf'`);
+  assert.equal((await call(dev, "list_product_ideas")).body.ideas.find((i) => i.id === "goal-locked-mma").chip_label, null);
+  assert.match((await call(admin, "update_product_idea", { id: "goal-locked-mma", sort: 2 })).body.error, /the chip label is 1 to 34 characters, not 0/);
+  const before = await listProductIdeas(store.db, { includeRetired: true });
+
+  const filled = await call(admin, "seed_product_ideas", { labels_only: true });
+  assert.equal(filled.error, false, JSON.stringify(filled.body));
+  assert.deepEqual(filled.body.filled.sort(), ["goal-locked-mma", "tips-ladder-bundle"]);
+  assert.equal(filled.body.kept.length, SEED.ideas.length - 2);
+  assert.deepEqual(filled.body.missing, []);
+  const byId = Object.fromEntries((await listProductIdeas(store.db, { includeRetired: true })).map((i) => [i.id, i]));
+  assert.equal(byId["goal-locked-mma"].chip_label, "Goal-locked savings pots");
+  assert.equal(byId["tips-ladder-bundle"].chip_label, "TIPS ladder bundle");
+  assert.equal(byId["business-cash-sweep-mmf"].chip_label, "Sweep for business cash", "an admin's label is never overwritten");
+  for (const b of before) for (const k of ["label", "product_name", "summary", "status", "sort"]) assert.deepEqual(byId[b.id][k], b[k], `${b.id}: ${k} unchanged`);
+  assert.deepEqual((await call(admin, "seed_product_ideas", { labels_only: true })).body.filled, []);
+  const entry = (await store.auditLog(50)).find((a) => a.action === "seed_product_ideas" && a.details?.labels_only && a.details.filled.length);
+  assert.deepEqual(entry.details.filled.sort(), ["goal-locked-mma", "tips-ladder-bundle"]);
+
+  // The store function the same way.
+  await store.db.query(`UPDATE financial_products.product_ideas SET chip_label = NULL WHERE id = 'starter-payday-ira'`);
+  assert.deepEqual((await fillProductIdeaChipLabels(store.db)).filled, ["starter-payday-ira"]);
+  assert.equal((await listProductIdeas(store.db)).find((i) => i.id === "starter-payday-ira").chip_label, "Starter payday IRA");
 });

@@ -3,6 +3,7 @@
   "ideas": [
     {
       "id": "gig-worker-no-penalty-cd",
+      "chip_label": "No-penalty CD for gig workers",
       "label": "Gig workers with uneven pay avoid CDs in case they need the cash early",
       "product_name": "6-Month No-Penalty CD",
       "summary": "A 6-month certificate of deposit that can be closed early without an early withdrawal penalty after the first week.",
@@ -23,6 +24,7 @@
     },
     {
       "id": "goal-locked-mma",
+      "chip_label": "Goal-locked savings pots",
       "label": "Savers dip into goal money because it sits next to spending cash",
       "product_name": "Goal-Locked Money Market Sub-Accounts",
       "summary": "A money market account split into named sub-accounts, each locked to a goal date the holder chooses.",
@@ -43,6 +45,7 @@
     },
     {
       "id": "rate-reset-cd",
+      "chip_label": "Two-year CD with a rate reset",
       "label": "Savers hesitate to lock in one CD rate for two years",
       "product_name": "24-Month CD with One Rate Reset",
       "summary": "A 24-month certificate of deposit with one request during the term to move to the rate the firm then offers for new CDs of the same term.",
@@ -63,6 +66,7 @@
     },
     {
       "id": "nonprofit-dual-approval-mma",
+      "chip_label": "Two-signer nonprofit reserve",
       "label": "Nonprofit boards want two signers on every move of reserve cash",
       "product_name": "Nonprofit Reserve Money Market Account",
       "summary": "A money market account for nonprofits where every withdrawal or transfer needs approval from two authorized signers.",
@@ -83,6 +87,7 @@
     },
     {
       "id": "semester-cd-series",
+      "chip_label": "Semester-matched CD series",
       "label": "Parents need a set sum on each semester's tuition date",
       "product_name": "Semester-Matched CD Series",
       "summary": "A series of certificates of deposit opened together, each maturing a set number of days before a semester's tuition due date.",
@@ -103,6 +108,7 @@
     },
     {
       "id": "ira-catch-up-schedule",
+      "chip_label": "IRA catch-up schedule",
       "label": "Savers over 50 miss the higher IRA limit that may apply to them",
       "product_name": "IRA with Catch-Up Contribution Schedule",
       "summary": "An individual retirement account with a built-in contribution schedule that adds the catch-up amount from the year the holder turns 50.",
@@ -123,6 +129,7 @@
     },
     {
       "id": "starter-payday-ira",
+      "chip_label": "Starter payday IRA",
       "label": "First-job workers think an IRA needs a large opening amount",
       "product_name": "Starter IRA with Payday Contributions",
       "summary": "An individual retirement account with no opening minimum, funded by a small fixed amount from each paycheck.",
@@ -143,6 +150,7 @@
     },
     {
       "id": "small-employer-401k",
+      "chip_label": "Small-employer 401(k)",
       "label": "Small employers find running a 401(k) plan too heavy to start",
       "product_name": "Small-Employer 401(k) with Payroll Sync",
       "summary": "A 401(k) plan for employers with a few staff, where contributions come straight from each payroll run.",
@@ -163,6 +171,7 @@
     },
     {
       "id": "plan-linked-emergency-savings",
+      "chip_label": "401(k)-linked emergency savings",
       "label": "Workers raid their 401(k) for small emergencies",
       "product_name": "Plan-Linked Emergency Savings Account",
       "summary": "An emergency savings account linked to an employer's 401(k) plan, funded from payroll up to a cap the plan's terms set.",
@@ -183,6 +192,7 @@
     },
     {
       "id": "business-cash-sweep-mmf",
+      "chip_label": "Business cash sweep",
       "label": "Small businesses leave operating cash idle above the month's bills",
       "product_name": "Business Cash Sweep to a Government Money Market Fund",
       "summary": "A daily sweep of a business account's balance above a threshold into a government money market fund, and back when it falls below.",
@@ -203,6 +213,7 @@
     },
     {
       "id": "quarterly-tax-reserve-mmf",
+      "chip_label": "Quarterly tax reserve",
       "label": "Freelancers need quarterly tax money kept apart from spending money",
       "product_name": "Quarterly Tax Reserve in a Money Market Fund",
       "summary": "A money market fund holding with a separate balance for each estimated tax quarter and reminders before each due date.",
@@ -223,6 +234,7 @@
     },
     {
       "id": "tips-ladder-bundle",
+      "chip_label": "TIPS ladder bundle",
       "label": "Savers want TIPS maturing on a set schedule without buying each one",
       "product_name": "TIPS Ladder Bundle",
       "summary": "One purchase of Treasury Inflation-Protected Securities with staggered maturities, one rung maturing each year over a span the holder picks.",
@@ -243,6 +255,7 @@
     },
     {
       "id": "milestone-tips-gift",
+      "chip_label": "Milestone TIPS gift",
       "label": "Grandparents want a gift that reaches a grandchild at a milestone",
       "product_name": "Milestone TIPS Gift",
       "summary": "Treasury Inflation-Protected Securities bought for a named beneficiary, with the maturity chosen nearest a milestone date.",

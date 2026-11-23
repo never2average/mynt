@@ -9,7 +9,7 @@ import type { Db } from "./db.js";
 import type { Store, User } from "./store.js";
 
 // Financial product ideas: new products a licensed firm could define, offered on the Build page's Financial product
-// mode as chips (each starts the product chat with the idea) and as Templates rows (Use opens the Create product
+// mode as chips (each named by its short chip_label and starting the product chat with the idea) and as Templates rows (Use opens the Create product
 // sheet filled in). Each is labelled by who needs it and what for, with a draft product name, a line of what it is,
 // the product line and category it sits in, its region and its key features. They are rows in Postgres
 // (financial_products.product_ideas, app-ideas-schema.ts), apart from app ideas: an app idea is a build on a kind
@@ -30,6 +30,8 @@ export const PRODUCT_IDEA_SCOPES: Readonly<Record<string, Readonly<Record<string
 
 export const PRODUCT_IDEA_ID = /^[a-z][a-z0-9-]{1,39}$/;
 export const LABEL_MAX = 80;
+// The chip's label on the Build page: short enough to sit on one line (the product name and label are its tooltip).
+export const CHIP_LABEL_MAX = 34;
 export const PRODUCT_NAME_MAX = 60;
 export const SUMMARY_MAX = 200;
 export const FEATURE_MAX = 160;
@@ -44,6 +46,8 @@ const HOSTNAME_LIKE = /\b[a-z0-9-]+\.[a-z]{2,}\b/i;
 
 export interface ProductIdeaFields {
   id: string;
+  // The chip's label on the Build page, 1 to 34 characters on one line ("Goal-locked savings pots").
+  chip_label: string;
   // The label: who needs it and what for ("Gig workers with uneven pay can't lock cash away for months").
   label: string;
   // The draft product's name, which the firm edits.
@@ -61,7 +65,9 @@ export interface ProductIdeaFields {
   return_type?: string | null;
   sort?: number;
 }
-export interface ProductIdea extends Required<ProductIdeaFields> {
+export interface ProductIdea extends Omit<Required<ProductIdeaFields>, "chip_label"> {
+  // None on a row added before chip labels, until an admin fills it.
+  chip_label: string | null;
   status: "active" | "retired";
   created_at: string;
   updated_at: string;
@@ -78,6 +84,7 @@ export function productIdeaErrors(idea: ProductIdeaFields): string[] {
     if (t.length < min || t.length > max) errors.push(`${label}: the ${name} is ${min} to ${max} characters, not ${t.length}`);
     if (/[\r\n]/.test(text)) errors.push(`${label}: the ${name} is one line`);
   };
+  line("chip label", idea.chip_label ?? "", 1, CHIP_LABEL_MAX);
   line("label", idea.label, 10, LABEL_MAX);
   line("product name", idea.product_name, 3, PRODUCT_NAME_MAX);
   line("summary", idea.summary, 20, SUMMARY_MAX);
@@ -97,7 +104,7 @@ export function productIdeaErrors(idea: ProductIdeaFields): string[] {
     if (v != null && !(list as readonly string[]).includes(v)) errors.push(`${label}: the ${name} is one of ${list.join(", ")}, not '${v}'`);
   }
 
-  const texts: [string, string][] = [["label", idea.label], ["product name", idea.product_name], ["summary", idea.summary], ...idea.key_features.map((f, i) => [`key feature ${i + 1}`, f] as [string, string])];
+  const texts: [string, string][] = [["chip label", idea.chip_label ?? ""], ["label", idea.label], ["product name", idea.product_name], ["summary", idea.summary], ...idea.key_features.map((f, i) => [`key feature ${i + 1}`, f] as [string, string])];
   for (const [name, text] of texts) {
     const promise = text.match(PROMISE_WORDS)?.[0];
     if (promise) errors.push(`${label}: the ${name} says '${promise}', which promises, projects or advises (describe the product's terms as the firm would state them)`);
@@ -113,10 +120,11 @@ export function productIdeaErrors(idea: ProductIdeaFields): string[] {
 export class ProductIdeaError extends Error {}
 
 const COLUMNS =
-  "id, label, product_name, summary, product_line, category, region, key_features, risk_level, liquidity, typical_horizon, return_type, status, sort, created_at, updated_at, created_by";
+  "id, chip_label, label, product_name, summary, product_line, category, region, key_features, risk_level, liquidity, typical_horizon, return_type, status, sort, created_at, updated_at, created_by";
 const iso = (v: unknown) => new Date(v as string).toISOString();
 const toIdea = (r: Record<string, unknown>): ProductIdea => ({
   id: r.id as string,
+  chip_label: (r.chip_label as string | null) ?? null,
   label: r.label as string,
   product_name: r.product_name as string,
   summary: r.summary as string,
@@ -136,6 +144,7 @@ const toIdea = (r: Record<string, unknown>): ProductIdea => ({
 });
 const tidy = (f: ProductIdeaFields): ProductIdeaFields => ({
   ...f,
+  chip_label: (f.chip_label ?? "").trim(),
   label: f.label.trim(),
   product_name: f.product_name.trim(),
   summary: f.summary.trim(),
@@ -150,9 +159,9 @@ const check = (f: ProductIdeaFields) => {
   const errors = productIdeaErrors(f);
   if (errors.length) throw new ProductIdeaError(errors.join("; "));
 };
-const values = (f: ProductIdeaFields) => [f.label, f.product_name, f.summary, f.product_line, f.category, f.region, f.key_features, f.risk_level ?? null, f.liquidity ?? null, f.typical_horizon ?? null, f.return_type ?? null, f.sort ?? 0];
-const INSERT = `INSERT INTO financial_products.product_ideas (id, label, product_name, summary, product_line, category, region, key_features, risk_level, liquidity, typical_horizon, return_type, sort, created_by)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) ON CONFLICT (id) DO NOTHING`;
+const values = (f: ProductIdeaFields) => [f.chip_label, f.label, f.product_name, f.summary, f.product_line, f.category, f.region, f.key_features, f.risk_level ?? null, f.liquidity ?? null, f.typical_horizon ?? null, f.return_type ?? null, f.sort ?? 0];
+const INSERT = `INSERT INTO financial_products.product_ideas (id, chip_label, label, product_name, summary, product_line, category, region, key_features, risk_level, liquidity, typical_horizon, return_type, sort, created_by)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) ON CONFLICT (id) DO NOTHING`;
 
 // Ideas by product line, then sort, then id. Active ones unless retired ones are asked for.
 export async function listProductIdeas(db: Pick<Db, "query">, opts: { productLine?: string; region?: string; includeRetired?: boolean } = {}): Promise<ProductIdea[]> {
@@ -184,11 +193,11 @@ export type ProductIdeaPatch = Partial<Omit<ProductIdeaFields, "id">> & { status
 export async function updateProductIdea(db: Pick<Db, "query">, id: string, patch: ProductIdeaPatch): Promise<ProductIdea> {
   const current = await getProductIdea(db, id);
   if (!current) throw new ProductIdeaError(`No product idea '${id}'; list_product_ideas lists them`);
-  const next = tidy({ ...current, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), id });
+  const next = tidy({ ...current, chip_label: current.chip_label ?? "", ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), id });
   check(next);
   const { rows } = await db.query(
-    `UPDATE financial_products.product_ideas SET label = $2, product_name = $3, summary = $4, product_line = $5, category = $6, region = $7, key_features = $8,
-       risk_level = $9, liquidity = $10, typical_horizon = $11, return_type = $12, sort = $13, status = $14, updated_at = now()
+    `UPDATE financial_products.product_ideas SET chip_label = $2, label = $3, product_name = $4, summary = $5, product_line = $6, category = $7, region = $8, key_features = $9,
+       risk_level = $10, liquidity = $11, typical_horizon = $12, return_type = $13, sort = $14, status = $15, updated_at = now()
      WHERE id = $1 RETURNING ${COLUMNS}`,
     [id, ...values(next), patch.status ?? current.status],
   );
@@ -223,10 +232,34 @@ export async function addProductIdeas(db: Pick<Db, "query">, actorId: string | n
   return { inserted, kept };
 }
 
+// Fills in the chip label of product ideas already there that have none (rows added before chip labels), from
+// `ideas` (the shipped set by default). Nothing else changes, and a label already there, an admin's or the seed's,
+// is never overwritten. Ids in `ideas` with no row are reported as missing, not added.
+export async function fillProductIdeaChipLabels(
+  db: Pick<Db, "query">,
+  ideas: ProductIdeaFields[] = seedProductIdeas(),
+): Promise<{ filled: string[]; kept: string[]; missing: string[] }> {
+  const filled: string[] = [];
+  const kept: string[] = [];
+  const missing: string[] = [];
+  for (const f of ideas) {
+    const chip = (f.chip_label ?? "").trim();
+    if (!chip || chip.length > CHIP_LABEL_MAX || /[\r\n]/.test(chip)) throw new ProductIdeaError(`product idea '${f.id}': the chip label is 1 to ${CHIP_LABEL_MAX} characters on one line`);
+    const { rows } = await db.query(
+      `UPDATE financial_products.product_ideas SET chip_label = $2, updated_at = now() WHERE id = $1 AND chip_label IS NULL RETURNING id`,
+      [f.id, chip],
+    );
+    if (rows.length) filled.push(f.id);
+    else ((await getProductIdea(db, f.id)) ? kept : missing).push(f.id);
+  }
+  return { filled, kept, missing };
+}
+
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string) => ({ ...json({ error }), isError: true });
-const forBuilder = ({ id, label, product_name, summary, product_line, category, region, key_features, risk_level, liquidity, typical_horizon, return_type }: ProductIdea) => ({
+const forBuilder = ({ id, chip_label, label, product_name, summary, product_line, category, region, key_features, risk_level, liquidity, typical_horizon, return_type }: ProductIdea) => ({
   id,
+  chip_label,
   label,
   product_name,
   summary,
@@ -246,6 +279,11 @@ const refusal = (e: unknown) => {
 
 const lines = Object.keys(Object.assign({}, ...Object.values(PRODUCT_IDEA_SCOPES))) as [string, ...string[]];
 const fields = {
+  chip_label: z
+    .string()
+    .min(1)
+    .max(CHIP_LABEL_MAX)
+    .describe("The chip's label on the Build page: 1 to 34 characters on one line, plain words, usually a shortened product name (\"Goal-locked savings pots\"). The product name and label are the chip's tooltip"),
   label: z.string().min(10).max(LABEL_MAX).describe("The label: who needs the product and what for, in plain words (\"Gig workers with uneven pay can't lock cash away for months\")"),
   product_name: z.string().min(3).max(PRODUCT_NAME_MAX).describe("A draft name for the product, which the firm edits"),
   summary: z.string().min(20).max(SUMMARY_MAX).describe("One line: what the product is, factually"),
@@ -266,7 +304,7 @@ export function registerProductIdeaTools(server: McpServer, store: Store, opts: 
     {
       title: "Financial product ideas",
       description:
-        "Builder: ideas for new financial products a licensed firm could define, offered on the Build page's Financial product mode. Each has a label (who needs it and what for), a draft product name, a one-line summary, the product line, category and region it sits in, its key features and, optionally, the Create product sheet's risk level, liquidity, typical horizon and return type. They are starting points to edit, not products: create_product defines one. Only active ideas, unless an admin passes include_retired.",
+        "Builder: ideas for new financial products a licensed firm could define, offered on the Build page's Financial product mode. Each has a short chip_label (at most 34 characters, what the Build page's chip shows; null on an idea added before chip labels until an admin fills it), a label (who needs it and what for), a draft product name, a one-line summary, the product line, category and region it sits in, its key features and, optionally, the Create product sheet's risk level, liquidity, typical horizon and return type. They are starting points to edit, not products: create_product defines one. Only active ideas, unless an admin passes include_retired.",
       inputSchema: {
         product_line: fields.product_line.optional().describe("Only this product line's ideas"),
         include_retired: z.boolean().optional().describe("Admins only: retired ideas too, with each idea's status and history"),
@@ -290,7 +328,7 @@ export function registerProductIdeaAdminTools(server: McpServer, store: Store, u
     {
       title: "Add a financial product idea",
       description:
-        "Admin: add an idea for a new financial product, offered in the Build page's Financial product mode. Refused if its region, product line or category has no products Mynt runs there (US: account_operations/deposits, wealth/retirement, wealth/mutual_funds, credit/bonds), if any text promises, projects or advises (earnings, yields, returns, a percentage, guarantees, 'risk-free', beating inflation, recommendations, advice), frames the people it serves as sellers of goods, or is about lending, insurance or crypto.",
+        "Admin: add an idea for a new financial product, offered in the Build page's Financial product mode, with a chip_label of 1 to 34 characters for its chip. Refused if its region, product line or category has no products Mynt runs there (US: account_operations/deposits, wealth/retirement, wealth/mutual_funds, credit/bonds), if any text promises, projects or advises (earnings, yields, returns, a percentage, guarantees, 'risk-free', beating inflation, recommendations, advice), frames the people it serves as sellers of goods, or is about lending, insurance or crypto.",
       inputSchema: { id: z.string().regex(PRODUCT_IDEA_ID).describe("A short slug, unique across product ideas"), ...fields },
     },
     async (args) => {
@@ -309,9 +347,10 @@ export function registerProductIdeaAdminTools(server: McpServer, store: Store, u
     {
       title: "Change a financial product idea",
       description:
-        "Admin: change some of a product idea's fields (the ones you leave out stay). The idea as it would then be is checked whole, as create_product_idea checks it. status 'active' brings back a retired idea.",
+        "Admin: change some of a product idea's fields (the ones you leave out stay). The idea as it would then be is checked whole, as create_product_idea checks it, so an idea added before chip labels needs a chip_label to change anything else. status 'active' brings back a retired idea.",
       inputSchema: {
         id: z.string().regex(PRODUCT_IDEA_ID),
+        chip_label: fields.chip_label.optional(),
         label: fields.label.optional(),
         product_name: fields.product_name.optional(),
         summary: fields.summary.optional(),
@@ -365,10 +404,17 @@ export function registerProductIdeaAdminTools(server: McpServer, store: Store, u
     {
       title: "Add Mynt's shipped financial product ideas",
       description:
-        "Admin: add the financial product ideas that ship with Mynt (workspaces/coding-build/templates/product-ideas.seed.json) that aren't in the database yet. Safe to run again: an idea already there, edited or retired, is never overwritten. Mynt never does this on its own.",
-      inputSchema: {},
+        "Admin: add the financial product ideas that ship with Mynt (workspaces/coding-build/templates/product-ideas.seed.json) that aren't in the database yet. Safe to run again: an idea already there, edited or retired, is never overwritten. With labels_only: true, nothing is added: each shipped idea already in the database that has no chip_label gets the seed's (filled), one that has a chip_label keeps it (kept), and ids not in the database are listed (missing). Mynt never does this on its own.",
+      inputSchema: {
+        labels_only: z.boolean().optional().describe("Only fill in the seed's chip_label on its ideas already there that have none; adds and changes nothing else"),
+      },
     },
-    async () => {
+    async ({ labels_only }) => {
+      if (labels_only) {
+        const filled = await fillProductIdeaChipLabels(store.db);
+        await store.audit(user.id, "seed_product_ideas", "product_ideas", { labels_only: true, ...filled });
+        return json(filled);
+      }
       const result = await addProductIdeas(store.db, user.id);
       await store.audit(user.id, "seed_product_ideas", "product_ideas", { inserted: result.inserted, kept: result.kept.length });
       return json(result);

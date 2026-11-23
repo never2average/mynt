@@ -3,6 +3,7 @@
   "ideas": [
     {
       "id": "two-key-household-fund",
+      "chip_label": "Two-key household fund",
       "kind": "savings-goals",
       "problem": "Two-adult households argue over when the emergency fund gets used",
       "pitch": "A shared emergency fund where money comes out only when both adults approve the request.",
@@ -20,6 +21,7 @@
     },
     {
       "id": "yearly-bills-calendar",
+      "chip_label": "Yearly bills calendar",
       "kind": "savings-goals",
       "problem": "Families get caught out by bills that come once a year",
       "pitch": "Lists each once-a-year bill with its due date and sets aside its share every month until then.",
@@ -37,6 +39,7 @@
     },
     {
       "id": "tax-refund-split",
+      "chip_label": "Tax refund splitter",
       "kind": "savings-goals",
       "problem": "Tax refunds land in checking and are gone within a month",
       "pitch": "When a refund arrives, splits it across named goals in a money market account in one step.",
@@ -54,6 +57,7 @@
     },
     {
       "id": "moving-day-fund",
+      "chip_label": "Moving-day countdown fund",
       "kind": "savings-goals",
       "problem": "Renters moving cities pay a deposit, movers and two rents at once",
       "pitch": "A countdown to moving day that lists each cost and how much is set aside for it so far.",
@@ -71,6 +75,7 @@
     },
     {
       "id": "wedding-cd-ladder",
+      "chip_label": "Wedding CD ladder",
       "kind": "certificates-of-deposit",
       "problem": "Couples paying wedding vendors in stages need cash on each due date",
       "pitch": "Builds a CD ladder where each rung matures just before a planned wedding payment.",
@@ -88,6 +93,7 @@
     },
     {
       "id": "next-cd-vs-expense",
+      "chip_label": "CD rollover vs. upcoming bills",
       "kind": "certificates-of-deposit",
       "problem": "CD holders roll over into a term that ends after a big bill is due",
       "pitch": "Before a CD matures, compares the next term's end date to the customer's upcoming expenses.",
@@ -105,6 +111,7 @@
     },
     {
       "id": "closing-date-cd",
+      "chip_label": "CDs that mature before closing",
       "kind": "certificates-of-deposit",
       "problem": "Home buyers months from closing keep the down payment in checking",
       "pitch": "Shows only the CD terms that mature before the buyer's closing date, and counts down to it.",
@@ -122,6 +129,7 @@
     },
     {
       "id": "found-money-sweep",
+      "chip_label": "Found-money sweep",
       "kind": "cash-reserve",
       "problem": "Spare cash sits in checking because bills come out on scattered days",
       "pitch": "Moves spare checking cash into a money market account, and back two days before each bill.",
@@ -139,6 +147,7 @@
     },
     {
       "id": "nonprofit-reserve-explainer",
+      "chip_label": "Nonprofit reserve explainer",
       "kind": "cash-reserve",
       "problem": "Nonprofit treasurers must explain to the board where reserve cash sits",
       "pitch": "A side-by-side of a money market fund and a money market account, ready to share with a board.",
@@ -159,6 +168,7 @@
     },
     {
       "id": "payroll-buffer",
+      "chip_label": "Payroll reserve buffer",
       "kind": "cash-reserve",
       "problem": "Small employers keep months of payroll cash idle in checking",
       "pitch": "Holds the payroll reserve in a money market account and moves each run's amount back in time.",
@@ -176,6 +186,7 @@
     },
     {
       "id": "onboarding-401k-step",
+      "chip_label": "401(k) sign-up at onboarding",
       "kind": "retirement-account",
       "problem": "New hires skip the 401(k) because sign-up is buried in onboarding",
       "pitch": "A two-minute 401(k) sign-up step that sits inside a new job's onboarding checklist.",
@@ -193,6 +204,7 @@
     },
     {
       "id": "turning-50-catch-up",
+      "chip_label": "Turning-50 IRA catch-up",
       "kind": "retirement-account",
       "problem": "People turning 50 this year don't know a higher IRA limit may apply",
       "pitch": "Shows the IRA limits that apply from the year a saver turns 50, and splits the rest by payday.",
@@ -210,6 +222,7 @@
     },
     {
       "id": "old-plan-rollover",
+      "chip_label": "Old 401(k) rollover checklist",
       "kind": "retirement-account",
       "problem": "Job changers leave old 401(k) balances behind and lose track of them",
       "pitch": "A step-by-step checklist to move an old workplace plan's balance into an IRA.",
@@ -227,6 +240,7 @@
     },
     {
       "id": "tuition-tips-calendar",
+      "chip_label": "Tuition-date TIPS calendar",
       "kind": "treasury-securities",
       "problem": "Parents need cash on each semester's tuition date, years from now",
       "pitch": "Lines up TIPS maturity dates with each semester's tuition due date on one calendar.",
@@ -244,6 +258,7 @@
     },
     {
       "id": "tips-yearly-ladder",
+      "chip_label": "Yearly TIPS ladder",
       "kind": "treasury-securities",
       "problem": "Retirees want cash arriving on known dates every year",
       "pitch": "Builds a TIPS ladder with one rung maturing each year, and shows every payment date ahead.",
@@ -261,6 +276,7 @@
     },
     {
       "id": "grandchild-tips-gift",
+      "chip_label": "TIPS gift for a grandchild",
       "kind": "treasury-securities",
       "problem": "Grandparents want a gift for a grandchild that arrives at 18",
       "pitch": "Picks the TIPS term that matures nearest a grandchild's 18th birthday and keeps a gift note.",

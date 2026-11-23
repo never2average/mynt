@@ -11,7 +11,8 @@ import type { Store, User } from "./store.js";
 // solves ("Roommates chase each other for their share of rent and bills"), with a one-line pitch saying what the
 // app does about it and a goal to start the build from. They are rows in Postgres (financial_products.app_ideas,
 // app-ideas-schema.ts) that admins keep with create_app_idea, update_app_idea and retire_app_idea; developers read
-// the active ones with list_app_ideas, and the studio shows them as chips and Templates rows. The ones Mynt ships
+// the active ones with list_app_ideas, and the studio shows them as chips (each named by its short chip_label, with
+// the problem as the tooltip) and Templates rows. The ones Mynt ships
 // are in two sets: v1 (workspaces/coding-build/templates/ideas.seed.json, the first sixteen) and v2
 // (ideas.v2.seed.json, sharper ones on the same products, with new ids). Either is added only when an admin runs
 // seed_app_ideas: never on startup, and never over a row an admin has edited or retired. With replace, the active
@@ -30,6 +31,8 @@ export const IDEA_ID = /^[a-z][a-z0-9-]{1,39}$/;
 export const CATEGORY = /^[a-z][a-z0-9_]{1,39}$/;
 export const PRODUCT_NAME_MAX = 60;
 export const PROBLEM_MAX = 80;
+// The chip's label on the Build page: short enough to sit on one line (the problem is its tooltip).
+export const CHIP_LABEL_MAX = 34;
 export const PITCH_MAX = 120;
 export const GOAL_MIN = 40;
 export const GOAL_MAX = 1200;
@@ -57,6 +60,8 @@ const SDK_CALL = /\b[a-z]+[A-Z]\w*\b/g;
 export interface AppIdeaFields {
   id: string;
   kind: string;
+  // The chip's label on the Build page, 1 to 34 characters on one line ("Two-key household fund").
+  chip_label: string;
   problem: string;
   pitch: string;
   goal: string;
@@ -68,7 +73,9 @@ export interface AppIdeaFields {
   product_names?: string[];
   sort?: number;
 }
-export interface AppIdea extends Required<AppIdeaFields> {
+export interface AppIdea extends Omit<Required<AppIdeaFields>, "chip_label"> {
+  // None on a row added before chip labels, until an admin fills it.
+  chip_label: string | null;
   status: "active" | "retired";
   created_at: string;
   updated_at: string;
@@ -87,6 +94,7 @@ export function appIdeaErrors(idea: AppIdeaFields, kinds: readonly AppKind[] = a
     if (t.length < min || t.length > max) errors.push(`${label}: the ${name} is ${min} to ${max} characters, not ${t.length}`);
     if (/[\r\n]/.test(text)) errors.push(`${label}: the ${name} is one line`);
   };
+  line("chip label", idea.chip_label ?? "", 1, CHIP_LABEL_MAX);
   line("problem", idea.problem, 10, PROBLEM_MAX);
   line("pitch", idea.pitch, 10, PITCH_MAX);
   const goal = idea.goal.trim().length;
@@ -108,7 +116,7 @@ export function appIdeaErrors(idea: AppIdeaFields, kinds: readonly AppKind[] = a
   if (names.length > 8) errors.push(`${label}: at most 8 product names`);
   for (const n of names)
     if (n.trim().length < 2 || n.trim().length > PRODUCT_NAME_MAX || /[\r\n]/.test(n)) errors.push(`${label}: a product name is 2 to ${PRODUCT_NAME_MAX} characters on one line`);
-  for (const [name, text] of [["problem", idea.problem], ["pitch", idea.pitch], ["goal", idea.goal], ...names.map((n) => ["product name", n] as const)] as const) {
+  for (const [name, text] of [["chip label", idea.chip_label ?? ""], ["problem", idea.problem], ["pitch", idea.pitch], ["goal", idea.goal], ...names.map((n) => ["product name", n] as const)] as const) {
     const word = text.match(UNSUPPORTED_WORDS)?.[0];
     if (word) errors.push(`${label}: the ${name} says '${word}', which no app kind builds on, or which a finance app mustn't call the people it serves`);
     const promise = text.match(PROMISE_WORDS)?.[0];
@@ -127,11 +135,12 @@ export function appIdeaErrors(idea: AppIdeaFields, kinds: readonly AppKind[] = a
 
 export class AppIdeaError extends Error {}
 
-const COLUMNS = "id, kind, problem, pitch, goal, product_lines, categories, product_names, status, sort, created_at, updated_at, created_by";
+const COLUMNS = "id, kind, chip_label, problem, pitch, goal, product_lines, categories, product_names, status, sort, created_at, updated_at, created_by";
 const iso = (v: unknown) => new Date(v as string).toISOString();
 const toIdea = (r: Record<string, unknown>): AppIdea => ({
   id: r.id as string,
   kind: r.kind as string,
+  chip_label: (r.chip_label as string | null) ?? null,
   problem: r.problem as string,
   pitch: r.pitch as string,
   goal: r.goal as string,
@@ -144,7 +153,10 @@ const toIdea = (r: Record<string, unknown>): AppIdea => ({
   updated_at: iso(r.updated_at),
   created_by: (r.created_by as string | null) ?? null,
 });
-const tidy = (f: AppIdeaFields): AppIdeaFields => ({ ...f, problem: f.problem.trim(), pitch: f.pitch.trim(), goal: f.goal.trim(), categories: f.categories ?? [], product_names: (f.product_names ?? []).map((n) => n.trim()) });
+const tidy = (f: AppIdeaFields): AppIdeaFields => ({ ...f, chip_label: (f.chip_label ?? "").trim(), problem: f.problem.trim(), pitch: f.pitch.trim(), goal: f.goal.trim(), categories: f.categories ?? [], product_names: (f.product_names ?? []).map((n) => n.trim()) });
+const values = (f: AppIdeaFields) => [f.id, f.kind, f.chip_label, f.problem, f.pitch, f.goal, f.product_lines, f.categories ?? [], f.product_names ?? [], f.sort ?? 0];
+const INSERT = `INSERT INTO financial_products.app_ideas (id, kind, chip_label, problem, pitch, goal, product_lines, categories, product_names, sort, created_by)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (id) DO NOTHING`;
 const check = (f: AppIdeaFields, kinds?: readonly AppKind[]) => {
   const errors = appIdeaErrors(f, kinds);
   if (errors.length) throw new AppIdeaError(errors.join("; "));
@@ -170,9 +182,8 @@ export async function createAppIdea(db: Pick<Db, "query">, fields: AppIdeaFields
   const f = tidy(fields);
   check(f, kinds);
   const { rows } = await db.query(
-    `INSERT INTO financial_products.app_ideas (id, kind, problem, pitch, goal, product_lines, categories, product_names, sort, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING RETURNING ${COLUMNS}`,
-    [f.id, f.kind, f.problem, f.pitch, f.goal, f.product_lines, f.categories ?? [], f.product_names ?? [], f.sort ?? 0, actorId],
+    `${INSERT} RETURNING ${COLUMNS}`,
+    [...values(f), actorId],
   );
   if (!rows[0]) throw new AppIdeaError(`There's already an idea '${f.id}'; change it with update_app_idea`);
   return toIdea(rows[0]);
@@ -184,12 +195,12 @@ export type AppIdeaPatch = Partial<Omit<AppIdeaFields, "id">> & { status?: AppId
 export async function updateAppIdea(db: Pick<Db, "query">, id: string, patch: AppIdeaPatch, kinds?: readonly AppKind[]): Promise<AppIdea> {
   const current = await getAppIdea(db, id);
   if (!current) throw new AppIdeaError(`No idea '${id}'; list_app_ideas lists them`);
-  const next = tidy({ ...current, ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), id });
+  const next = tidy({ ...current, chip_label: current.chip_label ?? "", ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)), id });
   check(next, kinds);
   const { rows } = await db.query(
-    `UPDATE financial_products.app_ideas SET kind = $2, problem = $3, pitch = $4, goal = $5, product_lines = $6, categories = $7, product_names = $8, sort = $9, status = $10, updated_at = now()
+    `UPDATE financial_products.app_ideas SET kind = $2, chip_label = $3, problem = $4, pitch = $5, goal = $6, product_lines = $7, categories = $8, product_names = $9, sort = $10, status = $11, updated_at = now()
      WHERE id = $1 RETURNING ${COLUMNS}`,
-    [id, next.kind, next.problem, next.pitch, next.goal, next.product_lines, next.categories ?? [], next.product_names ?? [], next.sort ?? 0, patch.status ?? current.status],
+    [...values(next), patch.status ?? current.status],
   );
   return toIdea(rows[0]);
 }
@@ -226,9 +237,8 @@ export async function seedAppIdeas(
   const kept: string[] = [];
   for (const f of ideas) {
     const { rows } = await db.query(
-      `INSERT INTO financial_products.app_ideas (id, kind, problem, pitch, goal, product_lines, categories, product_names, sort, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING RETURNING id`,
-      [f.id, f.kind, f.problem, f.pitch, f.goal, f.product_lines, f.categories ?? [], f.product_names ?? [], f.sort ?? 0, actorId],
+      `${INSERT} RETURNING id`,
+      [...values(f), actorId],
     );
     (rows.length ? inserted : kept).push(f.id);
   }
@@ -241,9 +251,32 @@ export async function seedAppIdeas(
   return { inserted, kept, retired: rows.map((r) => r.id as string).sort() };
 }
 
+// Fills in the chip label of ideas already there that have none (rows added before chip labels), from `ideas` (a
+// shipped set: seedIdeas(APP_IDEAS_V2_SEED_PATH)). Nothing else changes, and a label already there, an admin's or
+// the seed's, is never overwritten. Ids in `ideas` with no row are reported as missing, not added.
+export async function fillAppIdeaChipLabels(
+  db: Pick<Db, "query">,
+  ideas: AppIdeaFields[] = seedIdeas(),
+): Promise<{ filled: string[]; kept: string[]; missing: string[] }> {
+  const filled: string[] = [];
+  const kept: string[] = [];
+  const missing: string[] = [];
+  for (const f of ideas) {
+    const chip = (f.chip_label ?? "").trim();
+    if (!chip || chip.length > CHIP_LABEL_MAX || /[\r\n]/.test(chip)) throw new AppIdeaError(`idea '${f.id}': the chip label is 1 to ${CHIP_LABEL_MAX} characters on one line`);
+    const { rows } = await db.query(
+      `UPDATE financial_products.app_ideas SET chip_label = $2, updated_at = now() WHERE id = $1 AND chip_label IS NULL RETURNING id`,
+      [f.id, chip],
+    );
+    if (rows.length) filled.push(f.id);
+    else ((await getAppIdea(db, f.id)) ? kept : missing).push(f.id);
+  }
+  return { filled, kept, missing };
+}
+
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string) => ({ ...json({ error }), isError: true });
-const forDeveloper = ({ id, kind, problem, pitch, goal, product_lines, categories, product_names }: AppIdea) => ({ id, kind, problem, pitch, goal, product_lines, categories, product_names });
+const forDeveloper = ({ id, kind, chip_label, problem, pitch, goal, product_lines, categories, product_names }: AppIdea) => ({ id, kind, chip_label, problem, pitch, goal, product_lines, categories, product_names });
 const refusal = (e: unknown) => {
   if (e instanceof AppIdeaError) return fail(e.message);
   throw e;
@@ -251,7 +284,12 @@ const refusal = (e: unknown) => {
 
 const kindId = z.string().regex(IDEA_ID).describe("An app kind's id (list_app_kinds)");
 const ideaFields = {
-  problem: z.string().min(10).max(PROBLEM_MAX).describe("The label: who has the problem and what it is, in plain words (\"Roommates chase each other for their share of rent and bills\"). No product names"),
+  chip_label: z
+    .string()
+    .min(1)
+    .max(CHIP_LABEL_MAX)
+    .describe("The chip's label on the Build page: 1 to 34 characters on one line, plain words saying what the app is (\"Two-key household fund\"). The problem is the chip's tooltip"),
+  problem: z.string().min(10).max(PROBLEM_MAX).describe("The problem: who has the problem and what it is, in plain words (\"Roommates chase each other for their share of rent and bills\"). No product names"),
   pitch: z.string().min(10).max(PITCH_MAX).describe("One line: what the app does about the problem"),
   goal: z.string().min(GOAL_MIN).max(GOAL_MAX).describe("The goal the build starts from, which the developer edits"),
   product_lines: z.array(z.enum(PRODUCT_LINES)).min(1).describe("Some or all of the kind's product lines"),
@@ -266,7 +304,7 @@ export function registerAppIdeaTools(server: McpServer, store: Store, opts: { ad
     {
       title: "App ideas",
       description:
-        "Developer: specific finance apps to start from, each on an app kind (list_app_kinds): the problem it solves as its label, a one-line pitch saying what the app does about it, a goal to start the build from and edit, the kind's product lines it builds on and, optionally, the product categories in them it's for. Pass the idea's kind as start_build's kind and its goal as the goal. Only active ideas, unless an admin passes include_retired.",
+        "Developer: specific finance apps to start from, each on an app kind (list_app_kinds): a short chip_label (at most 34 characters, what the Build page's chip shows; null on an idea added before chip labels until an admin fills it), the problem it solves, a one-line pitch saying what the app does about it, a goal to start the build from and edit, the kind's product lines it builds on and, optionally, the product categories in them it's for. Pass the idea's kind as start_build's kind and its goal as the goal. Only active ideas, unless an admin passes include_retired.",
       inputSchema: {
         kind: kindId.optional().describe("Only this kind's ideas"),
         include_retired: z.boolean().optional().describe("Admins only: retired ideas too, with each idea's status and history"),
@@ -289,7 +327,7 @@ export function registerAppIdeaAdminTools(server: McpServer, store: Store, user:
     {
       title: "Add an app idea",
       description:
-        "Admin: add a specific app idea on an app kind, offered on New app. Its label is a plain problem statement (who, and the problem), the pitch says what the app does about it, and the goal is where the build starts. Refused if the kind isn't there, a line or category isn't the kind's, the text is about lending, insurance, investing, trading or cards, promises or projects earnings, yields, returns or guarantees, gives advice ('not advice' is fine), or frames users as sellers of goods. Factual words about the products (interest, rate, matures, retirement, fund) are fine.",
+        "Admin: add a specific app idea on an app kind, offered on New app. Its chip_label is the chip's short label (1 to 34 characters on one line, plain words saying what the app is), the problem is a plain problem statement (who, and the problem) shown as the chip's tooltip, the pitch says what the app does about it, and the goal is where the build starts. Refused if the kind isn't there, a line or category isn't the kind's, the text is about lending, insurance, investing, trading or cards, promises or projects earnings, yields, returns or guarantees, gives advice ('not advice' is fine), or frames users as sellers of goods. Factual words about the products (interest, rate, matures, retirement, fund) are fine.",
       inputSchema: { id: z.string().regex(IDEA_ID).describe("A short slug, unique across every idea"), kind: kindId, ...ideaFields },
     },
     async (args) => {
@@ -308,10 +346,11 @@ export function registerAppIdeaAdminTools(server: McpServer, store: Store, user:
     {
       title: "Change an app idea",
       description:
-        "Admin: change some of an app idea's fields (the ones you leave out stay). The idea as it would then be is checked whole, as create_app_idea checks it. status 'active' brings back a retired idea.",
+        "Admin: change some of an app idea's fields (the ones you leave out stay). The idea as it would then be is checked whole, as create_app_idea checks it, so an idea added before chip labels needs a chip_label to change anything else. status 'active' brings back a retired idea.",
       inputSchema: {
         id: z.string().regex(IDEA_ID),
         kind: kindId.optional(),
+        chip_label: ideaFields.chip_label.optional(),
         problem: ideaFields.problem.optional(),
         pitch: ideaFields.pitch.optional(),
         goal: ideaFields.goal.optional(),
@@ -357,14 +396,21 @@ export function registerAppIdeaAdminTools(server: McpServer, store: Store, user:
     {
       title: "Add Mynt's shipped app ideas",
       description:
-        "Admin: add a set of the app ideas that ship with Mynt that aren't in the database yet: seed 'v1' (the default, workspaces/coding-build/templates/ideas.seed.json) or 'v2' (ideas.v2.seed.json: sharper ideas on the same products, with new ids). Safe to run again: an idea already there, edited or retired, is never overwritten. With replace: true, every active idea not in that set is then retired (never deleted; update_app_idea with status 'active' brings one back), and the retired ids are returned. Mynt never does this on its own.",
+        "Admin: add a set of the app ideas that ship with Mynt that aren't in the database yet: seed 'v1' (the default, workspaces/coding-build/templates/ideas.seed.json) or 'v2' (ideas.v2.seed.json: sharper ideas on the same products, with new ids). Safe to run again: an idea already there, edited or retired, is never overwritten. With replace: true, every active idea not in that set is then retired (never deleted; update_app_idea with status 'active' brings one back), and the retired ids are returned. With labels_only: true, nothing is added or retired: each idea of the set already in the database that has no chip_label gets the set's (filled), one that has a chip_label keeps it (kept), and ids not in the database are listed (missing). Mynt never does this on its own.",
       inputSchema: {
         seed: z.enum(["v1", "v2"]).optional().describe("Which shipped set to add (default v1)"),
         replace: z.boolean().optional().describe("Retire every active idea that isn't in the set (never deletes)"),
+        labels_only: z.boolean().optional().describe("Only fill in the set's chip_label on its ideas already there that have none; adds, retires and changes nothing else"),
       },
     },
-    async ({ seed, replace }) => {
+    async ({ seed, replace, labels_only }) => {
       const set: AppIdeaSeed = seed ?? "v1";
+      if (labels_only) {
+        if (replace) return fail("labels_only fills in chip labels only; run replace on its own");
+        const filled = await fillAppIdeaChipLabels(store.db, seedIdeas(APP_IDEA_SEEDS[set]));
+        await store.audit(user.id, "seed_app_ideas", "app_ideas", { seed: set, labels_only: true, ...filled });
+        return json(filled);
+      }
       const result = await seedAppIdeas(store.db, user.id, seedIdeas(APP_IDEA_SEEDS[set]), { replace: Boolean(replace) });
       await store.audit(user.id, "seed_app_ideas", "app_ideas", {
         seed: set,
