@@ -188,10 +188,39 @@
   --color-fd-primary: var(--sidebar-foreground);
 }
 
-/* The studio's pages scroll in their own boxes (app/layout.tsx fixes <html> and <body> to the window); the docs
-   scroll the window, as Fumadocs' layout expects. */
-html:has(#nd-docs-layout),
-html:has(#nd-docs-layout) body {
+/* The studio's pages scroll in their own boxes (app/layout.tsx fixes <html> and <body> to the window); the public
+   docs scroll the window, as Fumadocs' layout expects. */
+html:has(#nd-docs-layout):not(:has([data-docs-in-shell])),
+html:has(#nd-docs-layout):not(:has([data-docs-in-shell])) body {
   height: auto;
   overflow: visible;
+}
+
+/* Signed in, the docs sit in the studio's content pane (components/docs/docs-frame.tsx DocsInStudio), which scrolls
+   them: Fumadocs' sticky tree and table of contents are as tall as the pane, not the window. */
+[data-docs-in-shell] {
+  container-type: size;
+}
+[data-docs-in-shell] #nd-docs-layout {
+  --fd-docs-height: 100cqh;
+}
+/* Its Search box carries no shortcut there (the studio's header search has Cmd+K). */
+[data-docs-in-shell] [data-search-full] kbd {
+  display: none;
+}
+/* Beside the studio's sidebar the pane is narrower than the window, so the table of contents moves to the
+   "On this page" bar above the page until the window is wide enough for the tree, the page and it side by side. */
+@media (max-width: 1535.98px) {
+  [data-docs-in-shell] #nd-docs-layout {
+    --fd-toc-width: 0px !important;
+  }
+  [data-docs-in-shell] #nd-docs-layout:has(> [data-toc-popover]) {
+    --fd-toc-popover-height: 2.5rem !important;
+  }
+  [data-docs-in-shell] #nd-toc {
+    display: none;
+  }
+  [data-docs-in-shell] [data-toc-popover] {
+    display: block;
+  }
 }
