@@ -2,7 +2,7 @@
 
 // The header's search: a search field that opens a Cmd+K modal, with Ask AI in the same modal
 // (the field, or Cmd+K / Ctrl+K anywhere, opens it). Typing
-// searches the studio: its pages, the selected workspace's apps (by name or stage), members,
+// searches the studio: its pages, the selected workspace's apps (by name or stage), the user's own financial products, members,
 // licences and audit actions, with the arrow keys and Enter (shadcn's Command, cmdk). "Ask AI"
 // switches the modal to a conversation with the studio's assistant (components/ask-ai.tsx),
 // streamed, with follow-ups, Stop and New chat; Search goes back. The conversation is kept in
@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandShortcut } from "@/components/ui/command";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { SEARCH_GROUPS, searchIndex, searchStudio, type SearchItem, type SearchSources } from "@/lib/studio-search";
+import { myProductsFrom } from "@/lib/threads";
 import { cn } from "@/lib/utils";
 import { withWorkspace } from "@/lib/workspaces";
 import { useStudioAccess } from "@/lib/use-liquidity-access";
@@ -137,6 +138,8 @@ function useSearchSources(open: boolean): SearchSources {
     const ws = encodeURIComponent(selected.id);
     const set = (patch: SearchSources) => live && setSources((s) => ({ ...s, ...patch }));
     void pick(withWorkspace("/api/projects", selected), (b) => b.projects as SearchSources["apps"]).then((apps) => set({ apps: apps ?? [] }));
+    // The user's own financial products: each opens its workspace.
+    void pick("/api/products?mine=1", (b) => myProductsFrom(b.mine)).then((products) => set({ products: products ?? [] }));
     if (!selected.implicit)
       void pick(`/api/workspaces/${ws}/members`, (b) => b.members as SearchSources["members"]).then((members) => set({ members: members ?? [] }));
     else set({ members: [] });

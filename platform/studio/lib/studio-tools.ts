@@ -97,6 +97,17 @@ export const STUDIO_TOOLS = {
   // Out of the way (idea or staging only; Mynt refuses production), with a reason, and back to its stage. Never deleted.
   archive_product: z.object({ product_id: ProductId, reason: z.string().trim().min(3).max(1000) }).strict(),
   unarchive_product: z.object({ product_id: ProductId }).strict(),
+  // A product's own workspace (/products/<id>), reading only: its v2 definition (Terms, Customers, Risk,
+  // Integrations), its versions and activity, its firm's vendor services, and the health record's status.
+  // The numbers (get_product_health) and covenants are read only where Mynt offers them to the user
+  // (its licence provider and liquidity providers); everyone else is told why not.
+  get_product_definition: z.object({ product_id: ProductId }).strict(),
+  list_product_versions: z.object({ id: ProductId }).strict(),
+  list_product_activity: z.object({ id: ProductId, limit: z.number().int().min(1).max(200).optional() }).strict(),
+  list_my_vendor_subscriptions: z.object({ days: z.number().int().min(1).max(90).optional(), include_ended: z.boolean().optional() }).strict(),
+  get_product_health: z.object({ product_id: ProductId, limit: z.number().int().min(1).max(200).optional() }).strict(),
+  list_covenants: z.object({ product_id: ProductId }).strict(),
+  list_covenant_breaches: z.object({ product_id: ProductId, open_only: z.boolean().optional(), limit: z.number().int().min(1).max(200).optional() }).strict(),
   // New app: a draft app on the products picked, then a build for it.
   create_app: z
     .object({
@@ -142,7 +153,13 @@ export const STUDIO_TOOLS = {
   request_promotion_signoff: z.object({ app_id: id }).strict(),
   // An app's Products, Agreements and Customers tabs: its products with their sponsors, its agreements with the firms
   // behind them (Propose agreement), and the personas it targets (Choose personas). Apps hold no licences themselves.
-  list_app_agreements: z.object({ app_id: id, status: z.enum(["proposed", "accepted", "signed", "declined", "terminated"]).optional() }).strict(),
+  // Without app_id: the Licences page's Agreements tab, a licence provider's list of what apps proposed to its firm.
+  list_app_agreements: z.object({ app_id: id.optional(), status: z.enum(["proposed", "accepted", "signed", "declined", "terminated"]).optional() }).strict(),
+  // Each side's row actions: the licence provider accepts or declines (Accept / Decline), either side signs (Sign) and
+  // either side ends one with a reason (End agreement; Withdraw for the app's own proposal). Mynt decides who may.
+  respond_to_app_agreement: z.object({ agreement_id: uuid, decision: z.enum(["accept", "decline"]), note: z.string().trim().max(2000).optional() }).strict(),
+  sign_app_agreement: z.object({ agreement_id: uuid }).strict(),
+  terminate_app_agreement: z.object({ agreement_id: uuid, reason: z.string().trim().min(3).max(2000) }).strict(),
   propose_app_agreement: z
     .object({
       app_id: id,

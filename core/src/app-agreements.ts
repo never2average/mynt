@@ -22,7 +22,9 @@ import { openSubscriptionAgreements } from "./vendor-terms.js";
 // (propose_app_agreement), a member of the other firm accepts or declines it (respond_to_app_agreement), then each side
 // signs (sign_app_agreement), and it is signed only once both have. Either side may end it with a reason
 // (terminate_app_agreement). Every change is audited (with the app's id, so the app's trail shows it) and the other
-// firm is told on its webhooks and notices (firm-notices.ts). Going live doesn't wait on agreements yet.
+// firm is told on its webhooks and notices (firm-notices.ts); the app's side sees the other firm's answers, signatures
+// and terminations in its workspace's attention list (attention.ts). Production waits on program agreements: a signed
+// one in force with the sponsor of each product the app uses (programAgreementCoverage below, promotions.ts).
 //
 // Vendor agreements are usually not negotiated: vendors list standard services under standard terms in the vendor
 // marketplace, and subscribing with subscribe_vendor_service accepts them, recording a 'vendor' agreement per app already
@@ -228,6 +230,90 @@ async function introductions(store: Store, app: App) {
   });
 }
 
+// ---- the production gate: a signed program agreement with each product's sponsor ----
+//
+// An app moves to production only with a signed program agreement, in force today, with the licence provider
+// sponsoring each product it uses, covering that product (promotions.ts, the program_agreements check). Which sponsors
+// count: those sponsoring the product in a state the app serves (a sponsorship for the whole country counts for each of
+// its states), or every sponsor of it while the app's states aren't set. A product no licence provider sponsors is
+// covered by its own firm's licences, so it needs none. In force: signed by both sides, effective_from on or before
+// today (or unset), effective_to today or later (or unset). One that ends, or is terminated, after the app reached
+// production doesn't move the app back: the check fails, and the workspace's attention list, the app's Agreements tab
+// and ops_status flag it.
+
+export interface ProgramCoverage {
+  product_id: string;
+  product_name: string;
+  sponsor_entity_id: string;
+  sponsor_name: string | null;
+  covered: boolean;
+  agreement_id: string | null; // the agreement it rests on, or the nearest one when none is in force
+  agreement_status: AppAgreement["status"] | null;
+  note: string | null; // why the nearest agreement doesn't count, in words
+}
+
+type Q = Pick<Store["db"], "query">;
+export const today = () => new Date().toISOString().slice(0, 10);
+
+// A sponsorship's jurisdictions cover a state: that state itself, or its whole country ('us' covers 'us-ny').
+const coversState = (jurisdictions: string[], state: string) => {
+  const s = state.toLowerCase();
+  return jurisdictions.some((j) => j.toLowerCase() === s || j.toLowerCase() === s.split("-")[0]);
+};
+
+// Whether a program agreement is signed and in force on `on`.
+export const inForce = (a: Pick<AppAgreement, "status" | "effective_from" | "effective_to">, on: string) =>
+  a.status === "signed" && (!a.effective_from || a.effective_from <= on) && (!a.effective_to || a.effective_to >= on);
+
+function whyNot(a: AppAgreement, sponsor: string, on: string): string {
+  if (a.status === "signed") return a.effective_from && a.effective_from > on ? `its signed agreement takes effect on ${a.effective_from}` : `its signed agreement ended on ${a.effective_to}`;
+  if (a.status === "accepted") return `${sponsor} accepted it; waiting for ${!a.app_signed_at && !a.counterparty_signed_at ? "both signatures" : a.app_signed_at ? `${sponsor}'s signature` : "your signature"}`;
+  if (a.status === "proposed") return `proposed, waiting for ${sponsor} to accept`;
+  if (a.status === "declined") return `${sponsor} declined it`;
+  return `it was ended on ${a.terminated_at?.slice(0, 10) ?? "an earlier date"}${a.termination_reason ? `: ${a.termination_reason}` : ""}`;
+}
+
+// Each (product, sponsor) pair the app needs a program agreement for, and whether one in force covers it.
+export async function programAgreementCoverage(q: Q, store: Store, app: Pick<App, "id" | "product_ids">, targets: string[], on = today()): Promise<ProgramCoverage[]> {
+  if (!app.product_ids.length) return [];
+  const agreements = (await q.query(`SELECT * FROM ${T}.app_agreements WHERE app_id = $1 AND kind = 'program' ORDER BY created_at DESC`, [app.id])).rows.map(toAgreement);
+  // The nearest agreement when none is in force: one on its way first, then the latest that ended (expired,
+  // terminated or declined). The list is newest first, and the sort keeps that order within a rank.
+  const rank = (a: AppAgreement) => (inForce(a, on) ? 0 : a.status === "signed" && a.effective_from && a.effective_from > on ? 1 : a.status === "accepted" ? 2 : a.status === "proposed" ? 3 : 4);
+  const out: ProgramCoverage[] = [];
+  for (const productId of app.product_ids) {
+    const record = await store.getProduct(productId);
+    if (!record) continue; // the licences check names a product that doesn't exist
+    const approved = await store.sponsorships({ product_id: productId, status: "approved" });
+    const sponsors = new Map<string, string[]>();
+    for (const s of approved) sponsors.set(s.provider_entity_id, [...(sponsors.get(s.provider_entity_id) ?? []), ...s.jurisdictions]);
+    for (const [sponsor, jurisdictions] of sponsors) {
+      if (targets.length && !targets.some((t) => coversState(jurisdictions, t))) continue;
+      const name = (await store.getEntity(sponsor))?.name ?? null;
+      const nearest = agreements.filter((a) => a.counterparty_entity_id === sponsor && a.products.includes(productId)).sort((a, b) => rank(a) - rank(b))[0];
+      const covered = !!nearest && inForce(nearest, on);
+      out.push({
+        product_id: productId,
+        product_name: record.product.name,
+        sponsor_entity_id: sponsor,
+        sponsor_name: name,
+        covered,
+        agreement_id: nearest?.id ?? null,
+        agreement_status: nearest?.status ?? null,
+        note: nearest && !covered ? whyNot(nearest, name ?? "the sponsor", on) : null,
+      });
+    }
+  }
+  return out;
+}
+
+// The words for one pair with no agreement in force.
+export const missingAgreementText = (c: ProgramCoverage) => `No signed program agreement with ${c.sponsor_name ?? c.sponsor_entity_id} for ${c.product_name}${c.note ? ` (${c.note})` : ""}`;
+
+// The app's target states, as promotions keeps them.
+const targetStatesOf = async (q: Q, appId: string) =>
+  (((await q.query(`SELECT target_states FROM ${T}.app_promotions WHERE app_id = $1`, [appId])).rows[0]?.target_states as string[] | undefined) ?? []).map((s) => s.toLowerCase());
+
 // A firm that lists vendor offerings on Mynt.
 const isVendorFirm = async (store: Store, entityId: string) =>
   Boolean((await store.db.query(`SELECT 1 FROM ${T}.vendor_offerings WHERE entity_id = $1 LIMIT 1`, [entityId])).rows[0]);
@@ -236,9 +322,12 @@ const isVendorFirm = async (store: Store, entityId: string) =>
 async function describe(store: Store, a: AppAgreement) {
   const [app, counterparty] = await Promise.all([a.app_id ? store.getApp(a.app_id) : undefined, store.getEntity(a.counterparty_entity_id)]);
   const products = await Promise.all(a.products.map(async (id) => ({ id, name: (await store.getProduct(id))?.product.name ?? id })));
+  // The developer workspace behind the app, by name, for the other firm's list.
+  const workspace = a.workspace_id ? (await store.db.query(`SELECT name FROM ${T}.workspaces WHERE id = $1`, [a.workspace_id])).rows[0] : undefined;
   return {
     ...a,
     app: a.app_id ? { id: a.app_id, name: app?.name ?? null } : null,
+    workspace: a.workspace_id ? { id: a.workspace_id, name: (workspace?.name as string | undefined) ?? null } : null,
     counterparty: { entity_id: a.counterparty_entity_id, name: counterparty?.name ?? null },
     products: products,
     signatures: { app_side: a.app_signed_at !== null, counterparty_side: a.counterparty_signed_at !== null },
@@ -442,7 +531,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
     {
       title: "App agreements",
       description:
-        "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on (each with the version of the vendor's standard terms accepted for this app, or no_standard_terms when none were), and introductions the business-development agent has in progress for its members (null when that agent isn't running here). Without app_id (licence provider or vendor): the agreements apps have proposed to or made with your firm. status filters either list.",
+        "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, program_coverage (each product and the licence provider sponsoring it where the app serves, and whether a signed program agreement in force covers it: production needs every one; production_gate says what's missing, and flagged when the app is already in production without one), the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on (each with the version of the vendor's standard terms accepted for this app, or no_standard_terms when none were), and introductions the business-development agent has in progress for its members (null when that agent isn't running here). Without app_id (licence provider or vendor): the agreements apps have proposed to or made with your firm. status filters either list.",
       inputSchema: { app_id: UUID.optional(), status: z.enum(APP_AGREEMENT_STATUSES).optional() },
       annotations: { readOnlyHint: true },
     },
@@ -451,10 +540,21 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
         const app = sides.app ? await memberApp(store, user, app_id) : undefined;
         if (!app) return fail(`No app '${app_id}' of yours`);
         const { rows } = await store.db.query(`SELECT * FROM ${T}.app_agreements WHERE app_id = $1 AND ($2::text IS NULL OR status = $2) ORDER BY created_at DESC`, [app.id, status ?? null]);
+        const stage = ((await store.db.query(`SELECT stage FROM ${T}.app_promotions WHERE app_id = $1`, [app.id])).rows[0]?.stage as string | undefined) ?? "idea";
+        const coverage = await programAgreementCoverage(store.db, store, app, await targetStatesOf(store.db, app.id));
+        const missing = coverage.filter((c) => !c.covered);
         return json({
-          app: { id: app.id, name: app.name, workspace_id: app.workspace_id },
+          app: { id: app.id, name: app.name, workspace_id: app.workspace_id, stage },
           can_manage: MANAGERS.includes((await appRole(store, user, app)) ?? ""),
           agreements: await Promise.all(rows.map((r) => describe(store, toAgreement(r)))),
+          // Production needs a signed program agreement in force for each of these (the program_agreements check).
+          program_coverage: coverage,
+          production_gate: {
+            met: missing.length === 0,
+            missing: missing.map(missingAgreementText),
+            // In production already without one: the app keeps running, but its production checks fail until it's fixed.
+            flagged: stage === "production" && missing.length > 0,
+          },
           products: (await appProducts(store, app)).map(({ customer_segments: _s, ...p }) => p),
           vendor_contracts: await vendorContracts(store, app),
           introductions: await introductions(store, app),

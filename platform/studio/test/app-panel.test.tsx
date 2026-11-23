@@ -46,6 +46,8 @@ const AGREEMENTS = {
   ],
   vendor_contracts: [{ subscription_id: "v1", vendor: { entity_id: "e9", name: "KYC Works" }, offering: "Identity check", service_type: "kyc", environment: "test", since: "2026-11-01T00:00:00.000Z" }],
   introductions: [{ id: "i1", status: "proposed", counterparty: null, since: "2026-11-10T00:00:00.000Z" }],
+  program_coverage: [{ product_id: "p1", product_name: "Card", sponsor_entity_id: SPONSOR, sponsor_name: "Lead Bank", covered: false, agreement_id: "g1", note: "Lead Bank accepted it; waiting for Lead Bank's signature" }],
+  production_gate: { met: false, missing: ["No signed program agreement with Lead Bank for Card (Lead Bank accepted it; waiting for Lead Bank's signature)"], flagged: false },
 };
 const CUSTOMERS = {
   app: { id: APP, name: "Cards" },
@@ -109,6 +111,14 @@ vi.mock("@/lib/tokens", () => ({
               { id: "build_verified", label: "Latest build verified", status: "pass" },
               { id: "audit_findings", label: "No open critical findings", status: "fail", detail: "1 high finding" },
               { id: "licences", label: "Every product licensed where the app serves", status: "fail", detail: "Savings isn't covered in California", fix: { label: "See licences", href: "/licences" } },
+              {
+                id: "program_agreements",
+                label: "Signed program agreement with each product's sponsor",
+                status: "fail",
+                detail: "No signed program agreement with Lead Bank for Card",
+                fix: { label: "Propose agreement", href: `/${APP}?tab=agreements`, tool: "propose_app_agreement" },
+                coverage: [{ product_id: "p1", product_name: "Card", sponsor_entity_id: SPONSOR, sponsor_name: "Lead Bank", covered: false, agreement_id: null, note: null }],
+              },
               { id: "webhooks", label: "Webhooks verified", status: "pass" },
             ],
           });
@@ -190,6 +200,23 @@ describe("the app panel route", () => {
     expect((await get("products")).body.data?.available).toBe(false);
   });
 
+  it("Products: the program agreements check production needs, each sponsor and product, and whether an owner may propose one", async () => {
+    const data = (await get("products")).body.data as unknown as AppProducts;
+    expect(data.agreementCheck?.status).toBe("fail");
+    expect(data.agreementCheck?.detail).toBe("No signed program agreement with Lead Bank for Card");
+    expect(data.coverage).toEqual([{ productId: "p1", productName: "Card", sponsorId: SPONSOR, sponsorName: "Lead Bank", covered: false, agreementId: "g1", note: "Lead Bank accepted it; waiting for Lead Bank's signature" }]);
+    expect(data.gate).toEqual({ met: false, missing: ["No signed program agreement with Lead Bank for Card (Lead Bank accepted it; waiting for Lead Bank's signature)"], flagged: false });
+    expect(data.canManage).toBe(true);
+    const html = renderToStaticMarkup(<views.ProductsTabView appId={APP} data={data} />);
+    expect(html).toContain('data-section="app-program-agreements"');
+    expect(html).toMatch(/data-agreement-check="fail".*data-tone="red"/);
+    expect(html).toContain(`data-propose-for="p1/${SPONSOR}"`);
+    expect(html).toContain("No signed program agreement (Lead Bank accepted it; waiting for Lead Bank&#x27;s signature)");
+    // Not flagged while the app isn't in production; a member gets no shortcut.
+    expect(html).not.toContain("data-production-flag");
+    expect(renderToStaticMarkup(<views.ProductsTabView appId={APP} data={{ ...data, canManage: false }} />)).not.toContain("data-propose-for");
+  });
+
   it("Agreements: this app's agreements, vendor contracts and introductions, and the sponsors to propose to", async () => {
     const data = (await get("agreements")).body.data as unknown as AppAgreements;
     expect(fake.calls.find((c) => c.name === "list_app_agreements")?.args).toEqual({ app_id: APP });
@@ -257,6 +284,15 @@ describe("the app panel route", () => {
     expect(parseStudioCall("list_workspace_audit", { app_id: APP, class: "everything" })).toHaveProperty("error");
     expect(parseStudioCall("list_app_agreements", { app_id: APP })).toHaveProperty("tool");
     expect(parseStudioCall("list_app_agreements", { app_id: APP, status: "whatever" })).toHaveProperty("error");
+    // Each side's row actions: strict, one agreement by its id.
+    expect(parseStudioCall("list_app_agreements", {})).toHaveProperty("tool"); // a licence provider's own firm's
+    expect(parseStudioCall("respond_to_app_agreement", { agreement_id: SPONSOR, decision: "accept" })).toHaveProperty("tool");
+    expect(parseStudioCall("respond_to_app_agreement", { agreement_id: SPONSOR, decision: "maybe" })).toHaveProperty("error");
+    expect(parseStudioCall("sign_app_agreement", { agreement_id: SPONSOR })).toHaveProperty("tool");
+    expect(parseStudioCall("sign_app_agreement", { agreement_id: "g1" })).toHaveProperty("error");
+    expect(parseStudioCall("terminate_app_agreement", { agreement_id: SPONSOR, reason: "Closing it" })).toHaveProperty("tool");
+    expect(parseStudioCall("terminate_app_agreement", { agreement_id: SPONSOR })).toHaveProperty("error");
+    expect(parseStudioCall("terminate_app_agreement", { agreement_id: SPONSOR, reason: "Closing it", force: true })).toHaveProperty("error");
     expect(parseStudioCall("get_app_customers", { app_id: APP, extra: 1 })).toHaveProperty("error");
     expect(parseStudioCall("set_app_target_segments", { app_id: APP, segments: [{ product_id: "p1", segment_id: "retail" }] })).toHaveProperty("tool");
     expect(parseStudioCall("set_app_target_segments", { app_id: APP, segments: [{ product_id: "p1" }] })).toHaveProperty("error");

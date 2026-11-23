@@ -21,8 +21,8 @@
 // (lib/product-ideas.ts) instead of app ideas: a chip starts the chat with the idea as the first message, a
 // row's Use opens the sheet filled with the idea. A Build app message that clearly asks for a product
 // only offers the switch: what's sent in Build app is always a build.
-// A product chat reopened from the sidebar or a link (?thread=, ?product=; lib/threads.ts) comes back here in
-// Create product with its messages and drafts; a product opens the Products tab on it.
+// A product chat reopened from a link (?thread=; lib/threads.ts) comes back here in Create product with its
+// messages and drafts. A product created here opens its own workspace (/products/<id>, onOpenProduct).
 import { useChat } from "@ai-sdk/react"
 import { AssistantRuntimeProvider, useExternalStoreRuntime, type AppendMessage, type ThreadMessageLike } from "@assistant-ui/react"
 import { DefaultChatTransport, type ChatTransport, type UIMessage } from "ai"
@@ -119,7 +119,7 @@ export function productModeCommands(go: { tab: (t: NewAppTab) => void; buildApp:
   ]
 }
 
-const productTransport = () => new DefaultChatTransport<UIMessage>({ api: "/api/product-chat", fetch: askFetch, prepareSendMessagesRequest: withoutReasoning })
+export const productTransport = () => new DefaultChatTransport<UIMessage>({ api: "/api/product-chat", fetch: askFetch, prepareSendMessagesRequest: withoutReasoning })
 export const AI_OFF = "AI is not configured on this studio. Use Create product in the Products tab instead."
 
 const pickedCount = (n: number) => (n ? `${n} picked` : "Pick at least one")
@@ -680,6 +680,7 @@ export function NewAppWorkspace({
   historyOwner = null,
   openRequest = null,
   onOpenApp,
+  onOpenProduct,
 }: {
   products: NewAppProduct[] | null
   kinds: AppKind[] | null
@@ -702,6 +703,8 @@ export function NewAppWorkspace({
   openRequest?: (OpenThreadDetail & { n: number }) | null
   // Opens an app's page (its chat).
   onOpenApp?: (href: string) => void
+  // Opens a financial product's own workspace: where a product created here goes.
+  onOpenProduct?: (productId: string) => void
 }) {
   // ---- Create product: the sheet, and the chat that drafts for it ----
   const [creating, setCreating] = useState(false)
@@ -724,6 +727,23 @@ export function NewAppWorkspace({
   const onCreated = (p: NewAppProduct) => {
     onProductsChange?.((list) => [...list.filter((x) => x.id !== p.id), p])
     noteMine({ id: p.id, name: p.name, status: p.status ?? "draft", updatedAt: new Date().toISOString() })
+    // The new product's own workspace: from a draft, once this chat is saved as the one that made it
+    // (so the workspace opens on it); from the form or an idea, at once.
+    if (onOpenProduct) {
+      const draftId = sheetDraft?.id
+      setSheetDraft(null)
+      setSheetIdea(null)
+      if (!draftId) return onOpenProduct(p.id)
+      const created = { ...createdDrafts, [draftId]: p.id }
+      setCreatedDrafts(created)
+      saver.save(
+        threadId,
+        { messages: productChat.messages, outcomes: Object.fromEntries(Object.entries(created).map(([d, x]) => [d, { product_id: x }])), metadata: { product_ids: Object.values(created) } },
+        { now: true },
+      )
+      void saver.flush().then(() => onOpenProduct(p.id))
+      return
+    }
     if (sheetDraft) {
       const id = sheetDraft.id
       setCreatedDrafts((c) => ({ ...c, [id]: p.id }))

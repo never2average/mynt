@@ -35,7 +35,7 @@ import {
 import type { Invitation } from "@/lib/invitations"
 import { hasLiquidity } from "@/lib/liquidity"
 import { useStudioAccess } from "@/lib/use-liquidity-access"
-import { myProductsFrom, OPEN_THREAD, openFromSearch, THREADS_UPDATED, type MyProduct, type OpenThreadDetail, type ThreadsUpdatedDetail } from "@/lib/threads"
+import { myProductsFrom, productIdOfPath, THREADS_UPDATED, type MyProduct, type ThreadsUpdatedDetail } from "@/lib/threads"
 import { productStageOf } from "@/lib/products"
 import { groupByStage, STAGES, withWorkspace, type Stage, type StagedApp, type Workspace } from "@/lib/workspaces"
 
@@ -66,10 +66,10 @@ export type SidebarViewProps = {
   invitations?: Invitation[]
   onAnswerInvitation?: (id: string, action: "accept" | "decline") => Promise<string | null>
   liquidity?: boolean
-  developer?: boolean // false: only Dashboard (and Earn for liquidity providers); no workspaces or apps
+  developer?: boolean // false: only Dashboard (and Earn for liquidity providers, Licences for licence providers); no workspaces or apps
+  licenceProvider?: boolean // a licence provider: Licences (its Agreements tab) even without the developer role
   workspaceSettings?: WorkspaceSettings // the switcher's Rename / Archive / Unarchive workspace
   products?: MyProduct[] | null // the user's own financial products, in the stage folders with the apps (null while loading)
-  activeProductId?: string // the product open on the Build page, marked in its folder
 }
 
 // The folders' items: the workspace's apps and the user's products, each in its stage.
@@ -80,8 +80,10 @@ export function stagedItems(groups: Record<Stage, StagedApp[]> | null, products:
 }
 
 // What the sidebar shows, from its data; rendered on the server by the tests.
-export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, workspaceSettings, products = null, activeProductId, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
-  const appId = pathname.split("/").filter(Boolean)[0]
+export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, licenceProvider = false, workspaceSettings, products = null, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
+  // The app or product on screen, marked in its folder: an app's workspace is /<app id>, a product's /products/<id>.
+  const activeProductId = productIdOfPath(pathname)
+  const appId = activeProductId ? undefined : pathname.split("/").filter(Boolean)[0]
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
@@ -99,7 +101,7 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
       <SidebarContent>
         <SidebarGroup>
           <SidebarMenu>
-            {[...(developer ? PAGES : PAGES.slice(0, 1)), ...(liquidity ? [EARN_PAGE] : [])].map(({ href, label, icon: Icon }) => (
+            {[...(developer ? PAGES : [...PAGES.slice(0, 1), ...(licenceProvider ? PAGES.slice(1, 2) : [])]), ...(liquidity ? [EARN_PAGE] : [])].map(({ href, label, icon: Icon }) => (
               <SidebarMenuItem key={href}>
                 <SidebarMenuButton asChild tooltip={label} isActive={pathname === href}>
                   <Link href={href}>
@@ -111,7 +113,7 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
             ))}
           </SidebarMenu>
         </SidebarGroup>
-        {developer && <NavFolders groups={stagedItems(groups, products)} activeAppId={appId} activeProductId={pathname === "/new" ? activeProductId : undefined} />}
+        {developer && <NavFolders groups={stagedItems(groups, products)} activeAppId={appId} activeProductId={activeProductId} />}
       </SidebarContent>
       <SidebarFooter>
         <NavUser user={account} />
@@ -174,24 +176,6 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
     }
   }, [developer])
 
-  // The product open on the Build page: from its address (?product=) when the page changes, and from
-  // the folders' in-place opens (the address may not have changed: the Build page was already open).
-  const [activeProductId, setActiveProductId] = useState<string | undefined>(undefined)
-  useEffect(() => {
-    // A click here (the event below) may come before the address has changed: it's kept until the address says otherwise.
-    const fromAddress = openFromSearch(window.location.search)?.product
-    setActiveProductId((picked) => (pathname === "/new" ? (fromAddress ?? picked) : undefined))
-  }, [pathname])
-  useEffect(() => {
-    const open = (e: Event) => {
-      const detail = (e as CustomEvent<OpenThreadDetail>).detail
-      if (detail?.product) setActiveProductId(detail.product)
-      else if (detail?.thread) setActiveProductId(undefined)
-    }
-    window.addEventListener(OPEN_THREAD, open)
-    return () => window.removeEventListener(OPEN_THREAD, open)
-  }, [])
-
   const create = useCallback(
     async (name: string) => {
       const res = await fetch("/api/workspaces", {
@@ -223,9 +207,9 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       onAnswerInvitation={answerInvitation}
       liquidity={liquidity}
       developer={access ? developer : true}
+      licenceProvider={access?.licenceProvider === true}
       workspaceSettings={workspaceSettings}
       products={products}
-      activeProductId={activeProductId}
     />
   )
 }

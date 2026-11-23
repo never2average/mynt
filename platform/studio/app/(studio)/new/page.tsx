@@ -3,7 +3,8 @@
 // New app: the chat workspace Earn uses, with Templates and Products on the right
 // (components/new-app-workspace.tsx). Sending the message creates the app on the picked products and
 // its first build, and opens its workspace (lib/new-app.ts). Under the welcome, Recent: the user's apps
-// and financial products (lib/threads.ts); ?thread=<id> reopens a product chat, ?product=<id> a product.
+// and financial products (lib/threads.ts); ?thread=<id> reopens a product chat; ?product=<id> goes to that
+// product's own workspace (/products/<id>), as does a product created here.
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -12,7 +13,7 @@ import { useWorkspace } from "@/components/workspace-context";
 import { kindsFromRoute, submitNewApp, type AppKind } from "@/lib/new-app";
 import { productIdeasFromRoute, type ProductIdea } from "@/lib/product-ideas";
 import type { ProjectItem } from "@/lib/project-types";
-import { myProductsFrom, OPEN_THREAD, openFromSearch, type AppThreadSource, type MyProduct, type OpenThreadDetail } from "@/lib/threads";
+import { myProductsFrom, OPEN_THREAD, openFromSearch, productHref, type AppThreadSource, type MyProduct, type OpenThreadDetail } from "@/lib/threads";
 import { withWorkspace } from "@/lib/workspaces";
 
 export default function NewAppPage() {
@@ -66,16 +67,24 @@ export default function NewAppPage() {
     };
   }, [selected]);
 
-  // What to open: from the address once, then from the sidebar while this page is open.
+  // What to open: from the address once, then from the sidebar while this page is open. A product has its
+  // own workspace now: ?product=<id> (older links) goes there.
   useEffect(() => {
     const first = openFromSearch(window.location.search);
+    if (first?.product) {
+      router.replace(productHref(first.product));
+      return;
+    }
     if (first) setOpenRequest({ ...first, n: 1 });
     const open = (e: Event) => {
       const detail = (e as CustomEvent<OpenThreadDetail>).detail;
-      if (detail) setOpenRequest((r) => ({ ...detail, n: (r?.n ?? 1) + 1 }));
+      if (detail?.product) router.push(productHref(detail.product));
+      else if (detail) setOpenRequest((r) => ({ ...detail, n: (r?.n ?? 1) + 1 }));
     };
     window.addEventListener(OPEN_THREAD, open);
     return () => window.removeEventListener(OPEN_THREAD, open);
+    // Once, on load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -91,6 +100,7 @@ export default function NewAppPage() {
         historyOwner={owner}
         openRequest={openRequest}
         onOpenApp={(href) => router.push(href)}
+        onOpenProduct={(id) => router.push(productHref(id))}
       />
     </div>
   );
