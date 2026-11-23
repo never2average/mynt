@@ -41,6 +41,7 @@ const SHOTS = [
   ["licences-map"],
   ["audits-security"],
   ["audits-obligations"],
+  ["audits-agreements"],
   ["audits-financial"],
   ["audits-workspace"],
   ["settings-members"],

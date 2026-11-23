@@ -165,6 +165,19 @@ const OBLIGATIONS = [
   "decline_app_agreement",
   "sign_app_agreement",
   "terminate_app_agreement",
+  // oversight audits under app agreements: requirements the licence provider sets, audits opened by the schedule or by
+  // hand, evidence and answers from the app's side, findings, and the outcome (agreement-audits.ts)
+  "add_agreement_audit_requirement",
+  "retire_agreement_audit_requirement",
+  "agreement_audit_scheduled",
+  "open_agreement_audit",
+  "record_agreement_audit_finding",
+  "resolve_agreement_audit_finding",
+  "submit_agreement_audit_evidence",
+  "respond_to_agreement_audit_finding",
+  "pass_agreement_audit",
+  "fail_agreement_audit",
+  "waive_agreement_audit",
   // covenants on sponsorships
   "set_covenant",
   "set_covenant_refused",

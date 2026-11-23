@@ -40,6 +40,7 @@ import {
   type PanelEvent,
   type TabData,
 } from "@/lib/app-panel"
+import { auditsHref, type AgreementAuditSummary } from "@/lib/agreement-audits"
 import { deltaOf, type Kpi } from "@/lib/dashboard-visual"
 import { CHECK_LABELS, CHECK_TONE } from "@/lib/promotions"
 import { cn } from "@/lib/utils"
@@ -323,6 +324,29 @@ export function ProductsTabView({ data }: { data: AppProducts }) {
 
 const dates = (from: string | null, to: string | null) => (from || to ? `${from ?? "—"} to ${to ?? "open-ended"}` : "Not set")
 
+// An agreement's oversight audits: how many, the next one due and how many are overdue (in words),
+// with a link to Audits filtered to this agreement.
+function AgreementAuditsCell({ agreementId, summary }: { agreementId: string; summary: AgreementAuditSummary | undefined }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      {summary ? (
+        <>
+          <span>
+            {summary.count} {summary.count === 1 ? "audit" : "audits"}
+            {summary.nextDue ? `, next due ${summary.nextDue.slice(0, 10)}` : ", none open"}
+          </span>
+          {summary.overdue > 0 && <StatusDot tone="red" label={`${summary.overdue} overdue`} />}
+        </>
+      ) : (
+        <span className="text-muted-foreground">None yet</span>
+      )}
+      <Link href={auditsHref(agreementId)} className="font-medium underline-offset-4 hover:underline" data-agreement-audits-link={agreementId}>
+        View audits
+      </Link>
+    </div>
+  )
+}
+
 // Business development: program agreements with the products' sponsors, vendor contracts and the
 // introductions in progress. Status is always in words. Propose agreement is a labelled action.
 export function AgreementsTabView({ appId, data, onChanged }: { appId: string; data: AppAgreements; onChanged?: () => void }) {
@@ -351,6 +375,7 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
                   <TableHead>Status</TableHead>
                   <TableHead>Products covered</TableHead>
                   <TableHead>Effective</TableHead>
+                  {data.audits && <TableHead>Audits</TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -364,6 +389,11 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
                     </TableCell>
                     <TableCell className="whitespace-normal">{a.products.join(", ") || "—"}</TableCell>
                     <TableCell className="text-xs whitespace-nowrap tabular-nums">{dates(a.from, a.to)}</TableCell>
+                    {data.audits && (
+                      <TableCell className="whitespace-normal text-xs" data-agreement-audits={a.id}>
+                        <AgreementAuditsCell agreementId={a.id} summary={data.audits[a.id]} />
+                      </TableCell>
+                    )}
                   </TableRow>
                 ))}
               </TableBody>

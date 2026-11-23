@@ -44,6 +44,7 @@ import {
 import { registerFirmTools, registerMarketplaceTools, registerRosterTools } from "./marketplace.js";
 import { registerLicenseProviderTools, registerSponsorshipBuilderTools } from "./sponsorships.js";
 import { registerAppAgreementTools } from "./app-agreements.js";
+import { registerAgreementAuditTools } from "./agreement-audits.js";
 import { registerMoneyRailTools } from "./money-rails.js";
 import { registerFirmCheckAdminTools } from "./firm-check-tools.js";
 import { registerProductHealthTools } from "./product-health-tools.js";
@@ -198,6 +199,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   }
   // Business agreements between an app's workspace and the licence providers and vendors behind its products (app-agreements.ts).
   if (user && (has("developer") || has("license_provider") || has("vendor"))) registerAppAgreementTools(server, store, user, { app: has("developer"), counterparty: has("license_provider") || has("vendor") });
+  // Oversight audits a licence provider runs on an app under a program agreement with its firm (agreement-audits.ts).
+  if (user && (has("developer") || has("license_provider"))) registerAgreementAuditTools(server, store, user, { app: has("developer"), counterparty: has("license_provider") });
   if (ctx.covenants && user && has("license_provider")) registerCovenantTools(server, store, user, ctx.covenants);
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds, ctx.identity ?? null);
   // Starting points for common finance apps, for start_build's kind (app-kinds.ts).
