@@ -1,10 +1,10 @@
 // The docs site (/docs): its pages and tool reference, from the data core generates (docs/site/*.json, written by
 // core/scripts/docs-data.mjs from the live tool registry and the repository's Markdown; core's
 // test/tool-catalogue.test.js keeps them in step). Server-side only: the JSON is large, and pages render on the
-// server. The browser gets the nav tree, a page's headings and, on demand, the search index.
+// server. lib/docs-source.ts turns them into Fumadocs' source (the nav tree and the search index).
 import pagesData from "../../../docs/site/pages.json";
 import toolsData from "../../../docs/site/tools.json";
-import { searchText, type DocsSearchItem } from "@/lib/docs-search";
+import { CONNECT_SECTIONS } from "@/lib/connect-sections";
 import type { JsonSchema } from "@/lib/docs-schema";
 
 export type DocsRole = "consumer" | "developer" | "innovator" | "vendor" | "license_provider" | "liquidity_provider" | "admin";
@@ -25,7 +25,7 @@ export type DocsMarkdownPage = { slug: string; title: string; summary: string | 
 export type Catalogue = { areas: DocsArea[]; roles: DocsRoleInfo[]; runtime_endpoints: DocsEndpoint[]; tools: DocsTool[] };
 
 export const CATALOGUE = toolsData as unknown as Catalogue;
-const PAGES = pagesData as unknown as { sections: { id: string; title: string }[]; pages: DocsMarkdownPage[] };
+export const PAGES = pagesData as unknown as { sections: { id: string; title: string }[]; pages: DocsMarkdownPage[] };
 
 export const DOCS_HOME = "/docs";
 export const ROLE_LABEL: Record<DocsRole, string> = {
@@ -87,42 +87,6 @@ export function uniqueId(base: string, seen: Map<string, number>): string {
   return n ? `${base}-${n}` : base;
 }
 
-// ---- the nav tree, in reading order ----
-
-export type DocsNavItem = { title: string; href: string };
-export type DocsNavSection = { id: string; title: string; items: DocsNavItem[] };
-
-export function docsNav(): DocsNavSection[] {
-  return PAGES.sections.map((s) => ({
-    id: s.id,
-    title: s.title,
-    items:
-      s.id === "tools"
-        ? [{ title: "All tools", href: TOOLS_HREF }, ...CATALOGUE.areas.map((a) => ({ title: a.title, href: areaHref(a.id) }))]
-        : PAGES.pages.filter((p) => p.section === s.id).map((p) => ({ title: p.title, href: pageHref(p.slug) })),
-  }));
-}
-
-const FLAT = () => docsNav().flatMap((s) => s.items.map((i) => ({ ...i, section: s })));
-
-export function neighbours(href: string): { prev: DocsNavItem | null; next: DocsNavItem | null } {
-  const flat = FLAT();
-  const i = flat.findIndex((p) => p.href === href);
-  if (i < 0) return { prev: null, next: null };
-  const pick = (p: (typeof flat)[number] | undefined) => (p ? { title: p.title, href: p.href } : null);
-  return { prev: pick(flat[i - 1]), next: pick(flat[i + 1]) };
-}
-
-export function breadcrumbs(href: string): DocsNavItem[] {
-  const hit = FLAT().find((p) => p.href === href);
-  const crumbs: DocsNavItem[] = [{ title: "Docs", href: DOCS_HOME }];
-  if (!hit || href === DOCS_HOME) return crumbs;
-  const first = hit.section.items[0];
-  crumbs.push({ title: hit.section.title, href: first.href });
-  if (first.href !== href) crumbs.push({ title: hit.title, href });
-  return crumbs;
-}
-
 // ---- what a docs address shows ----
 
 export type DocsRoute =
@@ -143,9 +107,18 @@ export function docsRoute(slug: string[] = []): DocsRoute | null {
 
 export const docsTitle = (route: DocsRoute) => (route.kind === "tools" ? "All tools" : route.kind === "area" ? route.area.title : route.page.title);
 
-// Every page's slug under /docs (Connect your agent's href is /connect, but its page is still /docs/connect).
-export const allDocsSlugs = (): string[][] =>
-  FLAT().map((p) => (p.href === CONNECT_HREF ? ["connect"] : p.href.slice(DOCS_HOME.length + 1).split("/").filter(Boolean)));
+// A page's sections, in order, with the ids its headings get: its table of contents and its search entries.
+export function docsSections(route: DocsRoute): DocsHeading[] {
+  if (route.kind === "tools") return CATALOGUE.areas.map((a) => ({ id: a.id, label: a.title }));
+  if (route.kind === "area") return toolsInArea(route.area.id).map((t) => ({ id: t.name, label: t.name }));
+  const { page } = route;
+  const headings = markdownHeadings(page.markdown);
+  if (page.kind === "connect") return CONNECT_SECTIONS.map((s) => ({ ...s }));
+  if (page.kind === "roles") return [{ id: "roles", label: "Roles" }, ...headings];
+  if (page.kind === "first-app") return [{ id: "steps", label: "First steps" }, ...headings];
+  if (page.kind === "runtime") return [{ id: "endpoints", label: "Endpoints" }, ...headings];
+  return page.slug === "" ? [{ id: "start-here", label: "Start here" }, ...headings] : headings;
+}
 
 // ---- tools ----
 
@@ -167,19 +140,4 @@ export function relatedTools(t: DocsTool, limit = 6): DocsTool[] {
   const mine = noun(t.name);
   for (const o of toolsInArea(t.area)) if (o.name !== t.name && noun(o.name) === mine) out.set(o.name, o);
   return [...out.values()].slice(0, limit);
-}
-
-// ---- search ----
-
-export function searchIndex(): DocsSearchItem[] {
-  const items: DocsSearchItem[] = [];
-  for (const s of docsNav()) for (const i of s.items) items.push({ kind: "page", title: i.title, subtitle: s.title, href: i.href, text: searchText(i.title, s.title) });
-  for (const p of PAGES.pages) {
-    for (const h of markdownHeadings(p.markdown)) items.push({ kind: "section", title: h.label, subtitle: p.title, href: `${pageHref(p.slug)}#${h.id}`, text: searchText(h.label, p.title) });
-  }
-  for (const a of CATALOGUE.areas) items.push({ kind: "section", title: a.title, subtitle: "Tool reference", href: areaHref(a.id), text: searchText(a.title, a.summary) });
-  for (const t of CATALOGUE.tools) {
-    items.push({ kind: "tool", title: t.name, subtitle: t.title, href: toolHref(t), text: searchText(t.name, t.title, t.description.slice(0, 240)) });
-  }
-  return items;
 }

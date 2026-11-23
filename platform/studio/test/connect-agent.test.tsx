@@ -73,7 +73,7 @@ describe("connect your agent", () => {
 describe("the docs' Connect your agent page is the guide", () => {
   afterEach(cleanup);
 
-  it("/docs is the docs site now, and its Connect your agent page is this same guide", async () => {
+  it("/docs is the docs site (on Fumadocs), and its Connect your agent page is this same guide", async () => {
     const { docsRoute } = await import("@/lib/docs");
     const { docsPageParts } = await import("@/components/docs/docs-page");
     const route = docsRoute(["connect"])!;

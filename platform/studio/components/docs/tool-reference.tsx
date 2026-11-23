@@ -101,13 +101,13 @@ export function ToolTable({ tools }: { tools: DocsTool[] }) {
 
 export function AllTools() {
   return (
-    <div data-all-tools>
+    <div className="not-prose" data-all-tools>
       <p className="text-sm leading-relaxed">
         Mynt&apos;s MCP server has {CATALOGUE.tools.length} tools. Each person sees only the tools their roles allow; this reference lists them all, generated from the server&apos;s own tool registry.
       </p>
       {CATALOGUE.areas.map((a) => (
         <section key={a.id} data-area={a.id}>
-          <h2 id={a.id} className="mt-10 scroll-mt-6 border-b pb-2 font-heading text-xl font-semibold" data-docs-heading>
+          <h2 id={a.id} className="mt-10 scroll-mt-28 border-b pb-2 font-heading text-xl font-semibold" data-docs-heading>
             <a href={areaHref(a.id)} className="hover:underline">
               {a.title}
             </a>
@@ -171,7 +171,7 @@ export function ToolSection({ tool }: { tool: DocsTool }) {
   const related = relatedTools(tool);
   return (
     <section className="mt-12 first:mt-0" data-tool={tool.name}>
-      <h2 id={tool.name} className="scroll-mt-6 border-b pb-2 font-mono text-lg font-semibold" data-docs-heading>
+      <h2 id={tool.name} className="scroll-mt-28 border-b pb-2 font-mono text-lg font-semibold" data-docs-heading>
         {tool.name}
       </h2>
       {tool.title && <p className="mt-3 font-heading text-base font-medium">{tool.title}</p>}
@@ -216,7 +216,7 @@ export function ToolSection({ tool }: { tool: DocsTool }) {
 export function AreaTools({ area }: { area: DocsArea }) {
   const tools = toolsInArea(area.id);
   return (
-    <div data-area-page={area.id}>
+    <div className="not-prose" data-area-page={area.id}>
       <p className="text-sm leading-relaxed">{area.summary}</p>
       <ToolTable tools={tools} />
       <div className="mt-12">
