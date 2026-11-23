@@ -218,6 +218,56 @@ export const STUDIO_TOOLS = {
   unsubscribe_vendor_service: z.object({ subscription_id: uuid, reason: z.string().trim().min(3).max(2000).optional() }).strict(),
   get_app_customers: z.object({ app_id: id }).strict(),
   set_app_target_segments: z.object({ app_id: id, segments: z.array(z.object({ product_id: id, segment_id: id }).strict()).max(100) }).strict(),
+  // The Audits page's Agreement audits tab: oversight audits licence providers run on apps under program agreements.
+  // Read by either party; the licence provider adds requirements, opens, records findings and closes; the app's side
+  // submits evidence (https links with their SHA-256, never files) and answers findings. Mynt checks each side again.
+  list_agreement_audits: z
+    .object({
+      workspace_id: workspaceId.optional(),
+      app_id: id.optional(),
+      agreement_id: uuid.optional(),
+      status: z.enum(["scheduled", "in_progress", "submitted", "passed", "failed", "waived"]).optional(),
+      overdue: z.boolean().optional(),
+      side: z.enum(["app", "counterparty"]).optional(),
+    })
+    .strict(),
+  get_agreement_audit: z.object({ audit_id: uuid }).strict(),
+  add_agreement_audit_requirement: z
+    .object({
+      agreement_id: uuid,
+      name: z.string().trim().min(3).max(200),
+      kind: z.enum(["compliance_review", "complaints_review", "marketing_review", "security_review", "financial_review", "other"]),
+      cadence: z.enum(["once", "monthly", "quarterly", "annual", "on_change"]),
+      first_due: auditDate.optional(),
+      description: z.string().trim().max(4000).optional(),
+      evidence_required: z.string().trim().max(4000).optional(),
+    })
+    .strict(),
+  open_agreement_audit: z.object({ audit_id: uuid }).strict(),
+  record_agreement_audit_finding: z
+    .object({ audit_id: uuid, severity: z.enum(["low", "medium", "high", "critical"]), title: z.string().trim().min(3).max(200), detail: z.string().trim().max(4000).optional() })
+    .strict(),
+  resolve_agreement_audit_finding: z.object({ audit_id: uuid, finding_id: uuid, note: z.string().trim().max(2000).optional() }).strict(),
+  close_agreement_audit: z.object({ audit_id: uuid, outcome: z.enum(["passed", "failed", "waived"]), note: z.string().trim().max(4000).optional() }).strict(),
+  submit_agreement_audit_evidence: z
+    .object({
+      audit_id: uuid,
+      evidence: z
+        .array(
+          z
+            .object({
+              name: z.string().trim().min(1).max(200),
+              url: z.string().url().max(2000).refine((u) => u.startsWith("https://"), "an https link"),
+              sha256: z.string().regex(/^[a-f0-9]{64}$/),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(20),
+      note: z.string().trim().max(4000).optional(),
+    })
+    .strict(),
+  respond_to_agreement_audit_finding: z.object({ audit_id: uuid, finding_id: uuid, response: z.string().trim().min(3).max(4000) }).strict(),
   // Compliance pages (read-only): Coverage, Licences and Audits, for the selected workspace
   // (no workspace_id for the implicit Personal one).
   get_compliance_coverage: z.object({ workspace_id: workspaceId.optional() }).strict(),

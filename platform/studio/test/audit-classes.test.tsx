@@ -39,15 +39,17 @@ const view = (cls: "security" | "financial" | "workspace", rows = page.rows) =>
   );
 
 describe("audit classes", () => {
-  it("are four tabs, cleanly named; App security opens first", () => {
+  it("are four classes in five tabs (Agreement audits after Licence obligations), cleanly named; App security opens first", () => {
     const html = renderToStaticMarkup(<AuditTabs tab="security" onTab={() => undefined} />);
     expect([...html.matchAll(/role="tab" aria-selected="(true|false)" data-tab="(\w+)"/g)].map((m) => [m[2], m[1]])).toEqual([
       ["security", "true"],
       ["obligations", "false"],
+      ["agreements", "false"],
       ["financial", "false"],
       ["workspace", "false"],
     ]);
     for (const l of Object.values(AUDIT_CLASS_LABELS)) expect(html).toContain(l);
+    expect(html).toContain("Agreement audits");
     expect(Object.values(AUDIT_CLASS_LABELS)).toEqual(["App security", "Licence obligations", "Financial activity", "Workspace activity"]);
     expect([auditClassOf(undefined), auditClassOf("financial"), auditClassOf("x")]).toEqual(["security", "financial", "security"]);
   });

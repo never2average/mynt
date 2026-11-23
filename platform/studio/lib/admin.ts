@@ -132,7 +132,12 @@ export function opsFrom(reply: unknown): Ops | null {
     {
       id: "agreements",
       title: "Agreements",
-      rows: [{ label: "Production apps without a signed program agreement in force", value: String(count(apps.production_without_program_agreements)) }],
+      rows: [
+        { label: "Production apps without a signed program agreement in force", value: String(count(apps.production_without_program_agreements)) },
+        // Oversight audits licence providers run under program agreements: past due and not closed (agreement-audits.ts).
+        { label: "Oversight audits overdue", value: isObj(reply.agreement_audits) ? String(count(reply.agreement_audits.overdue)) : NOT_MEASURED },
+        { label: "Apps with an overdue oversight audit", value: isObj(reply.agreement_audits) ? String(count(reply.agreement_audits.apps_flagged)) : NOT_MEASURED },
+      ],
     },
     {
       id: "backups",

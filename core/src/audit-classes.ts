@@ -185,6 +185,19 @@ const OBLIGATIONS = [
   "esign_canceled",
   "esign_expired",
   "download_agreement_document",
+  // oversight audits under app agreements: requirements the licence provider sets, audits opened by the schedule or by
+  // hand, evidence and answers from the app's side, findings, and the outcome (agreement-audits.ts)
+  "add_agreement_audit_requirement",
+  "retire_agreement_audit_requirement",
+  "agreement_audit_scheduled",
+  "open_agreement_audit",
+  "record_agreement_audit_finding",
+  "resolve_agreement_audit_finding",
+  "submit_agreement_audit_evidence",
+  "respond_to_agreement_audit_finding",
+  "pass_agreement_audit",
+  "fail_agreement_audit",
+  "waive_agreement_audit",
   // a vendor's standard terms accepted by click-through, one agreement per app (vendor-terms.ts)
   "accept_vendor_terms",
   // covenants on sponsorships

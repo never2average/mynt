@@ -5,11 +5,14 @@
 // one row, then the table (app, developer workspace, products, kind, status, dates, document) paged 25 rows at a
 // time. The tab shows; each row's labelled actions open a sheet that changes it: Review agreement (the terms in
 // full), Accept and Decline (a proposal), Sign (accepted, their side not signed yet) and End agreement (with the
-// reason). The app's workspace is told of each in its attention list. Server-renderable for the tests.
+// reason). The app's workspace is told of each in its attention list. Add audit requirement (an open program
+// agreement) opens the sheet that sets an oversight audit the firm runs on the app (components/agreement-audits-view.tsx).
+// Server-renderable for the tests.
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { Download, FileSearch, Search } from "lucide-react"
+import { ClipboardList, Download, FileSearch, Search } from "lucide-react"
 
 import { SignedCopyLinks, SigningSheet } from "@/components/agreement-esign"
+import { AddRequirementSheet } from "@/components/agreement-audits-view"
 import { AgreementActionButtons, AgreementActionSheet, type AgreementSummary } from "@/components/app-agreement-sheets"
 import { FilterSelect } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
@@ -36,6 +39,9 @@ export function filterLpAgreements(rows: LpAgreementRow[], query: string, status
   const q = query.trim().toLowerCase()
   return rows.filter((r) => (!status || r.statusKey === status) && (!q || [r.appName, r.workspace, r.kind, ...r.products].some((v) => v.toLowerCase().includes(q))))
 }
+
+/** Whether the firm can add an oversight audit requirement to this agreement: a program agreement still open. */
+export const takesAuditRequirements = (r: LpAgreementRow) => r.kindKey === "program" && ["proposed", "accepted", "signed"].includes(r.statusKey)
 
 const summaryOf = (r: LpAgreementRow): AgreementSummary => ({
   id: r.id,
@@ -91,7 +97,18 @@ export function ReviewAgreementView({ row, onAction }: { row: LpAgreementRow; on
   )
 }
 
-export function LpAgreementsView({ rows, onChanged = () => undefined, fetcher }: { rows: LpAgreementRow[]; onChanged?: () => void; fetcher?: typeof fetch }) {
+export function LpAgreementsView({
+  rows,
+  onChanged = () => undefined,
+  fetcher,
+  auditRequirements = true,
+}: {
+  rows: LpAgreementRow[]
+  onChanged?: () => void
+  fetcher?: typeof fetch
+  auditRequirements?: boolean
+}) {
+  const [requiring, setRequiring] = useState<LpAgreementRow | null>(null)
   const [query, setQuery] = useState("")
   const [status, setStatus] = useState("")
   const [reviewing, setReviewing] = useState<LpAgreementRow | null>(null)
@@ -186,6 +203,12 @@ export function LpAgreementsView({ rows, onChanged = () => undefined, fetcher }:
                       </Button>
                       <AgreementActionButtons id={r.id} actions={r.actions} onAction={act(r)} />
                       <SignedCopyLinks agreementId={r.id} esign={r.esign} />
+                      {auditRequirements && takesAuditRequirements(r) && (
+                        <Button size="sm" variant="outline" className="h-7" onClick={() => setRequiring(r)} data-add-audit-requirement={r.id}>
+                          <ClipboardList />
+                          Add audit requirement
+                        </Button>
+                      )}
                     </div>
                   </TableCell>
                 </TableRow>
@@ -217,6 +240,13 @@ export function LpAgreementsView({ rows, onChanged = () => undefined, fetcher }:
           setSigning(null)
           onChanged()
         }}
+        fetcher={fetcher}
+      />
+      <AddRequirementSheet
+        agreements={requiring ? [{ id: requiring.id, label: `${requiring.appName} (${requiring.workspace})`, appName: requiring.appName, counterparty: requiring.workspace, canAddRequirements: true }] : []}
+        open={requiring !== null}
+        onClose={() => setRequiring(null)}
+        onDone={onChanged}
         fetcher={fetcher}
       />
       <AgreementActionSheet

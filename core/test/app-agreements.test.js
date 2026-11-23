@@ -323,7 +323,7 @@ test("production: an agreement not yet in force, expired, terminated or declined
   assert.equal((await gate(w)).check.status, "fail");
 });
 
-test("production: a product with several sponsors needs each one that sponsors it where the app serves", async () => {
+test("production: a product with several sponsors needs every one of them, wherever the app serves", async () => {
   const w = await setup();
   const productName = CATALOG.find((p) => p.id === "savings-account").name;
   await w.store.db.query(`INSERT INTO ${T}.app_promotions (app_id, stage) VALUES ($1, 'staging')`, [w.app.id]);
@@ -333,23 +333,18 @@ test("production: a product with several sponsors needs each one that sponsors i
     [randomUUID(), w.lpFirm.id, w.otherFirm.id],
   );
   await signedProgram(w, w.lp, w.lpFirm.id, ["savings-account"]);
-  // No states set yet: every sponsor counts.
+  // No states set: every sponsor counts.
   let { check } = await gate(w);
   assert.equal(check.status, "fail");
   assert.equal(check.detail, `No signed program agreement with Other Bank for ${productName}`);
   assert.deepEqual(check.coverage.map((c) => [c.sponsor_name, c.covered]).sort(), [["Other Bank", false], ["Sponsor Bank", true]]);
 
-  // Serving New York only: Other Bank's Texas sponsorship isn't relied on.
+  // Serving New York only: Other Bank sponsors the product only in Texas, and still counts.
   ok(await w.dev.call("set_app_target_states", { app_id: w.app.id, states: ["us-ny"] }));
   ({ check } = await gate(w));
-  assert.equal(check.status, "pass", check.detail);
-  assert.deepEqual(check.coverage.map((c) => c.sponsor_name), ["Sponsor Bank"]);
-  // Texas too: both. A sponsorship for the whole country counts for each state.
-  ok(await w.dev.call("set_app_target_states", { app_id: w.app.id, states: ["us-ny", "us-tx"] }));
-  assert.equal((await gate(w)).check.status, "fail");
-  await w.store.db.query(`UPDATE ${T}.sponsorships SET jurisdictions = ARRAY['us'] WHERE provider_entity_id = $1`, [w.otherFirm.id]);
-  ok(await w.dev.call("set_app_target_states", { app_id: w.app.id, states: ["us-ny"] }));
-  assert.match((await gate(w)).check.detail, /No signed program agreement with Other Bank/);
+  assert.equal(check.status, "fail");
+  assert.match(check.detail, /No signed program agreement with Other Bank/);
+  assert.deepEqual(check.coverage.map((c) => c.sponsor_name).sort(), ["Other Bank", "Sponsor Bank"]);
 
   // A signed agreement with Other Bank covering it: passes.
   await signedProgram(w, w.otherLp, w.otherFirm.id, ["savings-account"]);

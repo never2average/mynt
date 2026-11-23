@@ -5,6 +5,7 @@
 // states) is a labelled action elsewhere (the top bar's Promote button and its sheet). Pure: the
 // route reads Mynt's replies into these shapes, and the tabs and the tests share them.
 import { esignOf, esignStatusLine, type EsignInfo } from "./agreement-esign";
+import type { AgreementAuditSummary } from "./agreement-audits";
 import { CHECK_LABELS, coverageFrom, type AgreementCoverage, type PromotionCheck } from "./promotions";
 
 type Obj = Record<string, unknown>;
@@ -175,6 +176,9 @@ export type AppAgreements = {
   agreements: AgreementRow[];
   vendorContracts: VendorContractRow[];
   introductions: IntroRow[] | null; // null: the business-development agent isn't running on this Mynt
+  // Each agreement's oversight audits (lib/agreement-audits.ts), by agreement id; null or absent when
+  // this Mynt doesn't have them (then the tab doesn't show the column, never a 0).
+  audits?: Record<string, AgreementAuditSummary> | null;
   // For the Propose agreement sheet: the sponsors of the app's products, and the products.
   sponsors: { entityId: string; name: string; productIds: string[] }[];
   products: { id: string; name: string }[];

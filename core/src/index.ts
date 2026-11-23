@@ -34,6 +34,7 @@ import { createServer } from "./server.js";
 import { SolanaService } from "./solana/service.js";
 import { EsignSettings } from "./esign-settings.js";
 import { CovenantService } from "./covenants.js";
+import { sweepAgreementAudits } from "./agreement-audits.js";
 import { TreasuryService, treasuryConfigFromEnv } from "./treasury.js";
 import { partnerLedgerFor } from "./partner-kit.js";
 import { initializeHealthProgram, loadFlowsFor, productHealthConfigFromEnv, ProductHealthService, SolanaHealthChain } from "./product-health.js";
@@ -295,6 +296,8 @@ if (values.help) {
     sweepStaleMovements(store).catch((e) => console.error("money movement sweep:", (e as Error).message));
   }, 60 * 1000);
   vendorRuns.unref();
+  // App agreements' oversight audits: the next one of each requirement opens when its time comes (agreement-audits.ts).
+  const agreementAudits = serialLoop(() => sweepAgreementAudits(store), 60_000, "agreement audits:");
   // Deployed Solana programs' new events go to their firms' webhooks.
   const programEvents = setInterval(() => solana.pollEvents().catch((e) => console.error("solana indexer:", (e as Error).message)), Number(process.env.SOLANA_INDEX_POLL_MS ?? 30_000));
   programEvents.unref();
@@ -312,6 +315,7 @@ if (values.help) {
     clearInterval(drift);
     clearInterval(firmChecks);
     clearInterval(vendorRuns);
+    clearInterval(agreementAudits);
     clearInterval(programEvents);
     webhooks.stop();
     builds.stopWorker();

@@ -149,6 +149,9 @@ describe("each tab", () => {
     expect(html).toContain("$0.00") // measured: builds ran and cost nothing
     expect(html).toContain("Not measured") // the desk, explorers, reviews, connector
     expect(html).toContain("no status file")
+    expect(html).toContain("Oversight audits overdue")
+    const audits = admin.opsFrom({ attention: ["agreement audits: 2 overdue oversight audits (on 1 apps)"], agents: {}, agreement_audits: { overdue: 2, apps_flagged: 1 } })!
+    expect(audits.sections.find((x) => x.id === "agreements")!.rows.slice(1).map((r) => r.value)).toEqual(["2", "1"])
     const quiet = admin.opsFrom({ attention: ["Nothing needs attention"], agents: {} })!
     expect(renderToStaticMarkup(<OverviewView ops={quiet} />)).toContain('data-attention="none"')
   })
