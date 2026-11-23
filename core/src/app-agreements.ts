@@ -240,9 +240,17 @@ const coversState = (jurisdictions: string[], state: string) => {
 export const inForce = (a: Pick<AppAgreement, "status" | "effective_from" | "effective_to">, on: string) =>
   a.status === "signed" && (!a.effective_from || a.effective_from <= on) && (!a.effective_to || a.effective_to >= on);
 
-function whyNot(a: AppAgreement, sponsor: string, on: string): string {
+// Each side's signature on an accepted agreement: the agreement's own (signed by hand), or, where it's signed by
+// e-signature, the e-signature document's (the agreement's own are set only once both have signed there).
+type Signed = { app: boolean; counterparty: boolean };
+const signedSides = (a: AppAgreement, esign?: Signed): Signed => ({ app: a.app_signed_at !== null || Boolean(esign?.app), counterparty: a.counterparty_signed_at !== null || Boolean(esign?.counterparty) });
+
+function whyNot(a: AppAgreement, sponsor: string, on: string, esign?: Signed): string {
   if (a.status === "signed") return a.effective_from && a.effective_from > on ? `its signed agreement takes effect on ${a.effective_from}` : `its signed agreement ended on ${a.effective_to}`;
-  if (a.status === "accepted") return `${sponsor} accepted it; waiting for ${!a.app_signed_at && !a.counterparty_signed_at ? "both signatures" : a.app_signed_at ? `${sponsor}'s signature` : "your signature"}`;
+  if (a.status === "accepted") {
+    const s = signedSides(a, esign);
+    return `${sponsor} accepted it; waiting for ${!s.app && !s.counterparty ? "both signatures" : s.app ? `${sponsor}'s signature` : "your signature"}`;
+  }
   if (a.status === "proposed") return `proposed, waiting for ${sponsor} to accept`;
   if (a.status === "declined") return `${sponsor} declined it`;
   return `it was ended on ${a.terminated_at?.slice(0, 10) ?? "an earlier date"}${a.termination_reason ? `: ${a.termination_reason}` : ""}`;
@@ -251,7 +259,17 @@ function whyNot(a: AppAgreement, sponsor: string, on: string): string {
 // Each (product, sponsor) pair the app needs a program agreement for, and whether one in force covers it.
 export async function programAgreementCoverage(q: Q, store: Store, app: Pick<App, "id" | "product_ids">, targets: string[], on = today()): Promise<ProgramCoverage[]> {
   if (!app.product_ids.length) return [];
-  const agreements = (await q.query(`SELECT * FROM ${T}.app_agreements WHERE app_id = $1 AND kind = 'program' ORDER BY created_at DESC`, [app.id])).rows.map(toAgreement);
+  const rows = (
+    await q.query(
+      `SELECT g.*, d.app_signed_at AS esign_app_signed_at, d.counterparty_signed_at AS esign_counterparty_signed_at
+         FROM ${T}.app_agreements g LEFT JOIN ${T}.app_agreement_documents d ON d.agreement_id = g.id
+        WHERE g.app_id = $1 AND g.kind = 'program' ORDER BY g.created_at DESC`,
+      [app.id],
+    )
+  ).rows;
+  const agreements = rows.map(toAgreement);
+  // Where an agreement is signed by e-signature, each side's signature as the document has it (agreement-esign.ts).
+  const esignSigned = new Map(rows.map((r) => [r.id as string, { app: r.esign_app_signed_at != null, counterparty: r.esign_counterparty_signed_at != null }]));
   // The nearest agreement when none is in force: one on its way first, then the latest that ended (expired,
   // terminated or declined). The list is newest first, and the sort keeps that order within a rank.
   const rank = (a: AppAgreement) => (inForce(a, on) ? 0 : a.status === "signed" && a.effective_from && a.effective_from > on ? 1 : a.status === "accepted" ? 2 : a.status === "proposed" ? 3 : 4);
@@ -275,7 +293,7 @@ export async function programAgreementCoverage(q: Q, store: Store, app: Pick<App
         covered,
         agreement_id: nearest?.id ?? null,
         agreement_status: nearest?.status ?? null,
-        note: nearest && !covered ? whyNot(nearest, name ?? "the sponsor", on) : null,
+        note: nearest && !covered ? whyNot(nearest, name ?? "the sponsor", on, esignSigned.get(nearest.id)) : null,
       });
     }
   }

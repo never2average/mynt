@@ -213,28 +213,47 @@ export async function workspaceAttention(store: Store, user: Pick<User, "id">, w
   // This is how the app's side hears of them; their own actions they know. Signing is the owners' and admins' to do.
   if (ids.length) {
     const WORDS: Record<string, string> = { accept_app_agreement: "accepted", decline_app_agreement: "declined", sign_app_agreement: "signed", terminate_app_agreement: "ended" };
+    // Program agreements signed by e-signature (agreement-esign.ts): the other firm's signature on the document, the
+    // document completed (signed by both: the agreement is signed), declined at signing, or expired or cancelled at
+    // the service (the agreement ends). A cancellation Mynt made itself, when someone ended the agreement, is that
+    // termination's, so it isn't listed twice.
+    const ESIGN: Record<string, string> = { esign_signer_signed: "signed", esign_completed: "completed", esign_declined: "declined", esign_expired: "expired", esign_canceled: "cancelled" };
     const done = await rowsOf(
       db,
-      `SELECT l.id::text AS id, l.action, l.target, l.details, l.created_at, g.kind, g.status, g.app_signed_at, e.name AS firm
+      `SELECT l.id::text AS id, l.action, l.target, l.details, l.created_at, g.kind, g.status, g.app_signed_at, doc.app_signed_at AS esign_app_signed_at, e.name AS firm
        FROM ${T}.audit_log l JOIN ${T}.app_agreements g ON g.id::text = l.target LEFT JOIN ${T}.entities e ON e.id = g.counterparty_entity_id
+         LEFT JOIN ${T}.app_agreement_documents doc ON doc.agreement_id = g.id
        WHERE l.action = ANY($1) AND l.details->>'app_id' = ANY($2) AND l.created_at > now() - make_interval(days => $3)
-         AND (l.action IN ('accept_app_agreement', 'decline_app_agreement') OR l.details->>'side' = 'counterparty')
+         AND (l.action IN ('accept_app_agreement', 'decline_app_agreement', 'esign_completed', 'esign_declined', 'esign_expired', 'esign_canceled') OR l.details->>'side' = 'counterparty')
        ORDER BY l.created_at DESC LIMIT 50`,
-      [Object.keys(WORDS), ids, RECENT_DAYS],
+      [[...Object.keys(WORDS), ...Object.keys(ESIGN)], ids, RECENT_DAYS],
     );
     for (const d of done) {
       const details = (d.details ?? {}) as Record<string, unknown>;
       const app = String(details.app_id);
       const what = String(d.kind) === "program" ? "program agreement" : String(d.kind) === "vendor" ? "vendor contract" : "data-sharing agreement";
-      const ended = d.action === "terminate_app_agreement";
-      const declined = d.action === "decline_app_agreement";
-      const yoursToSign = d.status === "accepted" && !d.app_signed_at;
+      const esign = String(d.action) in ESIGN;
+      const ended = d.action === "terminate_app_agreement" || d.action === "esign_expired" || d.action === "esign_canceled";
+      const declined = d.action === "decline_app_agreement" || d.action === "esign_declined";
+      const yoursToSign = d.status === "accepted" && !d.app_signed_at && !d.esign_app_signed_at;
       items.push({
         id: `app_agreement:${d.id}`,
         kind: "app_agreement_update",
         severity: ended && d.kind === "program" ? "high" : ended || declined || (yoursToSign && manager) ? "medium" : "low",
-        title: `${name.get(app)}: ${d.firm ?? "the other firm"} ${WORDS[d.action as string]} the ${what}`,
-        detail: ended
+        title: esign
+          ? d.action === "esign_signer_signed"
+            ? `${name.get(app)}: ${d.firm ?? "the other firm"} signed the ${what} by e-signature`
+            : d.action === "esign_completed"
+              ? `${name.get(app)}: the ${what} with ${d.firm ?? "the other firm"} is signed by both sides`
+              : d.action === "esign_declined"
+                ? `${name.get(app)}: the ${what} with ${d.firm ?? "the other firm"} was declined at signing`
+                : `${name.get(app)}: the ${what} with ${d.firm ?? "the other firm"} ended: its e-signature document ${ESIGN[d.action as string]}`
+          : `${name.get(app)}: ${d.firm ?? "the other firm"} ${WORDS[d.action as string]} the ${what}`,
+        detail: esign && ended
+          ? `${d.kind === "program" ? "Production needs a signed program agreement with each product's sponsor: propose a new one" : "Propose a new one if you still need it"}`
+          : esign && d.action === "esign_completed"
+            ? "Signed by both sides. Download the signed copy on the app's Agreements tab"
+          : ended
           ? `Reason: ${String(details.reason ?? "none given")}.${d.kind === "program" ? " Production needs a signed program agreement with each product's sponsor: propose a new one" : ""}`
           : declined
             ? `${details.note ? `Their note: ${String(details.note)}. ` : ""}Propose another if you still need one`

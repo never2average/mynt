@@ -311,3 +311,61 @@ test("without e-signature configured: the feature says so and the manual flow st
   assert.equal(ok(await w.lp.call("sign_app_agreement", { agreement_id: a.id })).status, "signed");
   assert.equal((await w.webhook(event("document_completed", "doc-1"))).status, 503);
 });
+
+test("with e-signature, the production check names whose signature is missing, and the app's attention list hears of each e-signature step", async () => {
+  const w = await setup();
+  const workspace = (await w.store.getApp(w.app.id)).workspace_id;
+  const attention = async () => ok(await w.dev.call("get_workspace_attention", { workspace_id: workspace })).items.filter((i) => i.kind === "app_agreement_update");
+  const note = async () => ok(await w.dev.call("list_app_agreements", { app_id: w.app.id })).program_coverage.find((c) => c.product_id === "savings-account").note;
+  ok(await w.lp.call("upload_agreement_template", upload));
+  const proposal = { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" };
+  const a = ok(await w.dev.call("propose_app_agreement", proposal));
+  ok(await w.lp.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }));
+  const docA = [...w.service.docs.keys()][0];
+  assert.match(await note(), /waiting for both signatures/);
+
+  // The app's side signs first: the sponsor's signature is what's missing.
+  w.service.sign(docA, "2");
+  assert.equal((await w.webhook(event("document_signed", docA))).status, 200);
+  assert.match(await note(), /waiting for Sponsor Bank's signature/);
+  assert.equal((await attention()).length, 1, "only the acceptance: the app's own signature isn't news to it");
+
+  // Then the sponsor signs: complete; the attention list says it's signed by both, low.
+  w.service.sign(docA, "1");
+  assert.equal((await w.webhook(event("document_completed", docA))).status, 200);
+  let items = await attention();
+  const completed = items.find((i) => i.title.includes("is signed by both sides"));
+  assert.ok(completed, JSON.stringify(items));
+  assert.equal(completed.severity, "low");
+  assert.match(completed.href, new RegExp(`/${w.app.id}\\?tab=agreements$`));
+  assert.ok(items.some((i) => i.title.includes("Sponsor Bank signed the program agreement by e-signature")));
+
+  // Another app: the sponsor signs first, so it's the app's turn (medium for an owner); then it's declined at signing.
+  const app2 = await w.store.createApp(w.dev.user.id, { name: "Second app", description: "d", audience: "a", product_ids: ["savings-account"] }, workspace);
+  const b = ok(await w.dev.call("propose_app_agreement", { ...proposal, app_id: app2.id }));
+  ok(await w.lp.call("respond_to_app_agreement", { agreement_id: b.id, decision: "accept" }));
+  const docB = [...w.service.docs.keys()][1];
+  w.service.sign(docB, "1");
+  assert.equal((await w.webhook(event("document_signed", docB))).status, 200);
+  const note2 = ok(await w.dev.call("list_app_agreements", { app_id: app2.id })).program_coverage[0].note;
+  assert.match(note2, /waiting for your signature/);
+  items = await attention();
+  const yourTurn = items.find((i) => i.href.startsWith(`/${app2.id}`) && i.title.includes("signed the program agreement by e-signature"));
+  assert.equal(yourTurn.severity, "medium");
+  assert.match(yourTurn.detail, /waits for your side's signature/);
+  w.service.docs.get(docB).status = "Declined";
+  assert.equal((await w.webhook(event("document_declined", docB))).status, 200);
+  const declined = (await attention()).find((i) => i.title.includes("was declined at signing"));
+  assert.equal(declined.severity, "medium");
+
+  // A third: its document expires at the service, which ends a program agreement: high.
+  const app3 = await w.store.createApp(w.dev.user.id, { name: "Third app", description: "d", audience: "a", product_ids: ["savings-account"] }, workspace);
+  const c = ok(await w.dev.call("propose_app_agreement", { ...proposal, app_id: app3.id }));
+  ok(await w.lp.call("respond_to_app_agreement", { agreement_id: c.id, decision: "accept" }));
+  const docC = [...w.service.docs.keys()][2];
+  w.service.docs.get(docC).status = "Expired";
+  assert.equal((await w.webhook(event("document_expired", docC))).status, 200);
+  const expired = (await attention()).find((i) => i.title.includes("its e-signature document expired"));
+  assert.equal(expired.severity, "high");
+  assert.match(expired.detail, /Production needs a signed program agreement/);
+});
