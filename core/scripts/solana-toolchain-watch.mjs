@@ -639,6 +639,13 @@ export function renderPr({ changes, notes, advisoriesBefore = [], advisoriesAfte
       "",
     );
   if (notes.length) lines.push("## Notes", "", ...notes.map((n) => `- ${n}`), "");
+  if (changes.some((c) => ["anchor", "anchorImage", "agave"].includes(c.tool)))
+    lines.push(
+      "## Cargo.lock",
+      "",
+      "The starter program and `core/programs/product-health` commit a `Cargo.lock` resolved in the pinned image; CI's `solana-program` job fails while one is stale. Regenerate both in the new image (`cd core && npm run build && node scripts/solana-lock.mjs workspaces/coding-build/templates/solana-program programs/product-health`), review the crate changes and `core/schemas/solana-lock-pins.json` (drop a pin the new platform tools' Cargo no longer needs), and commit them here.",
+      "",
+    );
   if (docs.length || skill?.changed) {
     lines.push("## Docs and skill", "");
     for (const d of docs) lines.push(`- \`docs/solana/${d.name}\`: ${d.repo} at \`${d.tag}\` (${d.files} files, ${d.license}).`);

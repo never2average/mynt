@@ -47,6 +47,9 @@ reserved for this app (`name`, `cluster`, `program_id`); `solana.toolchain` the 
 - **Test:** `anchor test` on the local validator; every instruction and every refusal (wrong signer, wrong
   account) has a test. Mynt rebuilds the program itself (Anchor's verifiable build), runs these tests against
   that build in a clean sandbox, and deploys only what it built: never commit `target/`, a keypair, or a `.so`.
+- **Cargo.lock:** the template commits one, resolved for the pinned toolchain; keep it committed. If you add or
+  change a crate, update it with `cargo update -p <crate>` and commit it. A crate that needs a newer Cargo than
+  the platform tools' (edition 2024) fails Mynt's build: pin it with `cargo update -p <crate>@<version> --precise <older>`.
 - **What a program may do:** record and check state, and emit events (`emit!`), which Mynt forwards to the
   firm's webhooks. No program moves customers' money, holds tokens for them, or shows them anything: customers
   only ever see dollars, never crypto, in any screen or message.
