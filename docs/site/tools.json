@@ -3836,7 +3836,7 @@
     {
       "name": "create_vendor_offering",
       "title": "Offer a standard service",
-      "description": "Vendor: offer a standard service type in a region from your test (and live) HTTPS endpoint, with your per-call price and the licences you hold for it. It starts as a draft: run_conformance, then update_vendor_offering { listed: true }. The conformance signing secret is shown once.",
+      "description": "Vendor: offer a standard service type in a region from your test (and live) HTTPS endpoint, with your per-call price and the licences you hold for it, and your standard terms (standard_terms: the document link (https) and its SHA-256, a short summary and your pricing in words; you bill subscribers directly). Listing an offering with terms is your standing acceptance of them: app workspaces subscribe by accepting them in the marketplace, with no negotiation. It starts as a draft: run_conformance, then update_vendor_offering { listed: true }. The conformance signing secret is shown once.",
       "area": "vendors",
       "roles": [
         "vendor",
@@ -3909,6 +3909,39 @@
             "default": false,
             "description": "true when subscribers must give Mynt a credential you issue them; it's sent as Authorization: Bearer",
             "type": "boolean"
+          },
+          "standard_terms": {
+            "type": "object",
+            "properties": {
+              "document_url": {
+                "type": "string",
+                "maxLength": 2000,
+                "format": "uri"
+              },
+              "document_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 10,
+                "maxLength": 2000,
+                "description": "The terms in a few sentences, as subscribers see them before accepting"
+              },
+              "pricing_summary": {
+                "type": "string",
+                "minLength": 3,
+                "maxLength": 1000,
+                "description": "Your pricing in words (e.g. '$0.40 per check, invoiced monthly'); you bill subscribers directly, never through Mynt"
+              }
+            },
+            "required": [
+              "document_url",
+              "document_sha256",
+              "summary",
+              "pricing_summary"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -7867,7 +7900,7 @@
     {
       "name": "get_promotion_checks",
       "title": "What an app needs to move up a stage",
-      "description": "Developer (any member of the app's workspace): the checks for promoting an app one step, idea → staging or staging → production, computed by Mynt from its own records, never from what the app or an agent reports. staging: the latest build passed Mynt's verification in a clean sandbox, its independent audit passed (or wasn't required), and it runs (healthy on Mynt's hosting if deployed there). production: all of that, running on Mynt's hosting from that very verified build, target states set and every product licensed (a licence in force covering its action) in each, every webhook verified, no open critical or high audit findings, the mainnet program gate passed when the app has Solana programs, and a Mynt admin's sign-off for this very build when the app moves value (which then also needs the independent audit). Each check is pass, fail, warn or pending (Mynt can't tell yet: blocks like a fail), with a fix where there is one. can_promote: every check passes, or warns where the warning is advisory (any staging check; in production only build_verified, audit_passed and audit_findings). Production gates real money: live keys, live runtime calls and publishing are for production apps only, so they come after promotion, not before.",
+      "description": "Developer (any member of the app's workspace): the checks for promoting an app one step, idea → staging or staging → production, computed by Mynt from its own records, never from what the app or an agent reports. staging: the latest build passed Mynt's verification in a clean sandbox, its independent audit passed (or wasn't required), and it runs (healthy on Mynt's hosting if deployed there). production: all of that, running on Mynt's hosting from that very verified build, target states set and every product licensed (a licence in force covering its action) in each, a signed program agreement in force with the licence provider sponsoring each product where the app serves (program_agreements, with each product and sponsor in coverage), every webhook verified, no open critical or high audit findings, the mainnet program gate passed when the app has Solana programs, and a Mynt admin's sign-off for this very build when the app moves value (which then also needs the independent audit). Each check is pass, fail, warn or pending (Mynt can't tell yet: blocks like a fail), with a fix where there is one. can_promote: every check passes, or warns where the warning is advisory (any staging check; in production only build_verified, audit_passed and audit_findings). Production gates real money: live keys, live runtime calls and publishing are for production apps only, so they come after promotion, not before.",
       "area": "workspaces",
       "roles": [
         "developer",
@@ -8176,7 +8209,7 @@
     {
       "name": "get_workspace_attention",
       "title": "What needs attention in a workspace",
-      "description": "Developer (any member): what needs attention in one workspace, for your role in it, most severe first. Everyone: the workspace frozen or being archived, failed and blocked builds, production apps whose checks now fail, oversight audits under its apps' agreements past their due date and not closed, licences behind its products expiring within 30 days, and your own repository connections waiting for an admin. Owners and admins also: join requests (people not on Mynt who joined its organization), offboarding that didn't finish, webhooks turned off or whose receivers need a new secret, and production sign-offs asked, decided or no longer counting (a Mynt admin outside the workspace decides them). Each item has a studio link (href).",
+      "description": "Developer (any member): what needs attention in one workspace, for your role in it, most severe first. Everyone: the workspace frozen or being archived, failed and blocked builds, production apps whose checks now fail (a program agreement that ended or expired among them: the app stays in production, flagged), what the other firm did lately with the apps' agreements (accepted, declined, signed or ended them), oversight audits under its apps' agreements past their due date and not closed, licences behind its products expiring within 30 days, and your own repository connections waiting for an admin. Owners and admins also: join requests (people not on Mynt who joined its organization), offboarding that didn't finish, webhooks turned off or whose receivers need a new secret, and production sign-offs asked, decided or no longer counting (a Mynt admin outside the workspace decides them). Each item has a studio link (href).",
       "area": "workspaces",
       "roles": [
         "developer",
@@ -8696,7 +8729,7 @@
     {
       "name": "list_app_agreements",
       "title": "App agreements",
-      "description": "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on, and introductions the business-development agent has in progress for its members (null when that agent isn't running here). Without app_id (licence provider or vendor): the agreements apps have proposed to or made with your firm. status filters either list.",
+      "description": "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, program_coverage (each product and the licence provider sponsoring it where the app serves, and whether a signed program agreement in force covers it: production needs every one; production_gate says what's missing, and flagged when the app is already in production without one), the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on (each with the version of the vendor's standard terms accepted for this app, or no_standard_terms when none were), and introductions the business-development agent has in progress for its members (null when that agent isn't running here). Without app_id (licence provider or vendor): the agreements apps have proposed to or made with your firm. status filters either list.",
       "area": "apps",
       "roles": [
         "developer",
@@ -9657,7 +9690,7 @@
     {
       "name": "list_my_subscribers",
       "title": "Who subscribes to my offerings",
-      "description": "Vendor: firms subscribed to your offerings, whether they're live, whether you've taken each signing secret (reveal_subscription_secret), and calls per day (counts only).",
+      "description": "Vendor: firms subscribed to your offerings, whether they're live, whether you've taken each signing secret (reveal_subscription_secret), the version of your standard terms each accepted and the apps it's for (null: subscribed before you had terms on file), and calls per day (counts only).",
       "area": "vendors",
       "roles": [
         "vendor",
@@ -10560,7 +10593,7 @@
     {
       "name": "list_vendor_offerings",
       "title": "Standard services you can plug in",
-      "description": "Innovator: listed vendors' offerings of standard services, by region, service type or category: price per call, SLA notes, the vendor's licences, and whether your firm meets the licence prerequisites to subscribe.",
+      "description": "Innovator (the vendor marketplace): listed vendors' offerings of standard services, by region, service type or category: the vendor's standard terms (document link, SHA-256, summary, pricing and version; null when none are on file), price per call, SLA notes, the vendor's licences, its last conformance result, whether your firm meets the licence prerequisites to subscribe, and your firm's subscription to it, if any. Subscribe with subscribe_vendor_service, accepting the terms' version.",
       "area": "vendors",
       "roles": [
         "developer",
@@ -11013,7 +11046,7 @@
     {
       "name": "ops_status",
       "title": "What needs attention",
-      "description": "Admin: failures, stuck runs and this month's spend across builds, the product desk and its algorithm explorations, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying), vendors' services (failed conformance runs, subscriptions whose calls mostly fail) and the server's Supabase backups (last run, off-site copy, last restore test). Read-only.",
+      "description": "Admin: failures, stuck runs and this month's spend across builds, the product desk and its algorithm explorations, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying), vendors' services (failed conformance runs, subscriptions whose calls mostly fail), production apps left without a signed program agreement with a product's sponsor, and the server's Supabase backups (last run, off-site copy, last restore test). Read-only.",
       "area": "admin",
       "roles": [
         "admin"
@@ -15714,7 +15747,7 @@
     {
       "name": "subscribe_vendor_service",
       "title": "Subscribe to a vendor's service",
-      "description": "Innovator: subscribe your firm to a listed offering (in the sandbox first). Checks the licences the service needs your firm to hold, keeps the test (and live) credentials the vendor gave you, if it needs them, in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id.",
+      "description": "Innovator: subscribe your firm to a listed offering (in the sandbox first). When the vendor has standard terms on file (list_vendor_offerings' standard_terms), subscribing is click-through: pass accept_terms_version (the current version: you accept those terms) and app_ids, the apps it's for (your workspace's owners and admins only), optionally with products (ids of those apps' products it's used for); Mynt records one vendor agreement per app with the vendor's firm, signed by both sides (the vendor through its listing, you through this call), with the terms' version and SHA-256. Already subscribed: naming more apps adds their agreements. Checks the licences the service needs your firm to hold, keeps the test (and live) credentials the vendor gave you, if it needs them, in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id. The vendor bills you directly; Mynt never bills or holds money for it.",
       "area": "vendors",
       "roles": [
         "developer",
@@ -15728,6 +15761,32 @@
         "properties": {
           "offering_id": {
             "type": "string"
+          },
+          "accept_terms_version": {
+            "description": "The version of the vendor's standard terms you accept; must be the current one",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "app_ids": {
+            "description": "The apps the service is for (needed when the vendor has standard terms)",
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          "products": {
+            "description": "Ids of those apps' products the service is used for",
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
           },
           "test_credential": {
             "description": "The test API credential the vendor issued your firm, if the offering requires one; sent only to its test endpoint",
@@ -15875,7 +15934,7 @@
     {
       "name": "terminate_app_agreement",
       "title": "End an app agreement",
-      "description": "Either side ends an app agreement that's proposed (withdrawing it), accepted or signed, with the reason. Audited, and the other firm is told.",
+      "description": "Either side ends an app agreement that's proposed (withdrawing it), accepted or signed, with the reason. Audited, and the other firm is told. A vendor's standard terms accepted with a subscription (vendor_subscription_id): ending the last such agreement ends the subscription too, refused while live products hand off through it.",
       "area": "apps",
       "roles": [
         "developer",
@@ -16040,7 +16099,7 @@
     {
       "name": "unsubscribe_vendor_service",
       "title": "End a vendor service",
-      "description": "Innovator: end your firm's subscription. Refused while a live product version hands off through it (publish a version without it first). Its credentials are deleted from your key vault, and the vendor leaves your roster if it joined for this subscription.",
+      "description": "Innovator: end your firm's subscription. Refused while a live product version hands off through it (publish a version without it first). Its credentials are deleted from your key vault, the vendor leaves your roster if it joined for this subscription, and the vendor agreements accepted with it (its standard terms) end too, the vendor told.",
       "area": "vendors",
       "roles": [
         "developer",
@@ -16054,6 +16113,12 @@
         "properties": {
           "subscription_id": {
             "type": "string"
+          },
+          "reason": {
+            "description": "Why, for the agreements it ends (default: 'Subscription ended')",
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000
           }
         },
         "required": [
@@ -16687,7 +16752,7 @@
     {
       "name": "update_vendor_offering",
       "title": "Change or list an offering",
-      "description": "Vendor: change an offering (changing an endpoint or licences sends it back to draft, to pass conformance again), or list it (listed: true, once conformance passed) or take it off the list (listed: false; current subscribers keep it).",
+      "description": "Vendor: change an offering (changing an endpoint or licences sends it back to draft, to pass conformance again), or list it (listed: true, once conformance passed) or take it off the list (listed: false; current subscribers keep it). standard_terms sets your standard terms: any change is a new version, which new subscribers accept; agreements already made keep the version they accepted. Only your firm's own members set its terms.",
       "area": "vendors",
       "roles": [
         "vendor",
@@ -16752,6 +16817,39 @@
           },
           "listed": {
             "type": "boolean"
+          },
+          "standard_terms": {
+            "type": "object",
+            "properties": {
+              "document_url": {
+                "type": "string",
+                "maxLength": 2000,
+                "format": "uri"
+              },
+              "document_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 10,
+                "maxLength": 2000,
+                "description": "The terms in a few sentences, as subscribers see them before accepting"
+              },
+              "pricing_summary": {
+                "type": "string",
+                "minLength": 3,
+                "maxLength": 1000,
+                "description": "Your pricing in words (e.g. '$0.40 per check, invoiced monthly'); you bill subscribers directly, never through Mynt"
+              }
+            },
+            "required": [
+              "document_url",
+              "document_sha256",
+              "summary",
+              "pricing_summary"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [

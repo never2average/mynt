@@ -153,7 +153,13 @@ export const STUDIO_TOOLS = {
   request_promotion_signoff: z.object({ app_id: id }).strict(),
   // An app's Products, Agreements and Customers tabs: its products with their sponsors, its agreements with the firms
   // behind them (Propose agreement), and the personas it targets (Choose personas). Apps hold no licences themselves.
-  list_app_agreements: z.object({ app_id: id, status: z.enum(["proposed", "accepted", "signed", "declined", "terminated"]).optional() }).strict(),
+  // Without app_id: the Licences page's Agreements tab, a licence provider's list of what apps proposed to its firm.
+  list_app_agreements: z.object({ app_id: id.optional(), status: z.enum(["proposed", "accepted", "signed", "declined", "terminated"]).optional() }).strict(),
+  // Each side's row actions: the licence provider accepts or declines (Accept / Decline), either side signs (Sign) and
+  // either side ends one with a reason (End agreement; Withdraw for the app's own proposal). Mynt decides who may.
+  respond_to_app_agreement: z.object({ agreement_id: uuid, decision: z.enum(["accept", "decline"]), note: z.string().trim().max(2000).optional() }).strict(),
+  sign_app_agreement: z.object({ agreement_id: uuid }).strict(),
+  terminate_app_agreement: z.object({ agreement_id: uuid, reason: z.string().trim().min(3).max(2000) }).strict(),
   propose_app_agreement: z
     .object({
       app_id: id,
@@ -167,6 +173,28 @@ export const STUDIO_TOOLS = {
       effective_to: auditDate.optional(),
     })
     .strict(),
+  // The Marketplace (/marketplace): service providers' standard services under their standard terms, subscribed to
+  // by accepting the current version for the apps it's for (click-through only: the studio never subscribes
+  // without terms), and ending a subscription (the app's Agreements tab's End subscription). A test credential
+  // goes to Mynt's key vault and is never read back; live credentials and going live stay with the MCP tools.
+  list_vendor_offerings: z
+    .object({
+      region: z.string().regex(/^[A-Z]{2}$/).optional(),
+      service_type: z.string().regex(/^[a-z][a-z0-9_]{0,59}$/).optional(),
+      category: z.enum(["identity", "kyc", "account_data", "analytics", "credit_bureau", "documents", "esign", "mandate", "fraud", "ramp", "other"]).optional(),
+    })
+    .strict(),
+  subscribe_vendor_service: z
+    .object({
+      offering_id: uuid,
+      accept_terms_version: z.number().int().min(1).max(1_000_000),
+      app_ids: z.array(uuid).min(1).max(20),
+      products: z.array(id).max(20).optional(),
+      test_credential: z.string().min(1).max(2000).optional(),
+      credential_label: z.string().trim().min(1).max(100).optional(),
+    })
+    .strict(),
+  unsubscribe_vendor_service: z.object({ subscription_id: uuid, reason: z.string().trim().min(3).max(2000).optional() }).strict(),
   get_app_customers: z.object({ app_id: id }).strict(),
   set_app_target_segments: z.object({ app_id: id, segments: z.array(z.object({ product_id: id, segment_id: id }).strict()).max(100) }).strict(),
   // The Audits page's Agreement audits tab: oversight audits licence providers run on apps under program agreements.

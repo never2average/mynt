@@ -7,13 +7,14 @@ import {
   fromCustomers,
   fromPnl,
   fromProductSdk,
+  gateFrom,
   NOT_YET,
   SECURITY_CHECKS,
   type InfoTab,
   type TabData,
 } from "./app-panel";
 import { fromAgreementAuditList, summariesByAgreement } from "./agreement-audits";
-import { fromPromotionChecks, nextStage, type PromotionTarget } from "./promotions";
+import { coverageFrom, fromPromotionChecks, nextStage, PROGRAM_AGREEMENTS_CHECK, type PromotionTarget } from "./promotions";
 import { callStudioTool, isAuthError, listMyntTools } from "./studio-server";
 import { stageOf, type Stage } from "./workspaces";
 
@@ -86,7 +87,18 @@ export async function loadPanelTab(mynt: Client, app: PanelApp, tab: InfoTab): P
       const reply = await read("list_app_agreements", { app_id: app.id });
       if (reply === null) return NOT_YET("Mynt didn't answer with the app's products.");
       const checks = app.stage === "staging" ? await checksFor() : null;
-      return { available: true, products: appProductsFrom(reply), productionCheck: checks?.checks.find((c) => c.id === "licences") ?? null };
+      const r = isObj(reply) ? reply : {};
+      return {
+        available: true,
+        products: appProductsFrom(reply),
+        productionCheck: checks?.checks.find((c) => c.id === "licences") ?? null,
+        // Production needs a signed program agreement with each product's sponsor: the check while the app is in
+        // staging, and what Mynt lists either way (flagged once in production without one).
+        agreementCheck: checks?.checks.find((c) => c.id === PROGRAM_AGREEMENTS_CHECK) ?? null,
+        coverage: coverageFrom(r.program_coverage),
+        gate: gateFrom(r.production_gate),
+        canManage: r.can_manage === true,
+      };
     }
     case "agreements": {
       if (!tool("list_app_agreements")) return NOT_YET("Agreements come with Mynt's next update.");

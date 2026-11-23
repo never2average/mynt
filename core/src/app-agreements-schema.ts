@@ -41,8 +41,28 @@ export const APP_AGREEMENT_TABLES = `
   );
   CREATE INDEX IF NOT EXISTS app_agreements_app_idx ON ${T}.app_agreements (app_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS app_agreements_counterparty_idx ON ${T}.app_agreements (counterparty_entity_id, status);
-  -- One open agreement of a kind per app and counterparty at a time.
-  CREATE UNIQUE INDEX IF NOT EXISTS app_agreements_one_open_idx ON ${T}.app_agreements (app_id, counterparty_entity_id, kind) WHERE status IN ('proposed', 'accepted', 'signed');
+  -- A vendor's standard terms, from the vendor marketplace (vendor-terms.ts): an agreement made by click-through when the
+  -- app's workspace subscribes to a listed offering. It names the subscription it came with and the version of the
+  -- vendor's terms accepted (document_url, document_sha256 and terms_summary are that version's), and ends with it.
+  ALTER TABLE ${T}.app_agreements ADD COLUMN IF NOT EXISTS vendor_subscription_id uuid REFERENCES ${T}.vendor_subscriptions(id);
+  ALTER TABLE ${T}.app_agreements ADD COLUMN IF NOT EXISTS offering_id uuid REFERENCES ${T}.vendor_offerings(id);
+  ALTER TABLE ${T}.app_agreements ADD COLUMN IF NOT EXISTS terms_version integer;
+  ALTER TABLE ${T}.app_agreements ADD COLUMN IF NOT EXISTS pricing_summary text;
+  -- One open negotiated agreement of a kind per app and counterparty at a time; one open click-through agreement per app
+  -- and subscription (a vendor with several offerings has one per subscription).
+  DROP INDEX IF EXISTS ${T}.app_agreements_one_open_idx;
+  CREATE UNIQUE INDEX IF NOT EXISTS app_agreements_one_open_negotiated_idx ON ${T}.app_agreements (app_id, counterparty_entity_id, kind) WHERE status IN ('proposed', 'accepted', 'signed') AND vendor_subscription_id IS NULL;
+  CREATE UNIQUE INDEX IF NOT EXISTS app_agreements_one_open_subscription_idx ON ${T}.app_agreements (app_id, vendor_subscription_id) WHERE status IN ('proposed', 'accepted', 'signed') AND vendor_subscription_id IS NOT NULL;
+  -- A vendor's standard terms on each offering (vendor-terms.ts): the document (https) and its SHA-256, a short summary,
+  -- the pricing (billed by the vendor directly, never through Mynt) and a version that goes up when any of them changes.
+  -- Listing an offering with terms is the vendor's standing acceptance of them; who set them and when is kept.
+  ALTER TABLE ${T}.vendor_offerings ADD COLUMN IF NOT EXISTS terms_version integer;
+  ALTER TABLE ${T}.vendor_offerings ADD COLUMN IF NOT EXISTS terms_document_url text;
+  ALTER TABLE ${T}.vendor_offerings ADD COLUMN IF NOT EXISTS terms_document_sha256 text;
+  ALTER TABLE ${T}.vendor_offerings ADD COLUMN IF NOT EXISTS terms_summary text;
+  ALTER TABLE ${T}.vendor_offerings ADD COLUMN IF NOT EXISTS pricing_summary text;
+  ALTER TABLE ${T}.vendor_offerings ADD COLUMN IF NOT EXISTS terms_set_by uuid REFERENCES ${T}.users(id);
+  ALTER TABLE ${T}.vendor_offerings ADD COLUMN IF NOT EXISTS terms_set_at timestamptz;
   -- The customer segments (personas) an app targets, picked from its products' customer_segments.
   CREATE TABLE IF NOT EXISTS ${T}.app_target_segments (
     app_id uuid NOT NULL REFERENCES ${T}.apps(id),

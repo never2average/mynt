@@ -12,7 +12,7 @@ import { workspaceRole, type WorkspaceRole } from "./workspaces.js";
 // workspace's members ask, and only about that workspace: its apps, its licences, its own members' offboarding.
 // Everyone sees the workspace frozen (its organization deleted in the identity provider) or being archived, failed
 // and blocked builds, production apps whose checks now fail, licences expiring within 30 days, and their own
-// repository connections waiting for an admin. Owners and admins also see join requests (people not on Mynt who
+// repository connections waiting for an admin, and what the other firm did lately with the apps' agreements. Owners and admins also see join requests (people not on Mynt who
 // joined its organization), offboarding that didn't finish, webhooks whose receivers need a new secret (or that were
 // turned off), and sign-offs: asked, decided, or approved but no longer counting. Nobody in a workspace decides its
 // sign-offs, so none is ever shown as waiting for the caller.
@@ -222,6 +222,44 @@ export async function workspaceAttention(store: Store, user: Pick<User, "id">, w
       at: a.due_at,
     });
 
+  // The other firm's side of the apps' agreements, lately: accepted, declined, signed or ended by it (app-agreements.ts).
+  // This is how the app's side hears of them; their own actions they know. Signing is the owners' and admins' to do.
+  if (ids.length) {
+    const WORDS: Record<string, string> = { accept_app_agreement: "accepted", decline_app_agreement: "declined", sign_app_agreement: "signed", terminate_app_agreement: "ended" };
+    const done = await rowsOf(
+      db,
+      `SELECT l.id::text AS id, l.action, l.target, l.details, l.created_at, g.kind, g.status, g.app_signed_at, e.name AS firm
+       FROM ${T}.audit_log l JOIN ${T}.app_agreements g ON g.id::text = l.target LEFT JOIN ${T}.entities e ON e.id = g.counterparty_entity_id
+       WHERE l.action = ANY($1) AND l.details->>'app_id' = ANY($2) AND l.created_at > now() - make_interval(days => $3)
+         AND (l.action IN ('accept_app_agreement', 'decline_app_agreement') OR l.details->>'side' = 'counterparty')
+       ORDER BY l.created_at DESC LIMIT 50`,
+      [Object.keys(WORDS), ids, RECENT_DAYS],
+    );
+    for (const d of done) {
+      const details = (d.details ?? {}) as Record<string, unknown>;
+      const app = String(details.app_id);
+      const what = String(d.kind) === "program" ? "program agreement" : String(d.kind) === "vendor" ? "vendor contract" : "data-sharing agreement";
+      const ended = d.action === "terminate_app_agreement";
+      const declined = d.action === "decline_app_agreement";
+      const yoursToSign = d.status === "accepted" && !d.app_signed_at;
+      items.push({
+        id: `app_agreement:${d.id}`,
+        kind: "app_agreement_update",
+        severity: ended && d.kind === "program" ? "high" : ended || declined || (yoursToSign && manager) ? "medium" : "low",
+        title: `${name.get(app)}: ${d.firm ?? "the other firm"} ${WORDS[d.action as string]} the ${what}`,
+        detail: ended
+          ? `Reason: ${String(details.reason ?? "none given")}.${d.kind === "program" ? " Production needs a signed program agreement with each product's sponsor: propose a new one" : ""}`
+          : declined
+            ? `${details.note ? `Their note: ${String(details.note)}. ` : ""}Propose another if you still need one`
+            : yoursToSign
+              ? manager ? "It waits for your side's signature: Sign it on the app's Agreements tab" : "It waits for an owner or admin to sign it"
+              : d.status === "signed" ? "Signed by both sides" : `It's ${d.status}`,
+        href: `/${app}?tab=agreements`,
+        at: iso(d.created_at),
+      });
+    }
+  }
+
   // Licences behind the workspace's products that lapse within 30 days.
   for (const l of await workspaceLicences(store, workspaceId, { status: "verified" })) {
     if (!l.expires_at) continue;
@@ -294,7 +332,7 @@ export function registerAttentionTools(server: McpServer, store: Store, user: Us
     {
       title: "What needs attention in a workspace",
       description:
-        "Developer (any member): what needs attention in one workspace, for your role in it, most severe first. Everyone: the workspace frozen or being archived, failed and blocked builds, production apps whose checks now fail, oversight audits under its apps' agreements past their due date and not closed, licences behind its products expiring within 30 days, and your own repository connections waiting for an admin. Owners and admins also: join requests (people not on Mynt who joined its organization), offboarding that didn't finish, webhooks turned off or whose receivers need a new secret, and production sign-offs asked, decided or no longer counting (a Mynt admin outside the workspace decides them). Each item has a studio link (href).",
+        "Developer (any member): what needs attention in one workspace, for your role in it, most severe first. Everyone: the workspace frozen or being archived, failed and blocked builds, production apps whose checks now fail (a program agreement that ended or expired among them: the app stays in production, flagged), what the other firm did lately with the apps' agreements (accepted, declined, signed or ended them), oversight audits under its apps' agreements past their due date and not closed, licences behind its products expiring within 30 days, and your own repository connections waiting for an admin. Owners and admins also: join requests (people not on Mynt who joined its organization), offboarding that didn't finish, webhooks turned off or whose receivers need a new secret, and production sign-offs asked, decided or no longer counting (a Mynt admin outside the workspace decides them). Each item has a studio link (href).",
       inputSchema: { workspace_id: z.string() },
       annotations: { readOnlyHint: true },
     },

@@ -73,6 +73,8 @@ vi.mock("@/lib/tokens", () => ({
 
 const views = await import("@/components/agreement-audits-view");
 const listRoute = await import("@/app/api/agreement-audits/route");
+const lp = await import("@/components/lp-agreements-view");
+const { lpAgreementsFrom } = await import("@/lib/lp-agreements");
 const auditRoute = await import("@/app/api/agreement-audits/[auditId]/route");
 
 const session = (roles: string[]) => ({ id: "s", createdAt: 0, lastSeen: 0, tokens: { access_token: "t", token_type: "Bearer" }, roles, rolesAt: Date.now() }) as Session;
@@ -220,6 +222,26 @@ describe("the audit sheet", () => {
     fireEvent.click(submit);
     expect(sent).toEqual([{ agreement_id: AG2, name: "Marketing material review", kind: "marketing_review", cadence: "on_change" }]);
     expect(renderToStaticMarkup(<views.AddRequirementView agreements={[]} onSubmit={() => undefined} />)).toContain("data-no-agreements");
+  });
+});
+
+describe("the licence provider's Agreements tab (Licences page)", () => {
+  it("offers Add audit requirement as a labelled row action on open program agreements only, opening the sheet for that agreement", () => {
+    const rows = lpAgreementsFrom({
+      agreements: [
+        { id: AG1, kind: "program", status: "proposed", app: { id: "a1", name: "Pay app" }, workspace: { id: "w1", name: "Acme Labs" }, products: [], terms_summary: "Program", signatures: {} },
+        { id: AG2, kind: "data_sharing", status: "signed", app: { id: "a1", name: "Pay app" }, workspace: { id: "w1", name: "Acme Labs" }, products: [], terms_summary: "Data", signatures: {} },
+        { id: AUDIT, kind: "program", status: "terminated", app: { id: "a2", name: "Old" }, workspace: null, products: [], terms_summary: "Old", signatures: {} },
+      ],
+    })!;
+    render(<lp.LpAgreementsView rows={rows} />);
+    const buttons = [...document.querySelectorAll("[data-add-audit-requirement]")];
+    expect(buttons.map((b) => [b.getAttribute("data-add-audit-requirement"), b.textContent])).toEqual([[AG1, "Add audit requirement"]]);
+    fireEvent.click(buttons[0]);
+    expect([...document.querySelectorAll("[data-requirement-agreement] option")].map((o) => o.getAttribute("value"))).toEqual([AG1]);
+    cleanup();
+    render(<lp.LpAgreementsView rows={rows} auditRequirements={false} />);
+    expect(document.querySelector("[data-add-audit-requirement]")).toBeNull();
   });
 });
 
