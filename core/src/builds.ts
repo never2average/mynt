@@ -21,7 +21,12 @@ import { VERIFY_APP, VERIFY_AUDIT_SRC, VERIFY_DIR, VERIFY_SCRIPT } from "./verif
 import { SOLANA_TOOLCHAIN, SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT, toolchainRecord, type ToolchainRecord } from "./solana/toolchain.js";
 import { loadCrateAllowlist } from "./solana/vuln-db.js";
 import { SOLANA_ENV_WIPE_COMMAND, SolanaBuildEnv, ENV_FILES, type SolanaEnvSnapshot } from "./build-env.js";
-import type { Store, User } from "./store.js";
+import { productStage, type ProductRecord, type Store, type User } from "./store.js";
+import { isProduction } from "./promotion-schema.js";
+
+// What a build of an app gets: products in production, and in a sandbox build (an app not in production) those in
+// staging too (product-stages.ts).
+const buildableIn = (record: ProductRecord, sandbox: boolean) => record.status === "published" || (sandbox && productStage(record) === "staging");
 import { canSeeBuild, memberApp } from "./workspaces.js";
 import { checkRepoOwnership, type OwnershipCheck } from "./repo-ownership.js";
 import type { LinkedAccountsService } from "./linked-accounts.js";
@@ -2084,11 +2089,13 @@ export class BuildService {
     const app = b.app_id ? await this.store.getApp(b.app_id) : undefined;
     const developer = await this.store.getUser(b.developer_id);
     const products = [];
+    // A product in staging is for sandbox builds only: an app not in production gets it, marked as such.
+    const sandbox = app ? !(await isProduction(this.store.db, app.id)) : true;
     for (const id of app?.product_ids ?? []) {
       const record = await this.store.getProduct(id);
-      if (!record || record.status !== "published" || !developer) continue;
+      if (!record || !developer || !buildableIn(record, sandbox)) continue;
       const access = await accessStatus(this.store, developer, record, app?.id ?? null);
-      products.push({ ...record.product, version: record.version, build_terms: record.build_terms, access: access.via });
+      products.push({ ...record.product, version: record.version, stage: productStage(record), build_terms: record.build_terms, access: access.via });
     }
     return {
       // The security audit (Maxwell) runs once, in Mynt's own verification; the coding agent doesn't get it.
@@ -2134,9 +2141,10 @@ export class BuildService {
     const developer = await this.store.getUser(b.developer_id);
     if (!app || !developer) return [];
     const products: SdkProduct[] = [];
+    const sandbox = !(await isProduction(this.store.db, app.id));
     for (const id of app.product_ids) {
       const record = await this.store.getProduct(id);
-      if (record?.status !== "published") continue;
+      if (!record || !buildableIn(record, sandbox)) continue;
       if (!(await accessStatus(this.store, developer, record, app.id)).granted) continue;
       products.push({ record, issuer: (await productEntity(this.store, record))?.name ?? null });
     }

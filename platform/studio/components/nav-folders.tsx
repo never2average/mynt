@@ -1,15 +1,18 @@
 "use client"
 
 // From shadcn/ui's sidebar-07 block (nav-main.tsx, MIT): collapsible groups, here the
-// workspace's apps under an "Apps" label, in three folders by stage (Production, Staging, Ideas).
+// workspace's apps and the user's financial products under an "Apps and products" label, in three
+// folders by stage (Production, Staging, Ideas): both go through the same stages. Each item says which
+// it is (its icon, AppWindow or Landmark, and "App: …" / "Financial product: …" to screen readers).
 // Exactly one folder is open at a time, like a single-select: opening one closes the others,
 // and the open one can't be closed to none. It starts at the stage of the app on screen, else the
 // last one picked (remembered in this browser), else Production. Collapsed to icons, the three
 // icons stay, the open folder's marked as selected, and clicking one picks it and expands the
-// sidebar to show its apps. Each app opens its workspace view.
+// sidebar to show its items. An app opens its workspace view; a product opens the Build page's
+// Products tab on it (in place when that page is open).
 import Link from "next/link"
 import { useEffect, useState } from "react"
-import { AppWindow, ChevronRight, FlaskConical, Lightbulb, Rocket, type LucideIcon } from "lucide-react"
+import { AppWindow, ChevronRight, FlaskConical, Landmark, Lightbulb, Rocket, type LucideIcon } from "lucide-react"
 
 import {
   Collapsible,
@@ -27,11 +30,12 @@ import {
   SidebarMenuSubItem,
   useSidebar,
 } from "@/components/ui/sidebar"
-import { APP_STATUS, THREAD_KIND_LABELS } from "@/lib/threads"
+import { APP_STATUS, appHref, openThreadInPlace, productHref, THREAD_KIND_LABELS } from "@/lib/threads"
 import { STAGE_LABELS, STAGES, type StagedApp, type Stage } from "@/lib/workspaces"
 
-// Every app says it's an app (the Financial products group's items say they're products).
-const APP_LABEL = THREAD_KIND_LABELS["app"]
+// Every item says what it is: an app or a financial product.
+const KIND_ICONS: Record<"app" | "product", LucideIcon> = { app: AppWindow, product: Landmark }
+export const FOLDERS_LABEL = "Apps and products"
 
 // Each folder its own icon, expanded and collapsed (where the icon is all that shows, with the
 // folder's name as its tooltip).
@@ -58,7 +62,7 @@ function remember(stage: Stage) {
 
 /** The folder to open: the open app's stage, else the one remembered, else Production. */
 export function initialFolder(groups: Record<Stage, StagedApp[]> | null, activeAppId: string | undefined, saved: Stage | null): Stage {
-  const own = activeAppId && groups ? STAGES.find((s) => groups[s].some((a) => a.id === activeAppId)) : undefined
+  const own = activeAppId && groups ? STAGES.find((s) => groups[s].some((a) => (a.kind ?? "app") === "app" && a.id === activeAppId)) : undefined
   return own ?? saved ?? "production"
 }
 
@@ -74,7 +78,7 @@ export function NavFolders({
   const [active, setActive] = useState<Stage>(() => initialFolder(groups, activeAppId, null))
 
   // After mounting (localStorage is the browser's), and whenever another app is opened: its stage.
-  const appStage = activeAppId && groups ? STAGES.find((s) => groups[s].some((a) => a.id === activeAppId)) : undefined
+  const appStage = activeAppId && groups ? STAGES.find((s) => groups[s].some((a) => (a.kind ?? "app") === "app" && a.id === activeAppId)) : undefined
   useEffect(() => {
     setActive((current) => appStage ?? remembered() ?? current)
   }, [appStage])
@@ -86,7 +90,7 @@ export function NavFolders({
 
   return (
     <SidebarGroup>
-      <SidebarGroupLabel>Apps</SidebarGroupLabel>
+      <SidebarGroupLabel>{FOLDERS_LABEL}</SidebarGroupLabel>
       <SidebarMenu>
         {STAGES.map((stage) => {
           const apps = groups?.[stage] ?? []
@@ -104,7 +108,7 @@ export function NavFolders({
               <SidebarMenuItem data-folder={stage} data-active-folder={open ? "true" : undefined}>
                 <CollapsibleTrigger asChild>
                   <SidebarMenuButton
-                    tooltip={`Apps · ${STAGE_LABELS[stage]}`}
+                    tooltip={`${FOLDERS_LABEL} · ${STAGE_LABELS[stage]}`}
                     isActive={collapsed && open}
                     aria-pressed={open}
                     onClick={() => {
@@ -124,19 +128,31 @@ export function NavFolders({
                   <SidebarMenuSub>
                     {groups && apps.length === 0 && (
                       <SidebarMenuSubItem>
-                        <span className="px-2 py-1 text-xs text-muted-foreground">No apps</span>
+                        <span className="px-2 py-1 text-xs text-muted-foreground">No apps or products</span>
                       </SidebarMenuSubItem>
                     )}
-                    {apps.map((app) => (
-                      <SidebarMenuSubItem key={app.id}>
-                        <SidebarMenuSubButton asChild isActive={app.id === activeAppId}>
-                          <Link href={`/${encodeURIComponent(app.id)}`} aria-label={`${APP_LABEL}: ${app.name}`} title={`${APP_LABEL} · ${APP_STATUS[stage]}`} data-thread-item={`app:${app.id}`} data-kind="app">
-                            <AppWindow className="size-3.5" aria-hidden data-thread-icon="app" />
-                            <span>{app.name}</span>
-                          </Link>
-                        </SidebarMenuSubButton>
-                      </SidebarMenuSubItem>
-                    ))}
+                    {apps.map((item) => {
+                      const kind = item.kind ?? "app"
+                      const Icon = KIND_ICONS[kind]
+                      const label = THREAD_KIND_LABELS[kind]
+                      return (
+                        <SidebarMenuSubItem key={`${kind}:${item.id}`}>
+                          <SidebarMenuSubButton asChild isActive={kind === "app" && item.id === activeAppId}>
+                            <Link
+                              href={kind === "app" ? appHref(item.id) : productHref(item.id)}
+                              aria-label={`${label}: ${item.name}`}
+                              title={`${label} · ${APP_STATUS[stage]}`}
+                              onClick={kind === "product" ? () => openThreadInPlace({ product: item.id }) : undefined}
+                              data-thread-item={`${kind}:${item.id}`}
+                              data-kind={kind}
+                            >
+                              <Icon className="size-3.5" aria-hidden data-thread-icon={kind} />
+                              <span>{item.name}</span>
+                            </Link>
+                          </SidebarMenuSubButton>
+                        </SidebarMenuSubItem>
+                      )
+                    })}
                   </SidebarMenuSub>
                 </CollapsibleContent>
               </SidebarMenuItem>

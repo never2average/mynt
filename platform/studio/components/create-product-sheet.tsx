@@ -18,7 +18,7 @@ import {
   createProduct,
   flagEmoji,
   HORIZONS,
-  isPickable,
+  productStageOf,
   LIQUIDITY,
   NewProductRequest,
   PRODUCT_ACTIONS,
@@ -128,7 +128,8 @@ export function CreateProductSheet({
   const slugError = slug && !PRODUCT_SLUG.test(slug) ? SLUG_HINT : null
   const categories = useMemo(() => (options?.categories ?? []).filter((c) => !line || !c.productLines.length || c.productLines.includes(line)), [options, line])
   const regulators = options?.regions.find((r) => r.code === region)?.regulators ?? []
-  const bases = (products ?? []).filter(isPickable)
+  // Only products in production: what a product sells or repackages must be published.
+  const bases = (products ?? []).filter((p) => (p.stage ?? productStageOf(p)) === "production")
   const request = {
     id: slug,
     name: name.trim(),

@@ -2,8 +2,9 @@
 // New app's products: each shows the flags of the countries it's offered in (from Mynt's region and the
 // jurisdictions it lists), in the composer's picker, its single-product label and the Products tab.
 // Create product (the picker's last item, the tab's button, /create-product) opens one sheet with
-// create_product's inputs; the new product is listed as Draft, can't be picked until published, and
-// is tested and published from its row, with Mynt's refusals in its words.
+// create_product's inputs; the new product is listed as an Idea, can't be picked until it's in Staging,
+// and moves between stages from its row through the approval sheet (Mynt's checks, a test run there,
+// Move to staging / Move to production / Move back), with Mynt's refusals in its words.
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -20,7 +21,10 @@ const PRODUCTS = [
   { id: "p2", name: "Bank transfers", productLine: "payments", by: "Example Money Transmitter", accessMode: "open", jurisdictions: ["US", "us-ny", "CA"], status: "published" },
   { id: "p3", name: "Wire transfers", productLine: "payments", by: "Example Money Transmitter", accessMode: "open", jurisdictions: ["global"], status: "published" },
   { id: "my-draft", name: "My savings", productLine: "account_operations", by: "You", accessMode: "", jurisdictions: ["US"], status: "draft", mine: true },
+  { id: "my-staged", name: "My card", productLine: "payments", by: "You", accessMode: "open", jurisdictions: ["US"], status: "unpublished", stage: "staging", mine: true },
 ];
+const check = (id: string, status: string, detail: string) => ({ id, label: id, status, detail });
+const checksFor = (to: string, can: boolean, checks: unknown[]) => ({ checks: { appId: "", fromStage: null, toStage: to, checks, canPromote: can, needsAdminSignoff: false, signoff: null } });
 const OPTIONS = {
   regions: [{ code: "US", name: "United States", regulators: ["FinCEN", "OCC"] }],
   categories: [
@@ -31,7 +35,8 @@ const OPTIONS = {
 
 type Call = { url: string; body: unknown };
 let calls: Call[] = [];
-let publishReply: { status: number; body: unknown } = { status: 200, body: { published: true, message: "Published. You can build on it now." } };
+let publishReply: { status: number; body: unknown } = { status: 200, body: { ok: true, message: "Moved." } };
+let checksReply: unknown = null;
 beforeAll(() => {
   window.matchMedia ??= ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, onchange: null, dispatchEvent: () => false })) as unknown as typeof window.matchMedia;
   globalThis.ResizeObserver ??= class {
@@ -45,15 +50,17 @@ beforeAll(() => {
 beforeEach(() => {
   calls = [];
   pushed.length = 0;
-  publishReply = { status: 200, body: { published: true, message: "Published. You can build on it now." } };
+  publishReply = { status: 200, body: { ok: true, message: "Moved." } };
+  checksReply = checksFor("staging", true, [check("tests_passed", "pass", "Mynt's checks passed")]);
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     if (init?.method === "POST") calls.push({ url, body });
     if (url === "/api/products/options") return new Response(JSON.stringify(OPTIONS), { status: 200 });
     if (url === "/api/products" && init?.method === "POST")
       return new Response(JSON.stringify({ product: { id: body.id, name: body.name, productLine: body.product_line, by: "You", accessMode: "", jurisdictions: [body.region], status: "draft", mine: true } }), { status: 201 });
-    if (url.startsWith("/api/products/my-draft") || url.startsWith("/api/products/green-savings")) {
-      if (body?.action === "test") return new Response(JSON.stringify({ passed: true, message: "Tests passed. You can publish it." }), { status: 200 });
+    if (url.startsWith("/api/products/my-") || url.startsWith("/api/products/green-savings")) {
+      if (url.includes("?to=")) return new Response(JSON.stringify(checksReply), { status: 200 });
+      if (body?.action === "test") return new Response(JSON.stringify({ passed: true, message: "Tests passed. You can move it on." }), { status: 200 });
       return new Response(JSON.stringify(publishReply.body), { status: publishReply.status });
     }
     if (url.startsWith("/api/products")) return new Response(JSON.stringify({ products: PRODUCTS }), { status: 200 });
@@ -131,6 +138,8 @@ describe("flags", () => {
       ["mine-live", "published", ["US"]],
       ["d", "draft", ["CA"]],
     ]);
+    expect(products.map((p) => p.stage)).toEqual(["production", "production", "idea"]);
+    expect(products[1].mine).toBe(true);
     expect(products[2]).toMatchObject({ mine: true, by: "You" });
   });
 });
@@ -161,50 +170,85 @@ describe("the picker and the Products tab show flags", () => {
   });
 });
 
-describe("a draft", () => {
-  it("shows as Draft (status text, no badge) and can't be picked, saying why", async () => {
+describe("a product's stage", () => {
+  const productSheet = () => document.querySelector("[data-product-stage-sheet]") as HTMLElement | null;
+  it("shows as an Idea (as apps show their stage) and can't be picked, saying why", async () => {
     await loaded();
     await openTab("Products");
     const status = tabRow("my-draft").querySelector("[data-product-status]")!;
-    expect(status.textContent).toBe("Draft");
+    expect(status.textContent).toBe("Idea");
     expect(status.closest("[data-slot=badge]")).toBeNull();
+    expect(tabRow("p1").querySelector("[data-product-status] [data-tone=green]")!.textContent).toBe("Production");
+    expect(tabRow("my-staged").querySelector("[data-product-status] [data-tone=amber]")!.textContent).toBe("Staging");
     expect(tabCheckbox("my-draft").disabled).toBe(true);
-    expect(tabCheckbox("my-draft").title).toBe("Publish this product before building on it.");
+    expect(tabCheckbox("my-draft").title).toBe("Move this product to staging before building on it.");
     fireEvent.click(tabCheckbox("my-draft"));
     await settle(0);
     expect(document.querySelector('[data-panel-content="products"] [data-picked-count]')!.textContent).toBe("Pick at least one");
     await openPicker();
     const option = document.querySelector('[data-picker-option="my-draft"]') as HTMLButtonElement;
     expect(option.disabled).toBe(true);
-    expect(option.title).toBe("Publish this product before building on it.");
-    // Published products have no Test or Publish.
-    expect(within(tabRow("p1")).queryByRole("button", { name: "Publish" })).toBeNull();
+    expect(option.title).toBe("Move this product to staging before building on it.");
+    // A product in staging can be picked: a new app builds in the sandbox.
+    expect((document.querySelector('[data-picker-option="my-staged"]') as HTMLButtonElement).disabled).toBe(false);
+    // Others' products have no stage actions; the user's own have the labelled ones.
+    expect(within(tabRow("p1")).queryAllByRole("button")).toEqual([]);
+    expect(within(tabRow("my-draft")).getAllByRole("button").map((b) => b.textContent)).toEqual(["Move to staging"]);
+    expect(within(tabRow("my-staged")).getAllByRole("button").map((b) => b.textContent)).toEqual(["Move to production", "Move back"]);
   });
 
-  it("is tested from its row; a refused publish shows Mynt's reason and stays a draft", async () => {
-    publishReply = { status: 422, body: { error: "mynt_refused", message: "Publishing needs a verified licence for issuance of 'deposits' in US, held by your entity" } };
+  it("Move to staging opens the approval sheet with Mynt's checks; the test runs there; confirming moves it", async () => {
+    checksReply = checksFor("staging", false, [check("tests_passed", "fail", "Product changed since its last test (or was never tested); run test_product first")]);
     await loaded();
     await openTab("Products");
-    await act(async () => void fireEvent.click(within(tabRow("my-draft")).getByRole("button", { name: "Test" })));
+    await act(async () => void fireEvent.click(within(tabRow("my-draft")).getByRole("button", { name: "Move to staging" })));
+    await settle();
+    const s = within(productSheet()!);
+    expect(productSheet()!.querySelector("[data-approval-steps=full]")).not.toBeNull();
+    expect(productSheet()!.querySelector("[data-approval-summary]")!.textContent).toContain("My savings");
+    expect(productSheet()!.querySelector("[data-check=tests_passed]")!.textContent).toContain("run test_product first");
+    const confirm = productSheet()!.querySelector("[data-product-confirm=staging]") as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    checksReply = checksFor("staging", true, [check("tests_passed", "pass", "Mynt's checks passed")]);
+    await act(async () => void fireEvent.click(s.getByRole("button", { name: "Run tests" })));
     await settle();
     expect(calls).toEqual([{ url: "/api/products/my-draft", body: { action: "test" } }]);
-    expect(within(tabRow("my-draft")).getByRole("status").textContent).toBe("Tests passed. You can publish it.");
-    await act(async () => void fireEvent.click(within(tabRow("my-draft")).getByRole("button", { name: "Publish" })));
+    await act(async () => void fireEvent.click(productSheet()!.querySelector("[data-product-confirm=staging]")!));
     await settle();
-    expect(calls[1]).toEqual({ url: "/api/products/my-draft", body: { action: "publish" } });
-    expect(within(tabRow("my-draft")).getByRole("alert").textContent).toBe("Publishing needs a verified licence for issuance of 'deposits' in US, held by your entity");
-    expect(tabCheckbox("my-draft").disabled).toBe(true);
+    expect(calls[1]).toEqual({ url: "/api/products/my-draft", body: { action: "promote", to_stage: "staging" } });
+    expect(within(productSheet()!).getByRole("status").textContent).toBe("Moved.");
+    expect(tabRow("my-draft").querySelector("[data-product-status]")!.textContent).toBe("Staging");
+    expect(tabCheckbox("my-draft").disabled).toBe(false);
   });
 
-  it("once published, can be picked", async () => {
+  it("a refused Move to production shows Mynt's reason in its words and stays in Staging", async () => {
+    checksReply = checksFor("production", true, [check("licences", "pass", "covered")]);
+    publishReply = { status: 422, body: { error: "mynt_refused", message: "Not promoted: Publishing needs a verified licence for issuance of 'deposits' in US, held by your entity" } };
     await loaded();
     await openTab("Products");
-    await act(async () => void fireEvent.click(within(tabRow("my-draft")).getByRole("button", { name: "Publish" })));
+    await act(async () => void fireEvent.click(within(tabRow("my-staged")).getByRole("button", { name: "Move to production" })));
     await settle();
-    expect(tabCheckbox("my-draft").disabled).toBe(false);
-    expect(tabRow("my-draft").querySelector("[data-product-status]")).toBeNull();
-    fireEvent.click(tabCheckbox("my-draft"));
-    expect(tabCheckbox("my-draft").checked).toBe(true);
+    await act(async () => void fireEvent.click(productSheet()!.querySelector("[data-product-confirm=production]")!));
+    await settle();
+    expect(calls).toEqual([{ url: "/api/products/my-staged", body: { action: "promote", to_stage: "production" } }]);
+    expect(within(productSheet()!).getByRole("alert").textContent).toBe("Not promoted: Publishing needs a verified licence for issuance of 'deposits' in US, held by your entity");
+    expect(tabRow("my-staged").querySelector("[data-product-status]")!.textContent).toBe("Staging");
+  });
+
+  it("Move back asks for a reason, then moves it down one stage", async () => {
+    await loaded();
+    await openTab("Products");
+    await act(async () => void fireEvent.click(within(tabRow("my-staged")).getByRole("button", { name: "Move back" })));
+    await settle();
+    const form = productSheet()!.querySelector("[data-move-back]") as HTMLFormElement;
+    const submit = within(form).getByRole("button", { name: "Move back to Ideas" }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    fireEvent.change(within(form).getByLabelText("Reason"), { target: { value: "Rates changing" } });
+    await act(async () => void fireEvent.submit(form));
+    await settle();
+    expect(calls).toEqual([{ url: "/api/products/my-staged", body: { action: "demote", to_stage: "idea", reason: "Rates changing" } }]);
+    expect(tabRow("my-staged").querySelector("[data-product-status]")!.textContent).toBe("Idea");
+    expect(tabCheckbox("my-staged").disabled).toBe(true);
   });
 });
 
@@ -262,7 +306,7 @@ describe("Create product", () => {
     expect(slug.value).toBe("green-saver");
   });
 
-  it("sends create_product's inputs once; the new product shows as a Draft that can't be picked", async () => {
+  it("sends create_product's inputs once; the new product shows as an Idea that can't be picked", async () => {
     await loaded();
     await openTab("Products");
     await act(async () => void fireEvent.click(document.querySelector("[data-create-product]")!));
@@ -285,7 +329,7 @@ describe("Create product", () => {
     expect(sheet()!.querySelector("[data-underlying]")).toBeNull();
     fireEvent.change(s.getByLabelText("Action"), { target: { value: "sale" } });
     const underlying = sheet()!.querySelector("[data-underlying]")!;
-    // Only published products can be built on.
+    // Only products in production can be sold or repackaged.
     expect([...underlying.querySelectorAll("[data-underlying-option]")].map((o) => o.getAttribute("data-underlying-option"))).toEqual(["p1", "p2", "p3"]);
     await act(async () => void fireEvent.click(s.getByRole("button", { name: "Create product" })));
     expect(s.getByRole("alert").textContent).toBe("Pick the products this one sells or repackages.");
@@ -320,11 +364,10 @@ describe("Create product", () => {
     ]);
     expect(NewProductRequest.safeParse(calls[0].body).success).toBe(true);
     expect(sheet()).toBeNull();
-    expect(tabRow("green-savings").querySelector("[data-product-status]")!.textContent).toBe("Draft");
+    expect(tabRow("green-savings").querySelector("[data-product-status]")!.textContent).toBe("Idea");
     expect(flagsIn(tabRow("green-savings"))).toEqual(["US"]);
     expect(tabCheckbox("green-savings").disabled).toBe(true);
-    expect(within(tabRow("green-savings")).getByRole("button", { name: "Test" })).toBeTruthy();
-    expect(within(tabRow("green-savings")).getByRole("button", { name: "Publish" })).toBeTruthy();
+    expect(within(tabRow("green-savings")).getByRole("button", { name: "Move to staging" })).toBeTruthy();
   });
 
   it("shows Mynt's refusal in its words and keeps what was typed", async () => {

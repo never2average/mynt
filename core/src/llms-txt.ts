@@ -55,7 +55,7 @@ export const GET_STARTED: Record<Role, { tool: string; why: string }[]> = {
     { tool: "register_license", why: "add the licences an admin will verify" },
     { tool: "create_product", why: "start a product" },
     { tool: "set_product_definition", why: "compose it from regulated primitives (validate with check_product_definition)" },
-    { tool: "publish_product", why: "publish once its tests pass (test_product)" },
+    { tool: "promote_product", why: "move it to staging once its tests pass (test_product), then to production (publish_product does the same)" },
   ],
   license_provider: [
     { tool: "get_my_entity", why: "your firm, as an admin registered it; share its id with builders" },

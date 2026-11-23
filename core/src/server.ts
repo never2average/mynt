@@ -22,10 +22,8 @@ import { registerBdAdminTools, registerBdAgentTools, registerConnectTools } from
 import { feasibilityCheck, registerDeskTools, type DeskService } from "./desk.js";
 import { registerReviewTools } from "./review.js";
 import { registerExploreTools } from "./explore.js";
-import { deriveContract } from "./contract.js";
-import { checkDefinition, definitionHash, type Definition } from "./definition.js";
 import { registerDefinitionTools } from "./definition-tools.js";
-import { buildPins, driftDependents } from "./pins.js";
+import { driftDependents } from "./pins.js";
 import { blockingComponents, ComponentSchema, partnerGaps, PartyBindingSchema, productRegime, validateComposition } from "./regime.js";
 import { rederiveProduct } from "./derived.js";
 import { accessStatus, BuildTermsSchema, coveringLicenses, EXPERIENCE_ACTIONS, lintExperience, productEntity } from "./access.js";
@@ -52,11 +50,13 @@ import { registerPartnerKitTools } from "./partner-kit.js";
 import { registerFirmNoticeTools } from "./firm-notices.js";
 import { hasLiquidityRole, registerLiquidityTools, rolesFrom } from "./liquidity-tools.js";
 import { registerTreasuryTools } from "./treasury-tools.js";
-import { driftFor, reassertCovenantPause, registerCovenantTools } from "./covenants.js";
+import { driftFor, registerCovenantTools } from "./covenants.js";
 import { registerRampAdapterTools } from "./ramp-adapters/index.js";
-import { registerFirmWebhookTools, registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools, vendorBindingsOf, vendorServedActions, vendorStateOf } from "./vendors.js";
+import { registerFirmWebhookTools, registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools } from "./vendors.js";
 import { registerProductRequestInnovatorTools, registerProductRequestTools, requestOffersFor } from "./product-requests.js";
 import { registerVersioningTools } from "./versions.js";
+import { productStage } from "./store.js";
+import { publishGate, promoteToProduction, registerProductStageTools } from "./product-stages.js";
 import { registerTakeRateAdminTools, registerTakeRateTools } from "./take-rates.js";
 import { developerReadiness, emitProductEvent, ensureRelease, registerRuntimeInnovatorTools, registerRuntimeTools } from "./runtime.js";
 // SDKs and experiences (developer build layer)
@@ -733,13 +733,16 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
   // An app of a workspace the developer belongs to (workspaces.ts).
   const ownApp = (id: string) => memberApp(store, user, id);
 
-  // Products a draft may include: published, and not private unless this developer was let in.
-  const unusable = async (ids: string[], appId: string | null) => {
+  // Products an app may include: published, and not private unless this developer was let in. A product in staging
+  // only on an app not in production (sandbox builds): `production` says the app is in production.
+  const unusable = async (ids: string[], appId: string | null, production = false) => {
     const out: string[] = [];
     for (const id of ids) {
       const record = await store.getProduct(id);
-      if (record?.status !== "published") out.push(`${id} (not published)`);
-      else if (record.access_mode === "private" && !(await accessStatus(store, user, record, appId)).granted) out.push(`${id} (private)`);
+      const stage = record ? productStage(record) : "idea";
+      if (stage === "staging" && production) out.push(`${id} (in staging: sandbox builds only, so not on a production app until its firm promotes it)`);
+      else if (stage === "idea") out.push(`${id} (not published)`);
+      else if (record && record.access_mode === "private" && !(await accessStatus(store, user, record, appId)).granted) out.push(`${id} (private)`);
     }
     return out;
   };
@@ -754,18 +757,20 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
     {
       title: "Products you can build on",
       description:
-        "Developer: published products you can build experiences on, with each one's product line and category, access mode (open: build and publish; approval: build now, publish once the innovator approves; private: invitation only), build terms and who issues or distributes it.",
+        "Developer: products you can build experiences on, with each one's stage, product line and category, access mode (open: build and publish; approval: build now, publish once the innovator approves; private: invitation only), build terms and who issues or distributes it. environment 'production' (the default): published products, in production. 'sandbox': also products in staging, which apps in Ideas or Staging may pin for sandbox builds but no production app may use (promote_app refuses until the product is in production).",
       inputSchema: {
         product_line: z.enum(PRODUCT_LINES).optional(),
         query: z.string().optional(),
         access_mode: z.enum(ACCESS_MODES).optional(),
+        environment: z.enum(["production", "sandbox"]).default("production").describe("sandbox: include products in staging, for sandbox builds only"),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ product_line, query, access_mode }) => {
+    async ({ product_line, query, access_mode, environment }) => {
       const q = query?.toLowerCase();
       const out = [];
-      for (const p of await store.publishedProducts()) {
+      const staging = environment === "sandbox" ? (await store.stagingProducts()).map((r) => r.product) : [];
+      for (const p of [...(await store.publishedProducts()), ...staging]) {
         if (product_line && p.product_line !== product_line) continue;
         if (q && !`${p.name} ${p.description}`.toLowerCase().includes(q)) continue;
         const record = (await store.getProduct(p.id))!;
@@ -779,6 +784,7 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
           product_line: p.product_line,
           category: p.category,
           region: p.region,
+          stage: productStage(record),
           action: record.action,
           by: entity?.name ?? (record.owner_id ? null : "Mynt reference catalogue"),
           access_mode: record.access_mode,
@@ -820,7 +826,8 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
     },
     async ({ product_id }) => {
       const record = await store.getProduct(product_id);
-      if (record?.status !== "published") return fail(`No published product '${product_id}'`);
+      // In staging too: its kit is for sandbox builds (no production app may use it yet).
+      if (!record || productStage(record) === "idea") return fail(`No published product '${product_id}'`);
       const access = await accessStatus(store, user, record, null);
       if (record.access_mode === "private" && !access.granted) return fail(`'${product_id}' is private; ask its innovator for an invitation`);
       const entity = await productEntity(store, record);
@@ -828,6 +835,8 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
       return json({
         product: record.product,
         version: record.version,
+        stage: productStage(record),
+        ...(productStage(record) === "staging" ? { sandbox_only: "In staging: for sandbox builds only; no production app may use it until its firm promotes it" } : {}),
         issued_or_distributed_by: entity?.name ?? null,
         action: record.action,
         underlying_product_ids: record.underlying_product_ids,
@@ -903,7 +912,7 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
     async ({ app_id, ...changes }) => {
       const app = await ownApp(app_id);
       if (!app) return fail(`No app with id '${app_id}'`);
-      const bad = await unusable(changes.product_ids ?? [], app.id);
+      const bad = await unusable(changes.product_ids ?? [], app.id, await isProduction(store.db, app.id));
       if (bad.length) return fail(`Products not available: ${bad.join(", ")}`);
       const defined = Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined));
       return json(await store.saveApp({ ...app, ...defined }));
@@ -933,7 +942,7 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
     const access = await Promise.all(
       app.product_ids.map(async (id) => {
         const record = records.find((r) => r.product.id === id);
-        if (record?.status !== "published") return { product_id: id, granted: false, status: "unavailable" };
+        if (record?.status !== "published") return { product_id: id, granted: false, status: record && productStage(record) === "staging" ? "staging" : "unavailable" };
         const a = await accessStatus(store, user, record, app.id);
         return { product_id: id, granted: a.granted, status: a.via, request_id: a.request_id };
       }),
@@ -1200,66 +1209,16 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
     async ({ id }) => {
       const record = await publishableProduct(id);
       if (!record) return fail(`No product of yours with id '${id}'`);
-      // A pending draft version goes live in place of the current one; otherwise the product itself.
+      // Promotion to production (product-stages.ts), straight from an idea too: production's checks include
+      // staging's. A pending draft version goes live in place of the current one; otherwise the product itself.
       const draft = await store.draftVersion(id);
       if (!draft && record.status === "published") return fail("Product is already published; draft a new version with create_product_version");
-      const data = draft?.data ?? record.product;
-      const lastTest = draft ? draft.last_test : record.last_test;
-      if (!lastTest || lastTest.fingerprint !== runProductTests(data).fingerprint)
-        return fail("Product changed since its last test (or was never tested); run test_product first");
-      if (!lastTest.passed) return fail("Last test failed; fix the failing checks and run test_product again");
-      // A composed product needs every component it provides itself covered by its firm's verified licences
-      // (partners' components by theirs); otherwise a licence for its category and action.
-      let held: Awaited<ReturnType<typeof coveringLicenses>> = [];
-      let regime: Awaited<ReturnType<typeof productRegime>> | null = null;
-      // A v2 definition must still check out: its parties, licences, register links and GRC records can
-      // have changed since it was saved.
-      if (record.definition) {
-        const check = await checkDefinition(store, record, record.definition as unknown as Definition);
-        if (check.errors.length) return { ...json({ error: "The product's definition no longer checks out", errors: check.errors }), isError: true };
-      }
-      if (record.components.length) {
-        regime = await productRegime(store, record);
-        const blocking = blockingComponents(regime, data.region);
-        if (blocking.length) return fail(`Not ready: ${blocking.map((b) => `${b.key} (${b.primitive} ${b.action}, ${b.region}): ${b.reason}`).join("; ")}`);
-      } else {
-        held = await coveringLicenses(store, user.entity_id, data.region, data.category, record.action);
-        if (held.length === 0)
-          return fail(
-            `Publishing needs a verified licence for ${record.action} of '${data.category}' in ${data.region}, held by your entity (see find_licenses, register_license), or a composition whose components your licences cover (set_product_composition)`,
-          );
-      }
-      const notLive = [];
-      for (const u of record.underlying_product_ids) if ((await store.getProduct(u))?.status !== "published") notLive.push(u);
-      if (notLive.length) return fail(`Underlying products aren't published: ${notLive.join(", ")}`);
-      const live = draft ? await store.publishDraftVersion(id) : await store.publishCurrentVersion(id);
-      // The live version's composition and everything it rests on are pinned; changes later pause sales.
-      if (regime) {
-        const pins = await buildPins(store, record, live.version, regime);
-        if (record.definition) {
-          pins.definition_hash = definitionHash(record.definition as unknown as Definition);
-          const connections = ((record.definition as unknown as Definition).connections ?? []) as never;
-          pins.contract = deriveContract(record.definition as unknown as Definition, live.version, await vendorServedActions(store, connections));
-          const bindings = await vendorBindingsOf(store, connections);
-          if (bindings.length) {
-            pins.vendor_bindings = bindings;
-            pins.state.vendors = {};
-            for (const b of bindings) pins.state.vendors[b.subscription_id] = await vendorStateOf(store, b.subscription_id);
-          }
-        }
-        await store.setPins(id, pins);
-      }
-      else await store.setPins(id, null);
-      // A covenant's pause outlasts a new version: only the sponsor lifts it.
-      await reassertCovenantPause(store, id);
-      // Its coverage and take rate as published (never stops the publish; a failure is stored as a note).
-      await rederiveProduct(store, id);
-      await emitProductEvent(store, id, "product.version_published", { version: live.version });
-      // Products built on this one drift if the new version is offered somewhere else.
-      const drifted = await driftDependents(store, id);
+      const gate = await publishGate(store, user, record);
+      if (gate.refusal) return gate.refusal.errors ? { ...json(gate.refusal), isError: true } : fail(gate.refusal.error);
+      const { live, drifted } = await promoteToProduction(store, user, record, gate, "publish_product");
       return json({
         ...live,
-        licensed_under: held.map((h) => ({ regulator: h.regulator_id, license: h.license_id, registration_number: h.registration_number })),
+        licensed_under: gate.held.map((h) => ({ regulator: h.regulator_id, license: h.license_id, registration_number: h.registration_number })),
         ...(drifted.length ? { drifted_products: drifted } : {}),
       });
     },
@@ -1288,11 +1247,15 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
     },
   );
 
+  // Idea → staging → production, as apps move (product-stages.ts).
+  registerProductStageTools(server, store, user, publishableProduct);
+
   server.registerTool(
     "list_my_products",
     {
       title: "List my financial products",
-      description: "Innovator: list the products you created with their status and latest test result.",
+      description:
+        "Innovator: list the products you created with their status, stage (idea, staging or production, as apps have: promote_product, demote_product) and latest test result.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -1302,6 +1265,7 @@ function registerInnovatorTools(server: McpServer, store: Store, user: User, des
           (await store.productsByOwner(user.id)).map(async (r) => ({
             ...r.product,
             status: r.status,
+            stage: productStage(r),
             version: r.version,
             draft_version: (await store.draftVersion(r.product.id))?.version ?? null,
             last_test_passed: r.last_test?.passed ?? null,

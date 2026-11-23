@@ -24,7 +24,7 @@ import {
   type PromotionTarget,
 } from "@/lib/promotions"
 import { cn } from "@/lib/utils"
-import type { Stage } from "@/lib/workspaces"
+import { STAGE_LABELS, type Stage } from "@/lib/workspaces"
 
 export type DotTone = "green" | "amber" | "red" | "blue" | "gray"
 const DOT: Record<DotTone, string> = { green: "bg-emerald-500", amber: "bg-amber-500", red: "bg-red-500", blue: "bg-sky-500", gray: "bg-muted-foreground/50" }
@@ -35,6 +35,18 @@ export function StatusDot({ tone, label, className, ...rest }: { tone: DotTone; 
     <span {...rest} className={cn("inline-flex shrink-0 items-center gap-1.5 text-xs font-medium", className)} data-tone={tone}>
       <span aria-hidden className={cn("size-2.5 rounded-full", DOT[tone])} />
       {label}
+    </span>
+  )
+}
+
+/** A stage as status shows it, for apps and financial products alike: a dot in words (Production green, Staging amber), Ideas as plain text. */
+export function StageMark({ stage, label }: { stage: Stage; label?: string }) {
+  const text = label ?? STAGE_LABELS[stage]
+  if (stage === "production") return <StatusDot tone="green" label={text} data-stage={stage} />
+  if (stage === "staging") return <StatusDot tone="amber" label={text} data-stage={stage} />
+  return (
+    <span className="text-xs font-medium text-muted-foreground" data-stage={stage}>
+      {text}
     </span>
   )
 }
@@ -88,6 +100,29 @@ const SIGNOFF_TEXT = {
   rejected: "Rejected. Fix what the admin raised, then request it again.",
 } as const
 
+/** Mynt's checks for a move, each with its status, its detail in Mynt's words and its fix (apps and products alike). */
+export function CheckList({ checks, name, to }: { checks: PromotionCheck[]; name: string; to: string }) {
+  if (!checks.length) return <p className="text-sm text-muted-foreground">Mynt has no checks for moving {name} to {to}.</p>
+  return (
+    <ul className="flex flex-col divide-y rounded-lg border" data-checks>
+      {checks.map((c) => (
+        <li key={c.id} className="flex flex-col gap-2 p-3" data-check={c.id} data-status={c.status}>
+          <div className="flex items-start justify-between gap-3">
+            <span className="font-medium">{c.label}</span>
+            <StatusDot tone={CHECK_TONE[c.status]} label={CHECK_LABELS[c.status]} />
+          </div>
+          {c.detail && <p className="text-sm text-muted-foreground">{c.detail}</p>}
+          {c.fix && (
+            <div>
+              <Fix check={c} />
+            </div>
+          )}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 export function PromotionView({ appName, checks, canChange, signoffSupported, busy = false, error = null, result = null, onPromote, onRequestSignoff }: PromotionViewProps) {
   const to = STAGE_NAMES[checks.toStage]
   const failing = checks.checks.filter((c) => c.status === "fail").length
@@ -95,26 +130,7 @@ export function PromotionView({ appName, checks, canChange, signoffSupported, bu
   const enabled = checks.canPromote && canChange && !busy
   return (
     <div className="flex flex-col gap-4" data-promotion-view>
-      {checks.checks.length ? (
-        <ul className="flex flex-col divide-y rounded-lg border" data-checks>
-          {checks.checks.map((c) => (
-            <li key={c.id} className="flex flex-col gap-2 p-3" data-check={c.id} data-status={c.status}>
-              <div className="flex items-start justify-between gap-3">
-                <span className="font-medium">{c.label}</span>
-                <StatusDot tone={CHECK_TONE[c.status]} label={CHECK_LABELS[c.status]} />
-              </div>
-              {c.detail && <p className="text-sm text-muted-foreground">{c.detail}</p>}
-              {c.fix && (
-                <div>
-                  <Fix check={c} />
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="text-sm text-muted-foreground">Mynt has no checks for moving {appName} to {to}.</p>
-      )}
+      <CheckList checks={checks.checks} name={appName} to={to} />
 
       {checks.needsAdminSignoff && (
         <div className="flex flex-col gap-2 rounded-lg border p-3" data-signoff={signoff}>
@@ -167,8 +183,7 @@ export function PromotionView({ appName, checks, canChange, signoffSupported, bu
   )
 }
 
-export function MoveBackForm({ appName, stage, busy = false, onMoveBack }: { appName: string; stage: Stage; busy?: boolean; onMoveBack: (to: DemotionTarget, reason: string) => void }) {
-  const options = earlierStages(stage)
+export function MoveBackForm({ appName, stage, busy = false, onMoveBack, options = earlierStages(stage) }: { appName: string; stage: Stage; busy?: boolean; onMoveBack: (to: DemotionTarget, reason: string) => void; options?: DemotionTarget[] }) {
   const [to, setTo] = useState<DemotionTarget | undefined>(options[0])
   const [reason, setReason] = useState("")
   if (!to) return null

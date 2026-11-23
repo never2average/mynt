@@ -102,9 +102,9 @@ describe("the toggle's separator", () => {
 });
 
 describe("the Apps folders", () => {
-  it("sit under an Apps label (hidden when collapsed, like shadcn's group labels)", () => {
+  it("sit under an Apps and products label (hidden when collapsed, like shadcn's group labels)", () => {
     const html = renderToStaticMarkup(withSidebar(<NavFolders groups={groups} />));
-    expect(html).toMatch(/data-sidebar="group-label"[^>]*>Apps</);
+    expect(html).toMatch(/data-sidebar="group-label"[^>]*>Apps and products</);
     expect(html).toContain("group-data-[collapsible=icon]:opacity-0");
   });
 

@@ -250,6 +250,9 @@ const WORKSPACE = [
   "app_promoted",
   "app_demoted",
   "app_stage_grandfathered",
+  // financial products move through the same stages (product-stages.ts)
+  "product_promoted",
+  "product_demoted",
   "start_build",
   "finish_build",
   "connect_repository",

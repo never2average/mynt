@@ -1,9 +1,11 @@
 import { z } from "zod";
+import { STAGES, type Stage } from "./workspaces";
 
 // New app's products: the ones the user may build on (list_buildable_products) and their own
 // (list_my_products), each with the countries it's offered in, shown as flags; and the Create product
-// sheet's request (create_product), then Test (test_product) and Publish (publish_product). Pure, so
-// the routes, the page and the tests share it.
+// sheet's request (create_product), then its stage, the same three as an app's: Move to staging
+// (promote_product, after test_product passes), Move to production (promote_product: what publishing needs)
+// and Move back (demote_product). Pure, so the routes, the page and the tests share it.
 
 // ---- flags ----
 
@@ -49,6 +51,11 @@ export function flagsFor(jurisdictions: readonly string[]): Flag[] {
 // ---- the products the page lists ----
 
 export type ProductStatus = "published" | "draft" | "unpublished";
+// A product's stage as Mynt gives it; from its status when it doesn't (published: production; else an idea).
+export function productStageOf(p: { stage?: unknown; status?: unknown }): Stage {
+  if (STAGES.includes(p.stage as Stage)) return p.stage as Stage;
+  return p.status === "draft" || p.status === "unpublished" ? "idea" : "production";
+}
 export type StudioProduct = {
   id: string;
   name: string;
@@ -62,7 +69,9 @@ export type StudioProduct = {
   jurisdictions?: string[];
   // Published unless Mynt says otherwise; only the user's own products can be anything else.
   status?: ProductStatus;
-  // The user's own product (Test and Publish are theirs).
+  // Idea, Staging (sandbox builds only) or Production, as apps have; Production unless Mynt says otherwise.
+  stage?: Stage;
+  // The user's own product (moving it between stages is theirs).
   mine?: boolean;
   lastTestPassed?: boolean | null;
 };
@@ -78,22 +87,34 @@ function jurisdictionsOf(p: Obj): string[] {
 }
 const statusOf = (v: unknown): ProductStatus => (v === "draft" || v === "unpublished" ? v : "published");
 
-// list_buildable_products' products, then the user's own that aren't published (drafts can't be built
-// on yet; their published ones are already in the first list).
+// list_buildable_products' products (in production, and in staging for sandbox builds), then the user's
+// own that aren't there (ideas can't be built on yet). The user's own products in the first list are marked
+// theirs, so they can move them.
 export function productsFrom(buildable: unknown, mine: unknown = []): StudioProduct[] {
-  const out: StudioProduct[] = (Array.isArray(buildable) ? buildable : []).filter(isObj).map((p) => ({
-    id: str(p.id),
-    name: str(p.name) || str(p.id),
-    productLine: str(p.product_line),
-    ...(str(p.category) ? { category: str(p.category) } : {}),
-    by: str(p.by),
-    accessMode: str(p.access_mode),
-    jurisdictions: jurisdictionsOf(p),
-    status: "published",
-  }));
+  const out: StudioProduct[] = (Array.isArray(buildable) ? buildable : []).filter(isObj).map((p) => {
+    const stage = productStageOf({ stage: p.stage });
+    return {
+      id: str(p.id),
+      name: str(p.name) || str(p.id),
+      productLine: str(p.product_line),
+      ...(str(p.category) ? { category: str(p.category) } : {}),
+      by: str(p.by),
+      accessMode: str(p.access_mode),
+      jurisdictions: jurisdictionsOf(p),
+      status: stage === "production" ? ("published" as const) : ("draft" as const),
+      stage,
+    };
+  });
   for (const p of (Array.isArray(mine) ? mine : []).filter(isObj)) {
     const status = statusOf(p.status);
-    if (status === "published" || out.some((o) => o.id === p.id)) continue;
+    const stage = productStageOf(p);
+    const listed = out.find((o) => o.id === p.id);
+    if (listed) {
+      Object.assign(listed, { mine: true, stage, lastTestPassed: typeof p.last_test_passed === "boolean" ? p.last_test_passed : null });
+      continue;
+    }
+    // Their own in production that Mynt didn't list as buildable: not theirs to build on here.
+    if (stage === "production") continue;
     out.push({
       id: str(p.id),
       name: str(p.name) || str(p.id),
@@ -103,6 +124,7 @@ export function productsFrom(buildable: unknown, mine: unknown = []): StudioProd
       accessMode: "",
       jurisdictions: jurisdictionsOf(p),
       status,
+      stage,
       mine: true,
       lastTestPassed: typeof p.last_test_passed === "boolean" ? p.last_test_passed : null,
     });
@@ -110,9 +132,11 @@ export function productsFrom(buildable: unknown, mine: unknown = []): StudioProd
   return out;
 }
 
-export const isPickable = (p: Pick<StudioProduct, "status">) => (p.status ?? "published") === "published";
-export const NOT_PUBLISHED = "Publish this product before building on it.";
-export const STATUS_LABEL: Record<ProductStatus, string> = { published: "Published", draft: "Draft", unpublished: "Unpublished" };
+// A new app starts as an idea, building in the sandbox: products in production or staging can be picked.
+export const isPickable = (p: Pick<StudioProduct, "status" | "stage">) => (p.stage ?? productStageOf(p)) !== "idea";
+export const NOT_PUBLISHED = "Move this product to staging before building on it.";
+// A product's stage as one item's status, as an app's (lib/threads.ts APP_STATUS).
+export const STAGE_STATUS: Record<Stage, string> = { production: "Production", staging: "Staging", idea: "Idea" };
 
 // ---- Create product ----
 
@@ -161,9 +185,22 @@ export const NewProductRequest = z
   .refine((r) => r.action === "issuance" || r.underlying_product_ids.length > 0, { message: "Pick the products this one sells or repackages.", path: ["underlying_product_ids"] });
 export type NewProductRequest = z.infer<typeof NewProductRequest>;
 
-// Test or Publish (POST /api/products/<id>).
-export const ProductActionRequest = z.object({ action: z.enum(["test", "publish"]) }).strict();
-export type ProductAction = z.infer<typeof ProductActionRequest>["action"];
+// A product's stage actions (POST /api/products/<id>): Test (test_product), Move to staging or production
+// (promote_product), Move back (demote_product, with a reason), and Publish (publish_product) for older callers.
+export const ProductActionRequest = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("test") }).strict(),
+  z.object({ action: z.literal("publish") }).strict(),
+  z.object({ action: z.literal("promote"), to_stage: z.enum(["staging", "production"]) }).strict(),
+  z.object({ action: z.literal("demote"), to_stage: z.enum(["idea", "staging"]), reason: z.string().trim().min(3).max(1000) }).strict(),
+]);
+export type ProductActionRequest = z.infer<typeof ProductActionRequest>;
+export type ProductAction = ProductActionRequest["action"];
+
+// Where a product goes next, and back: one step at a time, as Mynt moves it.
+export const nextProductStage = (s: Stage): "staging" | "production" | null => (s === "idea" ? "staging" : s === "staging" ? "production" : null);
+export const previousProductStage = (s: Stage): "idea" | "staging" | null => (s === "production" ? "staging" : s === "staging" ? "idea" : null);
+// The labelled actions, as the Products tab's rows show them.
+export const MOVE_LABEL: Record<"staging" | "production", string> = { staging: "Move to staging", production: "Move to production" };
 
 // Mynt's regions and categories, for the sheet's choices (GET /api/products/options).
 export type Region = { code: string; name: string; regulators: string[] };
@@ -203,5 +240,11 @@ async function post<T>(fetcher: typeof fetch, url: string, body: unknown, fallba
 }
 export const createProduct = (request: NewProductRequest, fetcher: typeof fetch = fetch) =>
   post<{ product: StudioProduct }>(fetcher, "/api/products", request, "Couldn't create the product. Please try again.");
-export const runProductAction = (id: string, action: ProductAction, fetcher: typeof fetch = fetch) =>
-  post<{ passed?: boolean; message?: string; product?: StudioProduct }>(fetcher, `/api/products/${encodeURIComponent(id)}`, { action }, action === "test" ? "Couldn't test the product. Please try again." : "Couldn't publish the product. Please try again.");
+const FALLBACK: Record<ProductAction, string> = {
+  test: "Couldn't test the product. Please try again.",
+  publish: "Couldn't publish the product. Please try again.",
+  promote: "Couldn't move the product. Please try again.",
+  demote: "Couldn't move the product back. Please try again.",
+};
+export const runProductAction = (id: string, request: ProductActionRequest, fetcher: typeof fetch = fetch) =>
+  post<{ passed?: boolean; message?: string; stage?: Stage }>(fetcher, `/api/products/${encodeURIComponent(id)}`, request, FALLBACK[request.action]);

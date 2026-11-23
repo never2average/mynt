@@ -17,7 +17,7 @@ import { FiltersPopover } from "@/components/filter-controls"
 import { ListLayout, matches, usePaged } from "@/components/list-layout"
 import { downloadCsv } from "@/components/licences-view"
 import { dateOf, InvitationsTab, MembersTab, type MembersActions, type MembersData } from "@/components/members-view"
-import { StatusDot } from "@/components/promotion-view"
+import { StageMark, StatusDot } from "@/components/promotion-view"
 import { RepositoriesTab, type ReposState } from "@/components/repositories"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -70,16 +70,8 @@ export function TabSelector({ tab, onTab }: { tab: WorkspaceTab; onTab: (t: Work
 
 const STAGE_OPTIONS = STAGES.map((s) => ({ value: s, label: STAGE_LABELS[s] }))
 
-/** An app's stage as the dashboard shows status: a dot in words (Production green, Staging amber), Ideas as plain text. */
-export function StageMark({ stage }: { stage: Stage }) {
-  if (stage === "production") return <StatusDot tone="green" label={STAGE_LABELS[stage]} />
-  if (stage === "staging") return <StatusDot tone="amber" label={STAGE_LABELS[stage]} />
-  return (
-    <span className="text-xs font-medium text-muted-foreground" data-stage={stage}>
-      {STAGE_LABELS[stage]}
-    </span>
-  )
-}
+// An app's stage as the dashboard shows status (components/promotion-view.tsx, shared with products).
+export { StageMark }
 
 /** The Apps tab's key figures, counted from the apps Mynt listed. */
 export function appKpis(apps: WorkspaceApp[]): Kpi[] {
