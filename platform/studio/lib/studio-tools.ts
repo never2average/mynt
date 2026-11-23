@@ -63,7 +63,7 @@ export const STUDIO_TOOLS = {
   // An app's SDK tab: the integration kit of each product the app uses (reading only).
   get_product_sdk: z.object({ product_id: id }).strict(),
   // New app's Create product: a draft product (create_product's own fields; Mynt checks them again), then
-  // Test and Publish on its row. The user's own products (drafts too) and the regions and categories the
+  // its stage actions on its row (Test, Move to staging or production, Move back). The user's own products (drafts too) and the regions and categories the
   // sheet offers are read alongside.
   list_my_products: z.object({}).strict(),
   list_regions: z.object({}).strict(),

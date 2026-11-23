@@ -664,7 +664,7 @@ export function NewAppWorkspace({
       const id = sheetDraft.id
       setCreatedDrafts((c) => ({ ...c, [id]: p.id }))
       setSheetDraft(null)
-      // The new Draft, with its Test and Publish, in view.
+      // The new Idea, with its Move to staging, in view.
       setTab("products")
       setOpened(true)
     } else if (sheetIdea) {

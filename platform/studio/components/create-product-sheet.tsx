@@ -5,7 +5,7 @@
 // with the draft, every field editable). The id is derived from the name
 // until it's edited, and checked with create_product's own rule. Sale and repackaging name the
 // published products they build on. Key features, optional, wait under More. Creating makes a draft
-// (POST /api/products): it shows in the list as Draft, to Test and Publish from its row.
+// (POST /api/products): it shows in the list as an Idea, to move to staging from its row.
 import { ChevronDown } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 
