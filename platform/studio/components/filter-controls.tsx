@@ -202,10 +202,51 @@ const day = (s: string) => {
   return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : undefined
 }
 
-/** A date range on a calendar: click the first day, then the last (two months side by side). Days after today only with future (for due dates). */
-export function DateRangeFilter({ from, to, onChange, label = "Dates", clearable = true, future = false }: { from: string; to: string; onChange: (from: string, to: string) => void; label?: string; clearable?: boolean; future?: boolean }) {
+export type DatePreset = { id: string; label: string; from: string; to: string }
+
+/**
+ * The quick choices beside the calendar, as days (YYYY-MM-DD, inclusive). Weeks start on Monday.
+ * Past ranges for records (Today, Last 7 days, Last week, Last 30 days, Last month, This month,
+ * Year to date, This year, Last year); with future, ranges ahead for due dates (Today, This week,
+ * Next week, Next 30 days, This month, Next month, Rest of this year, This year).
+ */
+export function datePresets(now: Date = new Date(), future = false): DatePreset[] {
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const add = (d: Date, days: number) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + days)
+  const monday = add(today, -((today.getDay() + 6) % 7))
+  const y = today.getFullYear()
+  const m = today.getMonth()
+  const p = (id: string, label: string, f: Date, t: Date): DatePreset => ({ id, label, from: ymd(f), to: ymd(t) })
+  if (future)
+    return [
+      p("today", "Today", today, today),
+      p("this-week", "This week", monday, add(monday, 6)),
+      p("next-week", "Next week", add(monday, 7), add(monday, 13)),
+      p("next-30", "Next 30 days", today, add(today, 29)),
+      p("this-month", "This month", new Date(y, m, 1), new Date(y, m + 1, 0)),
+      p("next-month", "Next month", new Date(y, m + 1, 1), new Date(y, m + 2, 0)),
+      p("rest-of-year", "Rest of this year", today, new Date(y, 11, 31)),
+      p("this-year", "This year", new Date(y, 0, 1), new Date(y, 11, 31)),
+    ]
+  return [
+    p("today", "Today", today, today),
+    p("last-7", "Last 7 days", add(today, -6), today),
+    p("last-week", "Last week", add(monday, -7), add(monday, -1)),
+    p("last-30", "Last 30 days", add(today, -29), today),
+    p("last-month", "Last month", new Date(y, m - 1, 1), new Date(y, m, 0)),
+    p("this-month", "This month", new Date(y, m, 1), today),
+    p("ytd", "Year to date", new Date(y, 0, 1), today),
+    p("this-year", "This year", new Date(y, 0, 1), new Date(y, 11, 31)),
+    p("last-year", "Last year", new Date(y - 1, 0, 1), new Date(y - 1, 11, 31)),
+  ]
+}
+
+/** A date range: quick choices (Last week, Last month, Year to date…) beside a calendar where you click the first day, then the last (two months side by side). Days after today only with future (for due dates). */
+export function DateRangeFilter({ from, to, onChange, label = "Dates", clearable = true, future = false, now }: { from: string; to: string; onChange: (from: string, to: string) => void; label?: string; clearable?: boolean; future?: boolean; now?: Date }) {
   const active = Boolean(from || to)
-  const text = active ? `${from || "…"} – ${to || "…"}` : null
+  const presets = datePresets(now ?? new Date(), future)
+  const preset = active ? presets.find((x) => x.from === from && x.to === to) : undefined
+  const text = active ? (preset?.label ?? `${from || "…"} – ${to || "…"}`) : null
   const selected: DateRange | undefined = from || to ? { from: day(from), to: day(to) } : undefined
   return (
     <Popover>
@@ -217,7 +258,24 @@ export function DateRangeFilter({ from, to, onChange, label = "Dates", clearable
           <ChevronDown className="text-muted-foreground" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-auto p-0" data-filter-menu={label}>
+      <PopoverContent align="end" className="flex w-auto max-w-[calc(100vw-2rem)] flex-col p-0 sm:flex-row" data-filter-menu={label}>
+        <div role="group" aria-label="Quick ranges" className="flex gap-1 overflow-x-auto border-b p-2 sm:w-40 sm:flex-col sm:overflow-visible sm:border-r sm:border-b-0" data-date-presets>
+          {presets.map((x) => (
+            <Button
+              key={x.id}
+              type="button"
+              variant={preset?.id === x.id ? "secondary" : "ghost"}
+              size="sm"
+              className="shrink-0 justify-start font-normal"
+              aria-pressed={preset?.id === x.id}
+              data-date-preset={x.id}
+              onClick={() => onChange(x.from, x.to)}
+            >
+              {x.label}
+            </Button>
+          ))}
+        </div>
+        <div className="flex flex-col">
         <Calendar
           mode="range"
           numberOfMonths={2}
@@ -234,6 +292,7 @@ export function DateRangeFilter({ from, to, onChange, label = "Dates", clearable
             </Button>
           </div>
         )}
+        </div>
       </PopoverContent>
     </Popover>
   )
