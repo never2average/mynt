@@ -66,10 +66,10 @@ export const GET_STARTED: Record<Role, { tool: string; why: string }[]> = {
   ],
   vendor: [
     { tool: "get_my_entity", why: "your firm, as an admin registered it" },
+    { tool: "get_vendor_onboarding", why: "where your onboarding stands, step by step, and what to do next" },
     { tool: "list_service_types", why: "the standard services defined per region" },
     { tool: "create_vendor_offering", why: "offer one from your test endpoint" },
     { tool: "run_conformance", why: "let Mynt test your endpoint against the contract" },
-    { tool: "list_my_subscribers", why: "innovators subscribed to your offerings" },
   ],
   liquidity_provider: [
     { tool: "get_my_entity", why: "your firm, as an admin registered it" },

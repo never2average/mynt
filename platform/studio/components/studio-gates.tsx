@@ -22,6 +22,8 @@ export function pageGateFor(pathname: string, access: StudioAccess, needsWorkspa
   const investorPage = pathname === "/" || pathname === "/earn" || pathname.startsWith("/earn/") || pathname === "/liquidity"
   // A licence provider without the developer role answers apps' agreements on the Licences page's Agreements tab.
   if (!access.developer && access.licenceProvider && pathname === "/licences") return "none"
+  // A service provider's own area (My services) needs neither the developer role nor a workspace.
+  if (access.vendor && (pathname === "/vendor" || pathname.startsWith("/vendor/"))) return "none"
   if (!access.developer) return access.liquidity.liquidityProvider && investorPage ? "none" : "developer"
   // Everything but Earn needs a workspace (Earn's pools and positions are the user's own).
   if (needsWorkspace && pathname !== "/" && investorPage) return "none"
@@ -29,10 +31,17 @@ export function pageGateFor(pathname: string, access: StudioAccess, needsWorkspa
 }
 
 export function DeveloperGate() {
+  // A service provider without the developer role has its own area: point there.
+  const access = useStudioAccess()
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center" data-gate="developer">
       <h2 className="text-sm font-semibold">{FOR_DEVELOPERS}</h2>
       <p className="max-w-md text-sm text-muted-foreground">{ASK_FOR_ROLE}</p>
+      {access?.vendor && (
+        <Button asChild size="sm" className="mt-2" data-open-my-services>
+          <a href="/vendor">Open My services</a>
+        </Button>
+      )}
     </div>
   )
 }

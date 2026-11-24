@@ -155,3 +155,26 @@ describe("promotions, attention and workspace settings on the allow-list", () =>
     for (const t of ["unarchive_workspace", "relink_workspace_org"]) expect(parseStudioCall(t, { workspace_id: "w1" })).toHaveProperty("tool");
   });
 });
+
+describe("My services (service providers) on the allow-list", () => {
+  const OFF = "55555555-5555-4555-8555-555555555555";
+  const TERMS = { document_url: "https://example.com/terms.pdf", document_sha256: "a".repeat(64), summary: "Our standard terms.", pricing_summary: "$1 per check" };
+  it("reads the caller's own firm only, and writes services strictly: https endpoints, a SHA-256, no extra fields", () => {
+    expect(parseStudioCall("get_vendor_onboarding", {})).toHaveProperty("tool");
+    expect(parseStudioCall("get_vendor_onboarding", { offering_id: OFF })).toHaveProperty("tool");
+    expect(parseStudioCall("get_vendor_onboarding", { all_firms: true })).toHaveProperty("error");
+    expect(parseStudioCall("list_my_offerings", { entity_id: OFF })).toHaveProperty("error");
+    const create = { region: "US", service_type: "identity_verification", name: "ID", test_base_url: "https://test.example.com", price: { amount: 1, currency: "USD" } };
+    expect(parseStudioCall("create_vendor_offering", create)).toHaveProperty("tool");
+    expect(parseStudioCall("create_vendor_offering", { ...create, test_base_url: "http://test.example.com" })).toHaveProperty("error");
+    expect(parseStudioCall("create_vendor_offering", { ...create, standard_terms: TERMS })).toHaveProperty("error");
+    expect(parseStudioCall("update_vendor_offering", { offering_id: OFF, standard_terms: TERMS })).toHaveProperty("tool");
+    expect(parseStudioCall("update_vendor_offering", { offering_id: OFF, standard_terms: { ...TERMS, document_sha256: "A".repeat(64) } })).toHaveProperty("error");
+    expect(parseStudioCall("update_vendor_offering", { offering_id: OFF, standard_terms: { ...TERMS, version: 3 } })).toHaveProperty("error");
+    expect(parseStudioCall("update_vendor_offering", { offering_id: OFF, listed: true })).toHaveProperty("tool");
+    expect(parseStudioCall("update_vendor_offering", { offering_id: "x", listed: true })).toHaveProperty("error");
+    expect(parseStudioCall("run_conformance", { offering_id: OFF, test_credential: "c" })).toHaveProperty("tool");
+    // Subscribers' signing secrets stay with the MCP tools.
+    for (const t of ["reveal_subscription_secret", "rotate_subscription_secret", "suspend_vendor_offering", "define_service_type"]) expect(parseStudioCall(t, {})).toHaveProperty("error");
+  });
+});
