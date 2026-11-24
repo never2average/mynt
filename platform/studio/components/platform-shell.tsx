@@ -2,19 +2,19 @@
 
 // The platform admin's own layout (app/(platform)/layout.tsx), for Mynt's staff: not the studio's shell. A sidebar laid
 // out as the studio's (shadcn/ui's sidebar-07 block, MIT, collapsible to icons), titled "Mynt platform admin", listing
-// its nine sections, each its own page (/platform, /platform/workspaces, /platform/people, …, /platform/settings), with a labelled
-// Back to Studio link and the signed-in account at its foot (components/nav-user.tsx). No workspace switcher and no
-// app folders: everything here is across all workspaces and firms. Beside it, a sticky header with the section's
-// name, Back to Studio and the theme switcher; on the Overview, Invite person too (components/admin-people.tsx).
+// its eight sections, each its own page (/platform, /platform/workspaces, /platform/firms, …, /platform/settings), with
+// the labelled Back to Studio link and the signed-in account at its foot (components/nav-user.tsx). No workspace
+// switcher and no app folders: everything here is across all workspaces and firms. Beside it, a sticky header with the
+// section's name and the theme switcher (Back to Studio is the sidebar's, once); on the Overview, Invite person too
+// (components/admin-members.tsx).
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useEffect, useState } from "react"
-import { ArrowLeft, Building2, FileCheck2, Gauge, Globe2, Layers, Package, ShieldCheck, SlidersHorizontal, Store, Users } from "lucide-react"
+import { ArrowLeft, Building2, FileCheck2, Gauge, History, Layers, ShieldAlert, ShieldCheck, SlidersHorizontal, Store } from "lucide-react"
 
-import { InvitePersonButton } from "@/components/admin-people"
+import { InvitePersonButton } from "@/components/admin-members"
 import { NavUser } from "@/components/nav-user"
 import { ThemeSwitcher } from "@/components/theme-switcher"
-import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import {
   Sidebar,
@@ -39,12 +39,11 @@ type Account = { name: string | null; email: string | null }
 export const PLATFORM_SECTIONS: { tab: AdminTab; label: string; icon: typeof Gauge }[] = [
   { tab: "overview", label: "Overview", icon: Gauge },
   { tab: "workspaces", label: "Workspaces", icon: Layers },
-  { tab: "people", label: "People", icon: Users },
-  { tab: "apps", label: "Apps", icon: Globe2 },
-  { tab: "products", label: "Products", icon: Package },
   { tab: "firms", label: "Firms", icon: Building2 },
   { tab: "licences", label: "Licences", icon: FileCheck2 },
   { tab: "vendors", label: "Vendors", icon: Store },
+  { tab: "audit", label: "Audit trails", icon: History },
+  { tab: "risks", label: "Security & risk", icon: ShieldAlert },
   { tab: "settings", label: "Platform settings", icon: SlidersHorizontal },
 ]
 
@@ -65,7 +64,6 @@ export function PlatformSidebarView({ pathname, account, ...props }: { pathname:
                 </span>
                 <span className="grid flex-1 text-left text-sm leading-tight">
                   <span className="truncate font-medium">{PLATFORM_NAME}</span>
-                  <span className="truncate text-xs text-muted-foreground">All workspaces and firms</span>
                 </span>
               </Link>
             </SidebarMenuButton>
@@ -107,8 +105,8 @@ export function PlatformSidebarView({ pathname, account, ...props }: { pathname:
   )
 }
 
-// The header beside it: the sidebar's toggle, the section's name, then its actions (the Overview's Invite person),
-// Back to Studio and the theme switcher.
+// The header beside it: the sidebar's toggle, the section's name, then its actions (the Overview's Invite person) and
+// the theme switcher. No scope tag (everything here is across Mynt) and no second Back to Studio (the sidebar's foot has it).
 export function PlatformHeader({ title, actions = null }: { title: string; actions?: React.ReactNode }) {
   return (
     <header className="sticky top-0 z-20 flex h-(--header-height) shrink-0 items-center gap-2 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80" data-platform-header>
@@ -116,17 +114,8 @@ export function PlatformHeader({ title, actions = null }: { title: string; actio
         <SidebarTrigger />
         <Separator orientation="vertical" className="mx-2 data-[orientation=vertical]:h-4" />
         <h1 className="truncate text-base font-medium">{title}</h1>
-        <span className="ml-1 hidden shrink-0 rounded-md border px-2 py-0.5 text-xs text-muted-foreground sm:inline" data-header-scope>
-          All workspaces
-        </span>
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {actions}
-          <Button asChild variant="outline" size="sm">
-            <Link href="/" data-header-back-to-studio>
-              <ArrowLeft />
-              {BACK_TO_STUDIO}
-            </Link>
-          </Button>
           <ThemeSwitcher />
         </div>
       </div>

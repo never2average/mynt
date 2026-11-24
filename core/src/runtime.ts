@@ -118,6 +118,7 @@ export const FIRM_WEBHOOK_EVENTS = [
   "firm.member_added",
   "firm.member_pending",
   "firm.member_standing_lost",
+  "firm.member_removed",
   "firm.recovery_pending",
   "app_agreement.proposed",
   "app_agreement.signed",

@@ -105,20 +105,22 @@ describe("the platform admin's own layout", () => {
       </TooltipProvider>,
     )
 
-  it("its sidebar is titled Mynt platform admin and lists the nine sections, each its own address", () => {
+  it("its sidebar is titled Mynt platform admin and lists the eight sections, in order, each its own address", () => {
     const html = platformSidebar("/platform")
     expect(html).toContain(admin.PLATFORM_NAME)
     expect(PLATFORM_SECTIONS.map((s) => s.label)).toEqual(admin.ADMIN_TABS.map((t) => admin.ADMIN_TAB_LABELS[t]))
+    expect(PLATFORM_SECTIONS.map((s) => s.label)).toEqual(["Overview", "Workspaces", "Firms", "Licences", "Vendors", "Audit trails", "Security & risk", "Platform settings"])
+    // The title has no "All workspaces and firms" line under it any more.
+    expect(html).not.toContain("All workspaces")
     const hrefs = [...html.matchAll(/<a[^>]*data-platform-link="([a-z]+)"[^>]*>/g)].map((m) => [m[1], m[0].match(/href="([^"]+)"/)?.[1]])
     expect(Object.fromEntries(hrefs)).toEqual({
       overview: "/platform",
       workspaces: "/platform/workspaces",
-      people: "/platform/people",
-      apps: "/platform/apps",
-      products: "/platform/products",
       firms: "/platform/firms",
       licences: "/platform/licences",
       vendors: "/platform/vendors",
+      audit: "/platform/audit",
+      risks: "/platform/risks",
       settings: "/platform/settings",
     })
   })
@@ -143,15 +145,24 @@ describe("the platform admin's own layout", () => {
     expect(tag(platformSidebar(`/platform/firms/${FIRM}`), "overview")).toContain('data-active="false"')
   })
 
-  it("/platform renders its own shell: its sidebar and header, not the studio's", async () => {
+  it("/platform renders its own shell: its sidebar and header, not the studio's; the header has no scope tag and no Back to Studio", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ signedIn: true, name: "Ana Admin", email: "ana@example.com" }), { status: 200 })))
-    for (const [pathname, title] of [["/platform", "Mynt platform admin"], ["/platform/settings", "Platform settings"], [`/platform/apps/${FIRM}`, "Apps"]]) {
+    for (const [pathname, title] of [["/platform", "Mynt platform admin"], ["/platform/settings", "Platform settings"], ["/platform/audit", "Audit trails"], [`/platform/audit/${FIRM}`, "Audit trails"], ["/platform/risks", "Security & risk"]]) {
       nav.pathname = pathname
       render(<PlatformShell><p data-page>Page</p></PlatformShell>)
       await act(async () => undefined)
       expect(document.querySelector("[data-platform-sidebar]")).not.toBeNull()
       expect(document.querySelector("[data-platform-header] h1")!.textContent).toBe(title)
-      expect(document.querySelector("[data-header-back-to-studio]")!.textContent).toContain(BACK_TO_STUDIO)
+      const header = document.querySelector("[data-platform-header]")!
+      expect(header.querySelector("[data-header-back-to-studio]")).toBeNull()
+      expect(header.querySelector("[data-header-scope]")).toBeNull()
+      expect(header.textContent).not.toContain(BACK_TO_STUDIO)
+      expect(header.textContent).not.toContain("All workspaces")
+      // Back to Studio is the sidebar foot's, once.
+      expect(document.querySelectorAll("[data-back-to-studio]")).toHaveLength(1)
+      expect(document.querySelector("[data-back-to-studio]")!.textContent).toContain(BACK_TO_STUDIO)
+      // The Overview's header keeps Invite person.
+      expect(Boolean(header.querySelector("[data-header-invite-person]"))).toBe(pathname === "/platform")
       expect(document.querySelector("[data-page]")).not.toBeNull()
       expect(document.querySelector("[data-site-header]")).toBeNull()
       expect(document.querySelector("[data-folder]")).toBeNull()
@@ -170,7 +181,12 @@ describe("addresses", () => {
     expect(admin.platformRouteOf("/platform")).toEqual({ tab: "overview", id: null })
     expect(admin.platformRouteOf("/platform/vendors")).toEqual({ tab: "vendors", id: null })
     expect(admin.platformRouteOf(`/platform/workspaces/${FIRM}`)).toEqual({ tab: "workspaces", id: FIRM })
-    for (const p of ["/platform/nope", "/platform/overview", `/platform/products/${FIRM}`, "/platform/firms/a%2Fb", `/platform/firms/${FIRM}/more`, "/platforms", "/admin"]) expect(admin.platformRouteOf(p), p).toBeNull()
+    expect(admin.platformRouteOf(`/platform/audit/${FIRM}`)).toEqual({ tab: "audit", id: FIRM })
+    expect(admin.platformRouteOf("/platform/risks")).toEqual({ tab: "risks", id: null })
+    // Apps, People and Products are no longer sections: their pages and details aren't platform admin pages (404).
+    for (const p of ["/platform/apps", `/platform/apps/${FIRM}`, "/platform/people", `/platform/people/${FIRM}`, "/platform/products", `/platform/products/${FIRM}`, `/platform/risks/${FIRM}`])
+      expect(admin.platformRouteOf(p), p).toBeNull()
+    for (const p of ["/platform/nope", "/platform/overview", "/platform/firms/a%2Fb", `/platform/firms/${FIRM}/more`, "/platforms", "/admin"]) expect(admin.platformRouteOf(p), p).toBeNull()
     expect(admin.platformTitle("/platform")).toBe("Mynt platform admin")
     expect(admin.platformTitle(`/platform/firms/${FIRM}`)).toBe("Firms")
   })
@@ -185,11 +201,14 @@ describe("addresses", () => {
     expect(to("/admin?tab=settings")).toBe("/platform/settings")
     expect(to("/admin?tab=licences")).toBe("/platform/licences")
     expect(to(`/admin?tab=firms&id=${FIRM}`)).toBe(`/platform/firms/${FIRM}`)
-    expect(to(`/admin?tab=apps&id=${FIRM}`)).toBe(`/platform/apps/${FIRM}`)
+    expect(to(`/admin?tab=apps&id=${FIRM}`)).toBe("/platform") // Apps, People and Products are no longer sections
+    expect(to("/admin?tab=apps")).toBe("/platform")
+    expect(to(`/admin?tab=people&id=e616e61`)).toBe("/platform")
+    expect(to("/admin?tab=products")).toBe("/platform")
     expect(to(`/admin?tab=workspaces&id=${FIRM}`)).toBe(`/platform/workspaces/${FIRM}`)
     expect(to("/admin?tab=nope")).toBe("/platform")
     expect(to("/admin?tab=firms&id=..%2Fx")).toBe("/platform/firms") // an id that isn't one is dropped
-    expect(to(`/admin?tab=products&id=${FIRM}`)).toBe("/platform/products") // Products has no detail page
+    expect(to(`/admin?tab=licences&id=${FIRM}`)).toBe("/platform/licences") // Licences has no detail page
     expect(to("/settings?tab=esign")).toBe("/platform/settings")
     for (const p of ["/settings", "/settings?tab=members", "/administer", "/platform", "/"]) expect(to(p), p).toBeNull()
   })
@@ -235,6 +254,10 @@ describe("addresses", () => {
     expect(found).toContain("/platform")
     expect(found.every((h) => h.startsWith("/platform"))).toBe(true)
     expect(searchStudio(searchIndex({ admin: true }), "esign").map((h) => h.href)).toContain("/platform/settings")
+    expect(found).toEqual(["/platform", "/platform/workspaces", "/platform/firms", "/platform/licences", "/platform/vendors", "/platform/audit", "/platform/risks", "/platform/settings"].filter((h) => found.includes(h)))
+    for (const gone of ["/platform/apps", "/platform/people", "/platform/products"]) expect(searchIndex({ admin: true }).some((i) => i.href === gone)).toBe(false)
+    expect(searchStudio(searchIndex({ admin: true }), "audit trails").map((h) => h.href)).toContain("/platform/audit")
+    expect(searchStudio(searchIndex({ admin: true }), "security risk").map((h) => h.href)).toContain("/platform/risks")
     expect(searchIndex({ admin: false }).some((i) => i.href.startsWith("/platform") || i.href.startsWith("/admin"))).toBe(false)
   })
 })

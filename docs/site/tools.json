@@ -16,7 +16,7 @@
       "id": "apps",
       "title": "Apps & developers",
       "summary": "Register apps, read a product's developer contract, make an app's agreements with the firms behind its products and run their oversight audits, keep apps' and products' risk registers, and start from app kinds and ideas.",
-      "tools": 48
+      "tools": 49
     },
     {
       "id": "builds",
@@ -46,7 +46,7 @@
       "id": "workspaces",
       "title": "Workspaces",
       "summary": "Workspaces, their members and invitations, stages and promotion, and what needs attention.",
-      "tools": 31
+      "tools": 35
     },
     {
       "id": "growth",
@@ -88,7 +88,7 @@
       "id": "admin",
       "title": "Admin & governance",
       "summary": "Regions and the regulatory model, categories, take rates, invitations, oversight and operations.",
-      "tools": 44
+      "tools": 45
     }
   ],
   "roles": [
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
-      "tools": 392,
+      "tools": 398,
       "get_started": [
         {
           "tool": "define_region",
@@ -731,7 +731,7 @@
     {
       "name": "add_risk",
       "title": "Add a risk to a register",
-      "description": "Add a risk to an app's or a financial product's risk register: the app's workspace owners and admins, or the product's own firm. Give a title, a category (security, fraud, vendor, conduct, operational, compliance, credit, liquidity, other), how likely it is and how bad it would be (1-5 each; the score is their product: 1-4 low, 5-9 medium, 10-14 high, 15-25 critical), and optionally a description, the mitigation, its owner (a member of the app's workspace or the product's firm; you by default) and the date it's next reviewed by. It starts open. Audited.",
+      "description": "Add a risk to an app's or a financial product's risk register (the app's workspace owners and admins, or the product's own firm), or, for Mynt's admins, to the platform's own (subject_type platform, subject_id mynt). Give a title, a category (security, fraud, vendor, conduct, operational, compliance, credit, liquidity, other), how likely it is and how bad it would be (1-5 each; the score is their product: 1-4 low, 5-9 medium, 10-14 high, 15-25 critical), and optionally a description, the mitigation, its owner (a member of the app's workspace or the product's firm, a Mynt admin for the platform's; you by default) and the date it's next reviewed by. It starts open. Audited.",
       "area": "apps",
       "roles": [
         "developer",
@@ -747,14 +747,15 @@
             "type": "string",
             "enum": [
               "app",
-              "product"
+              "product",
+              "platform"
             ]
           },
           "subject_id": {
             "type": "string",
             "minLength": 1,
             "maxLength": 200,
-            "description": "The app's id, or the product's id"
+            "description": "The app's id, the product's id, or mynt for the platform's register"
           },
           "title": {
             "type": "string",
@@ -815,6 +816,42 @@
       }
     },
     {
+      "name": "admin_change_workspace_member_role",
+      "title": "Change a member's role in any workspace",
+      "description": "Admin: change a member's role in any workspace (owner, admin or member), as change_member_role does for its owners: the organization agrees first, a workspace always keeps an owner, and a demotion to member cuts their elevated access.",
+      "area": "workspaces",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ]
+          }
+        },
+        "required": [
+          "workspace_id",
+          "user_id",
+          "role"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "admin_get_app",
       "title": "One app, as an admin sees it",
       "description": "Admin: one app with its workspace, owner, stage, products (with names), its latest coding-agent builds (status, goal, cost, when; never a preview link) and its hosting on Mynt (status, runtime, last error), if any.",
@@ -865,6 +902,83 @@
       }
     },
     {
+      "name": "admin_invite_workspace_member",
+      "title": "Invite someone to any workspace",
+      "description": "Admin: invite an email address to any workspace, with an owner's authority (role owner, admin or member; mynt_role developer or user), by the same rules and path as invite_to_workspace: the workspace's organization in the identity provider sends its invitation, a frozen workspace refuses, and they accept it themselves. Audited with by_admin.",
+      "area": "workspaces",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+          },
+          "role": {
+            "default": "member",
+            "type": "string",
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ]
+          },
+          "mynt_role": {
+            "default": "developer",
+            "type": "string",
+            "enum": [
+              "developer",
+              "user"
+            ]
+          }
+        },
+        "required": [
+          "workspace_id",
+          "email"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "admin_list_risks",
+      "title": "Open risks across Mynt",
+      "description": "Admin: the risks not yet closed on every register (apps', products' and the platform's own), or one kind (subject_type): counts by level (critical, high, medium, low), how many are overdue for review, the total, and the highest-scored risks (score, then the earliest review date), each with its subject's name.",
+      "area": "apps",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "default": 20,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "subject_type": {
+            "type": "string",
+            "enum": [
+              "app",
+              "product",
+              "platform"
+            ]
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "admin_pause_campaign",
       "title": "Pause any campaign",
       "description": "Admin: take any live campaign down now (e.g. a compliance issue). Its developer can fix and relaunch it.",
@@ -888,6 +1002,56 @@
         "required": [
           "campaign_id",
           "reason"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "admin_remove_workspace_member",
+      "title": "Remove someone from any workspace",
+      "description": "Admin: remove a member from any workspace, as remove_workspace_member does for its owners: never its last owner; they leave its organization and lose access to its apps and builds at once.",
+      "area": "workspaces",
+      "roles": [
+        "admin"
+      ],
+      "access": "destructive",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "user_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "admin_revoke_workspace_invite",
+      "title": "Withdraw any workspace invite",
+      "description": "Admin: withdraw an open invite to any workspace (admin_get_workspace lists them), as revoke_workspace_invite does for its owners.",
+      "area": "workspaces",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "invite_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "invite_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -1781,7 +1945,7 @@
     {
       "name": "audit_log",
       "title": "Audit log",
-      "description": "Admin: recent admin actions, newest first, with who did them.",
+      "description": "Admin: recent admin actions, newest first, with who did them and each action's class (security, financial, obligations or workspace).",
       "area": "admin",
       "roles": [
         "admin"
@@ -3382,6 +3546,7 @@
                 "firm.member_added",
                 "firm.member_pending",
                 "firm.member_standing_lost",
+                "firm.member_removed",
                 "firm.recovery_pending",
                 "app_agreement.proposed",
                 "app_agreement.signed",
@@ -10900,7 +11065,7 @@
     {
       "name": "list_risks",
       "title": "A risk register",
-      "description": "An app's or a financial product's risk register: each risk with its category, likelihood × impact score and level, owner, mitigation, status, review-by date and whether that review is overdue, newest first, with counts by status. Any member of the app's workspace reads an app's; the product's own firm, and the licence providers sponsoring it (read-only), read a product's. can_manage says whether you may add and review risks. Filter by status, category or overdue_only. With risk_id: that one risk and its history (every change, from the audit trail). For an app, signals lists what Mynt measures around it, each a list or not available with why: fraud, vendors (failing conformance, erroring calls, ended subscriptions or contracts), conduct (open findings from marketing and complaints audits of its agreements) and products (sales paused by a covenant, or drifted).",
+      "description": "An app's or a financial product's risk register: each risk with its category, likelihood × impact score and level, owner, mitigation, status, review-by date and whether that review is overdue, newest first, with counts by status. Any member of the app's workspace reads an app's; the product's own firm, and the licence providers sponsoring it (read-only), read a product's; Mynt's admins read and keep the platform's (subject_type platform, subject_id mynt). can_manage says whether you may add and review risks. Filter by status, category or overdue_only. With risk_id: that one risk and its history (every change, from the audit trail). For an app, signals lists what Mynt measures around it, each a list or not available with why: fraud, vendors (failing conformance, erroring calls, ended subscriptions or contracts), conduct (open findings from marketing and complaints audits of its agreements) and products (sales paused by a covenant, or drifted).",
       "area": "apps",
       "roles": [
         "developer",
@@ -10917,7 +11082,8 @@
             "type": "string",
             "enum": [
               "app",
-              "product"
+              "product",
+              "platform"
             ]
           },
           "subject_id": {
@@ -12778,6 +12944,35 @@
         },
         "required": [
           "app_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "remove_entity_member",
+      "title": "Take someone out of a firm",
+      "description": "Admin: take a member out of a firm. They no longer act for it; a licence provider's standing there ends (told as firm.member_standing_lost). Their sign-in and roles are untouched (invite_user changes roles, revoke_user stops sign-in). The firm's members are told, on its webhooks (firm.member_removed) and as a notice each.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "destructive",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "entity_id": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "pattern": "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+          }
+        },
+        "required": [
+          "entity_id",
+          "email"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }

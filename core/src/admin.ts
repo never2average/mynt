@@ -46,6 +46,7 @@ import type { SolanaService } from "./solana/service.js";
 import type { MainnetGateService } from "./solana/mainnet-gate.js";
 import type { ProductHealthService } from "./product-health.js";
 import { auditForAdmin, type CovenantService } from "./covenants.js";
+import { auditClass } from "./audit-classes.js";
 import type { TreasuryService } from "./treasury.js";
 import type { ConfidentialHost } from "./confidential/host.js";
 import type { ConfidentialReleases } from "./confidential/governance.js";
@@ -464,6 +465,28 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
   );
 
   server.registerTool(
+    "remove_entity_member",
+    {
+      title: "Take someone out of a firm",
+      description:
+        "Admin: take a member out of a firm. They no longer act for it; a licence provider's standing there ends (told as firm.member_standing_lost). Their sign-in and roles are untouched (invite_user changes roles, revoke_user stops sign-in). The firm's members are told, on its webhooks (firm.member_removed) and as a notice each.",
+      inputSchema: { entity_id: z.string(), email: z.string().email() },
+      annotations: { destructiveHint: true },
+    },
+    async ({ entity_id, email }) => {
+      const entity = await store.getEntity(entity_id);
+      if (!entity) return fail(`No firm '${entity_id}'`);
+      const member = await store.userByEmail(email);
+      if (!member || member.entity_id !== entity.id) return fail(`${email.toLowerCase()} isn't a member of ${entity.name}`);
+      // Out first (ending any licence-provider standing, recorded and told by setUserEntity), then the firm is told.
+      await store.setUserEntity(member.id, null, "removed_by_admin");
+      const told = await noticeFirm(store, entity.id, "firm.member_removed", { member_email: member.email, removed_at: new Date().toISOString(), by: "admin" });
+      await audit("remove_entity_member", entity.id, { email: member.email });
+      return json({ entity_id: entity.id, entity: entity.name, removed: member.email, firm_told: told });
+    },
+  );
+
+  server.registerTool(
     "recover_firm_member",
     {
       title: "Recover a firm's licence provider nobody there can accept",
@@ -703,10 +726,10 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
     "audit_log",
     {
       title: "Audit log",
-      description: "Admin: recent admin actions, newest first, with who did them.",
+      description: "Admin: recent admin actions, newest first, with who did them and each action's class (security, financial, obligations or workspace).",
       inputSchema: { limit: z.number().int().min(1).max(500).default(100) },
       annotations: { readOnlyHint: true },
     },
-    async ({ limit }) => json((await store.auditLog(limit)).map(auditForAdmin)),
+    async ({ limit }) => json((await store.auditLog(limit)).map((e) => ({ ...auditForAdmin(e), class: auditClass(e.action) }))),
   );
 }

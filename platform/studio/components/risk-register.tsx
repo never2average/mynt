@@ -32,8 +32,10 @@ const SCORES = [1, 2, 3, 4, 5]
 const LIKELIHOOD_WORDS = ["", "Rare", "Unlikely", "Possible", "Likely", "Almost certain"]
 const IMPACT_WORDS = ["", "Negligible", "Minor", "Moderate", "Major", "Severe"]
 
-export type RiskSubject = { type: "app" | "product"; id: string }
-const routeOf = (s: RiskSubject) => (s.type === "app" ? `/api/apps/${encodeURIComponent(s.id)}/risks` : `/api/products/${encodeURIComponent(s.id)}/risks`)
+// Mynt's own register (platform) is the platform admin's (/platform/risks), kept and read by Mynt admins only.
+export type RiskSubject = { type: "app" | "product" | "platform"; id: string }
+const routeOf = (s: RiskSubject) =>
+  s.type === "platform" ? "/api/admin/risks" : s.type === "app" ? `/api/apps/${encodeURIComponent(s.id)}/risks` : `/api/products/${encodeURIComponent(s.id)}/risks`
 
 type Result = { ok: true; message: string } | { ok: false; message: string }
 async function post(url: string, body: unknown, fetcher: typeof fetch): Promise<Result> {
@@ -78,7 +80,7 @@ export function RiskRegisterSection({ subject, data, onChanged, fetcher }: { sub
         <>
           {!data.canManage && (
             <p className="text-xs text-muted-foreground" data-risk-read-only>
-              {subject.type === "app" ? "Read-only: the workspace's owners and admins keep this register." : "Read-only: the product's own firm keeps this register."}
+              {subject.type === "app" ? "Read-only: the workspace's owners and admins keep this register." : subject.type === "platform" ? "Read-only: Mynt's admins keep this register." : "Read-only: the product's own firm keeps this register."}
             </p>
           )}
           {data.overdue > 0 && (
@@ -412,7 +414,7 @@ export function AddRiskSheet({ subject, owners, open, onClose, onDone, fetcher =
         <SheetHeader>
           <SheetTitle>Add risk</SheetTitle>
           <SheetDescription>
-            A risk on {subject.type === "app" ? "this app's" : "this product's"} register: what could go wrong, how likely it is and how bad it would be (1 to 5 each), who owns it and when it&apos;s next reviewed. Recorded in the audit trail.
+            A risk on {subject.type === "app" ? "this app's" : subject.type === "platform" ? "Mynt's own" : "this product's"} register: what could go wrong, how likely it is and how bad it would be (1 to 5 each), who owns it and when it&apos;s next reviewed. Recorded in the audit trail.
           </SheetDescription>
         </SheetHeader>
         <div className="px-4 pb-6">

@@ -2,34 +2,32 @@
 // answers. Every list is platform-wide (all workspaces, all firms), never scoped to a workspace picked in the studio. Pure, for
 // the routes, the views and the tests. A figure Mynt didn't measure is null here and "Not measured" on screen, never 0.
 
-import { PERSON_ID } from "./people"
-
-export const ADMIN_TABS = ["overview", "workspaces", "people", "apps", "products", "firms", "licences", "vendors", "settings"] as const
+export const ADMIN_TABS = ["overview", "workspaces", "firms", "licences", "vendors", "audit", "risks", "settings"] as const
 export type AdminTab = (typeof ADMIN_TABS)[number]
 export const ADMIN_TAB_LABELS: Record<AdminTab, string> = {
   overview: "Overview",
   workspaces: "Workspaces",
-  people: "People",
-  apps: "Apps",
-  products: "Products",
   firms: "Firms",
   licences: "Licences",
   vendors: "Vendors",
+  audit: "Audit trails",
+  risks: "Security & risk",
   settings: "Platform settings",
 }
+// A section that isn't one (an old address's apps, people or products, which the platform admin no longer has) is the Overview.
 export const adminTabOf = (v: unknown): AdminTab => (ADMIN_TABS.includes(v as AdminTab) ? (v as AdminTab) : "overview")
 
 // Where it lives: its own base path and layout (app/(platform)), never inside the studio's shell. Overview is
-// /platform, each other section /platform/<section>, and a row opened in Workspaces, Apps or Firms
-// /platform/<section>/<id>. A person's id is their account's or their email's (lib/people.ts).
+// /platform, each other section /platform/<section>, and a row opened in Workspaces, Firms or Audit trails
+// /platform/<section>/<id>. People are each firm's and each workspace's Members, not a section of their own.
 export const PLATFORM_BASE = "/platform"
 export const PLATFORM_NAME = "Mynt platform admin"
 // The sections whose rows open a detail page.
-export const ADMIN_DETAIL_TABS: readonly AdminTab[] = ["workspaces", "people", "apps", "firms"]
+export const ADMIN_DETAIL_TABS: readonly AdminTab[] = ["workspaces", "firms", "audit"]
 // An id in the address: letters, digits and dashes (Mynt's uuids), nothing that could leave the path.
 export const ADMIN_ID = /^[A-Za-z0-9-]{1,100}$/
 /** Whether an id may be opened in a section: a detail section, and an id of its kind. */
-export const adminIdOk = (tab: AdminTab, id: string) => ADMIN_DETAIL_TABS.includes(tab) && (tab === "people" ? PERSON_ID.test(id) : ADMIN_ID.test(id))
+export const adminIdOk = (tab: AdminTab, id: string) => ADMIN_DETAIL_TABS.includes(tab) && ADMIN_ID.test(id)
 export const adminHref = (tab: AdminTab, id?: string) =>
   tab === "overview" ? PLATFORM_BASE : `${PLATFORM_BASE}/${tab}${id ? `/${encodeURIComponent(id)}` : ""}`
 export const isPlatformPath = (pathname: string) => pathname === PLATFORM_BASE || pathname.startsWith(`${PLATFORM_BASE}/`)
@@ -203,7 +201,7 @@ export function settingsFrom(reply: unknown): PlatformSetting[] | null {
   }))
 }
 
-// ---- Workspaces, apps and products across Mynt (list_all_workspaces, list_all_apps, list_all_products) ----
+// ---- Workspaces and products across Mynt (list_all_workspaces, list_all_products; a workspace's apps from admin_get_workspace) ----
 
 export type Person = { id: string; name: string | null; email: string | null }
 const person = (v: unknown): Person | null => (isObj(v) && str(v.id) ? { id: String(v.id), name: str(v.name), email: str(v.email) } : null)
@@ -257,11 +255,6 @@ const appOf = (a: Obj): AdminApp => {
     createdAt: str(a.created_at),
   }
 }
-export function appsFrom(reply: unknown): Paged<AdminApp> | null {
-  if (!isObj(reply) || !Array.isArray(reply.apps)) return null
-  return { rows: reply.apps.filter(isObj).map(appOf), total: num(reply.total) ?? reply.apps.length }
-}
-
 export type WorkspaceMember = { userId: string; name: string | null; email: string | null; role: string; joinedAt: string | null }
 export type WorkspaceInvitation = { id: string; email: string; role: string; myntRole: string; status: string; invitedBy: string | null; createdAt: string | null }
 export type ActivityEvent = { id: string; action: string; target: string; actor: string | null; createdAt: string | null }
@@ -277,26 +270,6 @@ export function workspaceDetailFrom(reply: unknown): WorkspaceDetail | null {
       .filter(isObj)
       .map((i) => ({ id: String(i.id), email: String(i.email ?? ""), role: String(i.role ?? "member"), myntRole: String(i.mynt_role ?? "developer"), status: String(i.status ?? "open"), invitedBy: str(i.invited_by), createdAt: str(i.created_at) })),
     activity: arr(reply.activity).filter(isObj).map(activityOf),
-  }
-}
-
-export type AppBuildRow = { id: string; status: string; goal: string; costUsd: number | null; createdAt: string | null; finishedAt: string | null; error: string | null }
-export type AppDetail = {
-  app: AdminApp
-  products: { id: string; name: string | null }[]
-  builds: AppBuildRow[] | null // null: this Mynt runs no coding agents
-  hosting: { status: string; runtime: string | null; error: string | null; updatedAt: string | null } | null
-}
-export function appDetailFrom(reply: unknown): AppDetail | null {
-  if (!isObj(reply) || !isObj(reply["app"])) return null
-  const h = isObj(reply.hosting) ? reply.hosting : null
-  return {
-    app: appOf(reply["app"]),
-    products: arr(reply["app"].products).filter(isObj).map((p) => ({ id: String(p.id), name: str(p.name) })),
-    builds: Array.isArray(reply.builds)
-      ? reply.builds.filter(isObj).map((b) => ({ id: String(b.id), status: String(b.status), goal: String(b.goal ?? ""), costUsd: num(b.cost_usd), createdAt: str(b.created_at), finishedAt: str(b.finished_at), error: str(b.error) }))
-      : null,
-    hosting: h ? { status: String(h.status), runtime: str(h.runtime), error: str(h.error), updatedAt: str(h.updated_at) } : null,
   }
 }
 
@@ -477,19 +450,6 @@ export function vendorFirmsFrom(reply: unknown): VendorFirmRow[] | null {
 export const onboardingWords = (f: VendorFirmRow) => (f.done === null || f.total === null ? "Not known" : f.complete ? `All ${f.total} steps done` : `${f.done} of ${f.total} steps done`)
 
 export const conformanceWords = (c: AdminOffering["conformance"]) => (c ? `${c.passed ? "Passed" : "Failed"}${c.at ? ` ${dateOf(c.at)}` : ""}` : "Not run yet")
-
-// ---- remove_app's answer (a dry run, a refusal, or done) ----
-
-export type Removal = { kind: "plan"; rows: [string, number][]; builds: number; programs: number } | { kind: "refused"; reasons: string[] } | { kind: "removed" }
-export function removalFrom(reply: unknown): Removal | null {
-  if (!isObj(reply)) return null
-  if (Array.isArray(reply.refused)) return { kind: "refused", reasons: strs(reply.refused) }
-  if (reply.removed === true) return { kind: "removed" }
-  const w = isObj(reply.would_remove) ? reply.would_remove : null
-  if (!w) return null
-  const rows = isObj(w.rows) ? Object.entries(w.rows).map(([t, n]) => [t, num(n) ?? 0] as [string, number]) : []
-  return { kind: "plan", rows, builds: count(w.builds), programs: count(w.programs) }
-}
 
 // ---- CSV export ----
 
