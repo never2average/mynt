@@ -13,11 +13,15 @@ import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import {
+  RISK_AREA_LABELS,
+  RISK_AREA_OF_CATEGORY,
+  RISK_AREAS,
   RISK_CATEGORIES,
   RISK_CATEGORY_LABELS,
   RISK_STATUS_LABELS,
   RISK_STATUSES,
   scoreText,
+  type RiskArea,
   type RiskCategory,
   type RiskChange,
   type RiskRegister,
@@ -32,7 +36,8 @@ const SCORES = [1, 2, 3, 4, 5]
 const LIKELIHOOD_WORDS = ["", "Rare", "Unlikely", "Possible", "Likely", "Almost certain"]
 const IMPACT_WORDS = ["", "Negligible", "Minor", "Moderate", "Major", "Severe"]
 
-// Mynt's own register (platform) is the platform admin's (/platform/risks), kept and read by Mynt admins only.
+// Mynt's own register (platform) is the platform admin's Risk register (/platform/risk-register), one risk area per
+// tab, kept and read by Mynt admins only: its sheets also pick the risk's area (Add risk starts on the tab's).
 export type RiskSubject = { type: "app" | "product" | "platform"; id: string }
 const routeOf = (s: RiskSubject) =>
   s.type === "platform" ? "/api/admin/risks" : s.type === "app" ? `/api/apps/${encodeURIComponent(s.id)}/risks` : `/api/products/${encodeURIComponent(s.id)}/risks`
@@ -57,8 +62,26 @@ function NotAvailable({ reason }: { reason: string }) {
 const statusText = (r: RiskRow) => RISK_STATUS_LABELS[r.status]
 const reviewText = (r: RiskRow) => (r.reviewBy ? `${r.reviewBy}${r.overdue ? " (overdue)" : ""}` : "Not set")
 
-/** The register's table, its Add risk action and each row's Review risk, with their sheets. */
-export function RiskRegisterSection({ subject, data, onChanged, fetcher }: { subject: RiskSubject; data: RiskRegister | Unavailable; onChanged?: () => void; fetcher?: typeof fetch }) {
+/** The register's table, its Add risk action and each row's Review risk, with their sheets. With area (Mynt's own
+ * register, one risk area per tab), the sheets pick the risk's area too, Add risk starting on that one; filters sits
+ * between the heading and the table (the tab's filter chips). */
+export function RiskRegisterSection({
+  subject,
+  data,
+  onChanged,
+  fetcher,
+  area,
+  title = "Risk register",
+  filters = null,
+}: {
+  subject: RiskSubject
+  data: RiskRegister | Unavailable
+  onChanged?: () => void
+  fetcher?: typeof fetch
+  area?: RiskArea
+  title?: string
+  filters?: React.ReactNode
+}) {
   const [adding, setAdding] = useState(false)
   const [reviewing, setReviewing] = useState<RiskRow | null>(null)
   const manage = data.available && data.canManage
@@ -66,7 +89,7 @@ export function RiskRegisterSection({ subject, data, onChanged, fetcher }: { sub
     <section className="flex min-w-0 flex-col gap-2" data-risk-register={subject.type} aria-labelledby={`risk-register-${subject.type}`}>
       <div className="flex items-center justify-between gap-2">
         <h2 id={`risk-register-${subject.type}`} className="text-sm font-semibold">
-          Risk register
+          {title}
         </h2>
         {manage && (
           <Button size="sm" variant="outline" onClick={() => setAdding(true)} data-add-risk>
@@ -74,6 +97,7 @@ export function RiskRegisterSection({ subject, data, onChanged, fetcher }: { sub
           </Button>
         )}
       </div>
+      {filters}
       {!data.available ? (
         <NotAvailable reason={data.reason} />
       ) : (
@@ -139,8 +163,8 @@ export function RiskRegisterSection({ subject, data, onChanged, fetcher }: { sub
       )}
       {manage && data.available && (
         <>
-          <AddRiskSheet subject={subject} owners={data.owners} open={adding} onClose={() => setAdding(false)} onDone={() => onChanged?.()} fetcher={fetcher} />
-          <ReviewRiskSheet subject={subject} risk={reviewing} owners={data.owners} onClose={() => setReviewing(null)} onDone={() => onChanged?.()} fetcher={fetcher} />
+          <AddRiskSheet subject={subject} owners={data.owners} open={adding} onClose={() => setAdding(false)} onDone={() => onChanged?.()} fetcher={fetcher} area={area} />
+          <ReviewRiskSheet subject={subject} risk={reviewing} owners={data.owners} onClose={() => setReviewing(null)} onDone={() => onChanged?.()} fetcher={fetcher} withArea={area !== undefined} />
         </>
       )}
     </section>
@@ -247,9 +271,47 @@ function Outcome({ busy, error, result, submitLabel, busyLabel, disabled, name }
   )
 }
 
-export function AddRiskView({ owners, busy = false, error = null, result = null, onSubmit }: { owners: { userId: string; name: string }[]; busy?: boolean; error?: string | null; result?: string | null; onSubmit: (c: Extract<RiskChange, { action: "add" }>) => void }) {
+function AreaSelect({ value, onChange, unassigned }: { value: RiskArea | ""; onChange: (a: RiskArea) => void; unassigned?: boolean }) {
+  return (
+    <label className="flex flex-col gap-1 text-sm">
+      Risk area
+      <select className={field} value={value} onChange={(e) => onChange(e.target.value as RiskArea)} required data-risk-field="risk_area">
+        {unassigned && (
+          <option value="" disabled>
+            Unassigned: pick one
+          </option>
+        )}
+        {RISK_AREAS.map((a) => (
+          <option key={a} value={a}>
+            {RISK_AREA_LABELS[a]}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+// The first category that falls under an area, so Add risk on a tab starts on a category that belongs there.
+const categoryFor = (area: RiskArea | undefined): RiskCategory => (area ? (RISK_CATEGORIES.find((c) => RISK_AREA_OF_CATEGORY[c] === area) ?? "other") : "security")
+
+export function AddRiskView({
+  owners,
+  busy = false,
+  error = null,
+  result = null,
+  onSubmit,
+  area,
+}: {
+  owners: { userId: string; name: string }[]
+  busy?: boolean
+  error?: string | null
+  result?: string | null
+  onSubmit: (c: Extract<RiskChange, { action: "add" }>) => void
+  area?: RiskArea // Mynt's own register: the risk's area, starting on the tab's
+}) {
   const [title, setTitle] = useState("")
-  const [category, setCategory] = useState<RiskCategory>("security")
+  const [riskArea, setRiskArea] = useState<RiskArea | undefined>(area)
+  const [category, setCategory] = useState<RiskCategory>(categoryFor(area))
   const [description, setDescription] = useState("")
   const [likelihood, setLikelihood] = useState(3)
   const [impact, setImpact] = useState(3)
@@ -266,6 +328,7 @@ export function AddRiskView({ owners, busy = false, error = null, result = null,
           action: "add",
           title: title.trim(),
           category,
+          ...(riskArea ? { risk_area: riskArea } : {}),
           likelihood,
           impact,
           ...(description.trim() ? { description: description.trim() } : {}),
@@ -279,6 +342,7 @@ export function AddRiskView({ owners, busy = false, error = null, result = null,
         What could go wrong
         <input className={field} value={title} onChange={(e) => setTitle(e.target.value)} maxLength={200} required data-risk-field="title" />
       </label>
+      {area !== undefined && <AreaSelect value={riskArea ?? ""} onChange={setRiskArea} />}
       <label className="flex flex-col gap-1 text-sm">
         Category
         <select className={field} value={category} onChange={(e) => setCategory(e.target.value as RiskCategory)} data-risk-field="category">
@@ -314,7 +378,24 @@ export function AddRiskView({ owners, busy = false, error = null, result = null,
   )
 }
 
-export function ReviewRiskView({ risk, owners, busy = false, error = null, result = null, onSubmit }: { risk: RiskRow; owners: { userId: string; name: string }[]; busy?: boolean; error?: string | null; result?: string | null; onSubmit: (c: Extract<RiskChange, { action: "review" }>) => void }) {
+export function ReviewRiskView({
+  risk,
+  owners,
+  busy = false,
+  error = null,
+  result = null,
+  onSubmit,
+  withArea = false,
+}: {
+  risk: RiskRow
+  owners: { userId: string; name: string }[]
+  busy?: boolean
+  error?: string | null
+  result?: string | null
+  onSubmit: (c: Extract<RiskChange, { action: "review" }>) => void
+  withArea?: boolean // Mynt's own register: its area can change (an unassigned one gets one here)
+}) {
+  const [riskArea, setRiskArea] = useState<RiskArea | "">(risk.riskArea ?? "")
   const [status, setStatus] = useState<RiskStatus>(risk.status)
   const [likelihood, setLikelihood] = useState(risk.likelihood)
   const [impact, setImpact] = useState(risk.impact)
@@ -325,6 +406,7 @@ export function ReviewRiskView({ risk, owners, busy = false, error = null, resul
   // Only what changed is sent; accepting or closing a risk needs a note saying why.
   const change = {
     ...(status !== risk.status ? { status } : {}),
+    ...(withArea && riskArea && riskArea !== risk.riskArea ? { risk_area: riskArea } : {}),
     ...(likelihood !== risk.likelihood ? { likelihood } : {}),
     ...(impact !== risk.impact ? { impact } : {}),
     ...(mitigation.trim() && mitigation.trim() !== (risk.mitigation ?? "") ? { mitigation: mitigation.trim() } : {}),
@@ -347,6 +429,7 @@ export function ReviewRiskView({ risk, owners, busy = false, error = null, resul
           {RISK_CATEGORY_LABELS[risk.category]} · now {scoreText(risk.likelihood, risk.impact)} · {RISK_STATUS_LABELS[risk.status]}
         </span>
       </p>
+      {withArea && <AreaSelect value={riskArea} onChange={setRiskArea} unassigned={!risk.riskArea} />}
       <label className="flex flex-col gap-1 text-sm">
         Status
         <select className={field} value={status} onChange={(e) => setStatus(e.target.value as RiskStatus)} data-risk-field="status">
@@ -406,7 +489,23 @@ function useSubmit(subject: RiskSubject, open: boolean, onDone: () => void, fetc
   return { busy, error, result, round, submit }
 }
 
-export function AddRiskSheet({ subject, owners, open, onClose, onDone, fetcher = (...a) => fetch(...a) }: { subject: RiskSubject; owners: { userId: string; name: string }[]; open: boolean; onClose: () => void; onDone: () => void; fetcher?: typeof fetch }) {
+export function AddRiskSheet({
+  subject,
+  owners,
+  open,
+  onClose,
+  onDone,
+  fetcher = (...a) => fetch(...a),
+  area,
+}: {
+  subject: RiskSubject
+  owners: { userId: string; name: string }[]
+  open: boolean
+  onClose: () => void
+  onDone: () => void
+  fetcher?: typeof fetch
+  area?: RiskArea
+}) {
   const s = useSubmit(subject, open, onDone, fetcher)
   return (
     <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
@@ -418,14 +517,30 @@ export function AddRiskSheet({ subject, owners, open, onClose, onDone, fetcher =
           </SheetDescription>
         </SheetHeader>
         <div className="px-4 pb-6">
-          <AddRiskView key={s.round} owners={owners} busy={s.busy} error={s.error} result={s.result} onSubmit={(c) => void s.submit(c)} />
+          <AddRiskView key={`${area ?? ""}:${s.round}`} owners={owners} busy={s.busy} error={s.error} result={s.result} onSubmit={(c) => void s.submit(c)} area={area} />
         </div>
       </SheetContent>
     </Sheet>
   )
 }
 
-export function ReviewRiskSheet({ subject, risk, owners, onClose, onDone, fetcher = (...a) => fetch(...a) }: { subject: RiskSubject; risk: RiskRow | null; owners: { userId: string; name: string }[]; onClose: () => void; onDone: () => void; fetcher?: typeof fetch }) {
+export function ReviewRiskSheet({
+  subject,
+  risk,
+  owners,
+  onClose,
+  onDone,
+  fetcher = (...a) => fetch(...a),
+  withArea = false,
+}: {
+  subject: RiskSubject
+  risk: RiskRow | null
+  owners: { userId: string; name: string }[]
+  onClose: () => void
+  onDone: () => void
+  fetcher?: typeof fetch
+  withArea?: boolean
+}) {
   const s = useSubmit(subject, risk !== null, onDone, fetcher)
   return (
     <Sheet open={risk !== null} onOpenChange={(o) => !o && onClose()}>
@@ -434,7 +549,7 @@ export function ReviewRiskSheet({ subject, risk, owners, onClose, onDone, fetche
           <SheetTitle>Review risk</SheetTitle>
           <SheetDescription>Change where it stands, its scores, mitigation, owner or next review date. Every change is kept in its history.</SheetDescription>
         </SheetHeader>
-        <div className="px-4 pb-6">{risk && <ReviewRiskView key={`${risk.id}:${s.round}`} risk={risk} owners={owners} busy={s.busy} error={s.error} result={s.result} onSubmit={(c) => void s.submit(c)} />}</div>
+        <div className="px-4 pb-6">{risk && <ReviewRiskView key={`${risk.id}:${s.round}`} risk={risk} owners={owners} busy={s.busy} error={s.error} result={s.result} onSubmit={(c) => void s.submit(c)} withArea={withArea} />}</div>
       </SheetContent>
     </Sheet>
   )

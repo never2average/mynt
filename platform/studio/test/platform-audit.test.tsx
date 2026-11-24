@@ -5,7 +5,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 // The platform admin's Audit trails (list, filters, date presets, export, an entry's page with Details and Related),
 // each firm's and workspace's Members tab with Invite member, Change role and Remove, the Overview's Invite person
-// (email, what they join, their role there) and Security & risk (Mynt's own register and the platform's signals).
+// (email, what they join, their role there). Risk models and the Risk register are test/risk-models-page.test.tsx and
+// test/risk-register-page.test.tsx.
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/platform",
@@ -16,10 +17,8 @@ const { AuditListView, AuditDetailView } = await import("@/components/admin-audi
 const { FirmMembersTable, WorkspaceMembersTable, InviteWorkspaceMemberSheet, InvitePersonSheet, ChangeFirmRoleSheet, RemoveFirmMemberSheet } = await import("@/components/admin-members");
 const { FirmDetailView } = await import("@/components/admin-firms");
 const { WorkspaceDetailView } = await import("@/components/admin-workspaces");
-const { RisksView } = await import("@/components/admin-risks");
 const audit = await import("@/lib/admin-audit");
 const members = await import("@/lib/admin-members");
-const risks = await import("@/lib/admin-risks");
 const admin = await import("@/lib/admin");
 
 beforeAll(() => {
@@ -288,46 +287,5 @@ describe("the Overview's Invite person", () => {
     fireEvent.change(document.querySelector("[data-workspace-role]")!, { target: { value: "owner" } });
     await submit("[data-invite-person-form]");
     expect(calls).toEqual([{ url: `/api/admin/workspaces/${WS}/members`, body: { action: "invite", email: "new@example.com", role: "owner" } }]);
-  });
-});
-
-describe("Security & risk", () => {
-  const data: import("@/lib/admin-risks").RisksData = {
-    register: { available: true, canManage: true, overdue: 1, owners: [{ userId: USER, name: "Boss" }], risks: [{ id: "r0", title: "Key leak", category: "security", description: null, likelihood: 2, impact: 5, score: 10, owner: null, mitigation: null, status: "open", reviewBy: "2026-01-01", overdue: true }] },
-    cross: risks.crossRisksFrom({
-      counts: { critical: 1, high: 0, medium: 1, low: 0 },
-      overdue: 0,
-      total: 2,
-      risks: [
-        { id: "r1", subject_type: "app", subject_name: "Saver", workspace_id: WS, title: "Fraud ring", score: 16, status: "open" },
-        { id: "r2", subject_type: "product", subject_name: "Fixed deposit", firm_id: FIRM, title: "Rate shock", score: 9, status: "mitigating" },
-      ],
-    }),
-    signals: risks.platformSignalsFrom({ attention: ["Nothing needs attention"], window_hours: 24, backups: { offsite: "uploaded" } }),
-    security: { available: true, rows: [] },
-  };
-
-  it("Mynt's own register with Add risk and Review risk; the risks across apps and products linked to their workspace or firm", () => {
-    const html = renderToStaticMarkup(<RisksView data={data} />);
-    for (const s of ['data-risk-register="platform"', "data-add-risk", 'data-review-risk="r0"', "Key leak", "1 risk is overdue for review.", "Open risks on every register", "Fraud ring", "16 (Critical)", "Rate shock"]) expect(html).toContain(s);
-    expect(html).toContain(`href="/platform/workspaces/${WS}"`);
-    expect(html).toContain(`href="/platform/firms/${FIRM}?tab=products"`);
-    expect(html).toContain("Nothing needs attention.");
-    expect(html).toContain("Uploaded off-site");
-  });
-
-  it("each signal Mynt can't answer says Not available, with why, never a 0 or an empty table", () => {
-    const none = risks.platformSignalsFrom(null);
-    const html = renderToStaticMarkup(<RisksView data={{ register: { available: false, reason: "Mynt's own risk register comes with Mynt's next update." }, cross: { available: false, reason: "Risks across apps and products come with Mynt's next update." }, signals: none, security: risks.securityEventsFrom(null) }} />);
-    expect(html.match(/Not available\./g)!.length).toBe(7);
-    expect(html).toContain("This Mynt has no operations status");
-    expect(html).not.toContain("data-risk-counts");
-    expect(html).not.toContain("data-add-risk");
-  });
-
-  it("a register only Mynt's admins keep: anyone the register says can't manage it reads it", () => {
-    const html = renderToStaticMarkup(<RisksView data={{ ...data, register: { ...data.register, canManage: false } as typeof data.register }} />);
-    expect(html).toContain("Read-only: Mynt&#x27;s admins keep this register.");
-    expect(html).not.toContain("data-add-risk");
   });
 });

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "@/lib/session-store";
 import { ADMIN_TOOLS } from "@/lib/studio-tools";
 
-// The platform admin's Audit trails and Security & risk routes (GET /api/admin/audit, GET and POST /api/admin/risks):
+// The platform admin's Audit trails and Risk register routes (GET /api/admin/audit, GET and POST /api/admin/risks):
 // Mynt admins only (anyone else a 404, with nothing sent to Mynt), a strict query, Mynt's own register kept on the
 // platform subject, and every part Mynt can't answer said as "not available" with why.
 
@@ -86,7 +86,7 @@ beforeEach(() => {
 describe("who gets in", () => {
   it("anyone but a Mynt admin gets 404 from both routes, and nothing reaches Mynt's admin tools", async () => {
     fake.session = session(["developer", "license_provider"]);
-    for (const res of [await audit.GET(req("/api/admin/audit")), await risks.GET(), await risks.POST(req("/api/admin/risks", { action: "add", title: "X risk", category: "security", likelihood: 1, impact: 1 }))]) expect(res.status).toBe(404);
+    for (const res of [await audit.GET(req("/api/admin/audit")), await risks.GET(req("/api/admin/risks?area=technology")), await risks.POST(req("/api/admin/risks", { action: "add", title: "X risk", category: "security", risk_area: "technology", likelihood: 1, impact: 1 }))]) expect(res.status).toBe(404);
     expect(fake.calls).toEqual([]);
     fake.session = undefined;
     expect((await audit.GET(req("/api/admin/audit"))).status).toBe(401);
@@ -118,46 +118,83 @@ describe("Audit trails", () => {
   });
 });
 
-describe("Security & risk", () => {
-  it("Mynt's own register (the platform subject), the risks across apps and products with their links, and the signals", async () => {
-    const body = await (await risks.GET()).json();
-    expect(called("list_risks")).toEqual([{ subject_type: "platform", subject_id: "mynt" }]);
-    expect(called("admin_list_risks")).toEqual([{ limit: 20 }]);
+describe("Risk register: one risk area at a time", () => {
+  const get = async (area?: string) => (await risks.GET(req(`/api/admin/risks${area ? `?area=${area}` : ""}`))).json();
+
+  it("the area's part of Mynt's own register and its unassigned risks; the risks across apps and products in that area, mapped from their category", async () => {
+    const body = await get("operations");
+    expect(body.area).toBe("operations");
+    expect(called("list_risks")).toEqual([
+      { subject_type: "platform", subject_id: "mynt", risk_area: "operations" },
+      { subject_type: "platform", subject_id: "mynt", risk_area: "unassigned" },
+    ]);
+    expect(called("admin_list_risks")).toEqual([{ limit: 100, risk_area: "operations" }]);
     expect(body.register).toMatchObject({ available: true, canManage: true, overdue: 1, owners: [{ userId: ADMIN_ID, name: "Boss" }] });
-    expect(body.register.risks[0].title).toBe("Key leak");
-    expect(body.cross.counts).toEqual({ critical: 1, high: 0, medium: 2, low: 0 });
-    expect(body.cross.risks.map((r: { href: string }) => r.href)).toEqual([`/platform/workspaces/${WS}`, `/platform/firms/${FIRM}?tab=products`]);
-    expect(body.signals.attention.rows[0].cells[0]).toContain("off-site bucket");
-    expect(body.signals.agreements.rows.map((r: { cells: string[] }) => r.cells[0])).toEqual(["Saver", "Oversight audits"]);
-    expect(body.signals.vendors.rows[0].cells[0]).toBe("Fast KYC");
-    expect(body.signals.backups.rows.find((r: { key: string }) => r.key === "offsite").cells[1]).toBe("On this server only");
-    // Security events: the security class, the last 30 days only.
-    expect(body.security.rows.map((r: { key: string }) => r.key)).toEqual(["a1"]);
+    expect(body.unassigned.available).toBe(true);
+    // Fraud is an operations risk (the Rate shock, credit, is financial), and Mynt's own never shows here.
+    expect(body.cross.risks.map((r: { id: string; href: string }) => [r.id, r.href])).toEqual([["r1", `/platform/workspaces/${WS}`]]);
+    expect((await get("financial")).cross.risks.map((r: { id: string; href: string }) => [r.id, r.href])).toEqual([["r2", `/platform/firms/${FIRM}?tab=products`]]);
+    // No area: the first one. Anything else is refused before Mynt is asked.
+    expect((await get()).area).toBe("financial");
+    fake.calls = [];
+    expect((await risks.GET(req("/api/admin/risks?area=security"))).status).toBe(400);
+    expect(fake.calls).toEqual([]);
   });
 
-  it("each part this Mynt can't answer is not available, with why, never an empty table", async () => {
+  it("each area's signals: Technology security events and backups, Third-party vendors, Compliance agreements, Operations agents and hosting, Financial pools", async () => {
+    fake.reply.ops_status = {
+      ...(fake.reply.ops_status as Record<string, unknown>),
+      attention: ["hosting: 2 app(s) stopped", "builds: 1 failed in the last 24h", "liquidity pools: 1 open over_withdrawal flag(s) on real money: list_pool_flags, then resolve_pool_flag", "covenants: 1 open breach(es) on live figures (list_covenant_breaches)", "backups are on this server only; add an off-site bucket"],
+      covenants: { open_breaches: 1 },
+      product_health: { stalled: [] },
+    };
+    const ids = (b: { signals: { id: string }[] }) => b.signals.map((s) => s.id);
+    const tech = await get("technology");
+    expect(ids(tech)).toEqual(["security", "backups"]);
+    expect(tech.signals[0].signal.rows.map((r: { key: string }) => r.key)).toEqual(["a1"]); // the security class, the last 30 days only
+    expect(tech.signals[1].signal.rows.find((r: { key: string }) => r.key === "offsite").cells[1]).toBe("On this server only");
+    expect(called("audit_log")).toEqual([{ limit: 500 }]); // only Technology reads the audit log
+    expect((await get("third_party")).signals[0].signal.rows[0].cells[0]).toBe("Fast KYC");
+    expect((await get("compliance")).signals[0].signal.rows.map((r: { cells: string[] }) => r.cells[0])).toEqual(["Saver", "Oversight audits"]);
+    expect((await get("operations")).signals[0].signal.rows.map((r: { cells: string[] }) => r.cells[0])).toEqual(["hosting: 2 app(s) stopped", "builds: 1 failed in the last 24h"]);
+    expect((await get("financial")).signals[0].signal.rows.map((r: { cells: string[] }) => r.cells[0])).toEqual([expect.stringMatching(/^liquidity pools:/)]);
+    const bp = await get("business_process");
+    expect(ids(bp)).toEqual(["covenants", "drift"]);
+    expect(bp.signals[0].signal.rows.map((r: { cells: string[] }) => r.cells[0])).toEqual([expect.stringMatching(/^covenants:/)]);
+    expect(bp.signals[1].signal).toMatchObject({ available: false });
+    expect(ids(await get("regulated_product"))).toEqual(["covenants", "product-health", "drift"]);
+  });
+
+  it("each part this Mynt can't answer is not available, with why, never an empty table or a 0", async () => {
     fake.tools = [];
-    const body = await (await risks.GET()).json();
-    for (const part of [body.register, body.cross, body.signals.attention, body.signals.agreements, body.signals.vendors, body.signals.backups, body.security]) {
-      expect(part.available).toBe(false);
-      expect(part.reason.length).toBeGreaterThan(10);
+    for (const area of ["financial", "compliance", "third_party", "operations", "business_process", "technology", "regulated_product"]) {
+      const body = await get(area);
+      for (const part of [body.register, body.unassigned, body.cross, ...body.signals.map((s: { signal: unknown }) => s.signal)]) {
+        expect(part.available, area).toBe(false);
+        expect(part.reason.length).toBeGreaterThan(10);
+      }
     }
     // An audit log without classes can't pick out security events.
     fake.tools = [{ name: "audit_log" }];
     fake.reply.audit_log = LOG.map(({ class: _c, ...e }) => e);
-    expect((await (await risks.GET()).json()).security).toMatchObject({ available: false });
+    expect((await get("technology")).signals[0].signal).toMatchObject({ available: false });
   });
 
-  it("Add risk and Review risk go to Mynt's own register only", async () => {
-    const add = await risks.POST(req("/api/admin/risks", { action: "add", title: "Key leak", category: "security", likelihood: 2, impact: 5, description: "" }));
+  it("Add risk (with its area) and Review risk go to Mynt's own register only", async () => {
+    const add = await risks.POST(req("/api/admin/risks", { action: "add", title: "Key leak", category: "security", risk_area: "technology", likelihood: 2, impact: 5, description: "" }));
     expect(add.status).toBe(200);
-    expect(called("add_risk")).toEqual([{ subject_type: "platform", subject_id: "mynt", title: "Key leak", category: "security", likelihood: 2, impact: 5 }]);
-    await risks.POST(req("/api/admin/risks", { action: "review", risk_id: RISK, status: "mitigating", note: "Rotating keys" }));
+    expect(called("add_risk")).toEqual([{ subject_type: "platform", subject_id: "mynt", title: "Key leak", category: "security", risk_area: "technology", likelihood: 2, impact: 5 }]);
+    // A platform risk always has an area.
+    const none = await risks.POST(req("/api/admin/risks", { action: "add", title: "Key leak", category: "security", likelihood: 2, impact: 5 }));
+    expect(none.status).toBe(400);
+    expect((await none.json()).message).toMatch(/area/);
+    await risks.POST(req("/api/admin/risks", { action: "review", risk_id: RISK, risk_area: "operations", status: "mitigating", note: "Rotating keys" }));
     expect(called("list_risks").at(-1)).toEqual({ subject_type: "platform", subject_id: "mynt", risk_id: RISK });
-    expect(called("update_risk")).toEqual([{ risk_id: RISK, status: "mitigating", note: "Rotating keys" }]);
-    // Strict bodies: no other subject can be named.
-    expect((await risks.POST(req("/api/admin/risks", { action: "add", title: "X risk", category: "security", likelihood: 1, impact: 1, subject_type: "app" }))).status).toBe(400);
+    expect(called("update_risk")).toEqual([{ risk_id: RISK, risk_area: "operations", status: "mitigating", note: "Rotating keys" }]);
+    // Strict bodies: no other subject can be named, nor an area that isn't one.
+    expect((await risks.POST(req("/api/admin/risks", { action: "add", title: "X risk", category: "security", risk_area: "technology", likelihood: 1, impact: 1, subject_type: "app" }))).status).toBe(400);
+    expect((await risks.POST(req("/api/admin/risks", { action: "add", title: "X risk", category: "security", risk_area: "security", likelihood: 1, impact: 1 }))).status).toBe(400);
     fake.sameOrigin = false;
-    expect((await risks.POST(req("/api/admin/risks", { action: "add", title: "X risk", category: "security", likelihood: 1, impact: 1 }))).status).toBe(403);
+    expect((await risks.POST(req("/api/admin/risks", { action: "add", title: "X risk", category: "security", risk_area: "technology", likelihood: 1, impact: 1 }))).status).toBe(403);
   });
 });

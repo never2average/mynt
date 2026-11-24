@@ -105,14 +105,14 @@ describe("the platform admin's own layout", () => {
       </TooltipProvider>,
     )
 
-  it("its sidebar is titled Mynt platform admin and lists the eight sections, in order, each its own address", () => {
+  it("its sidebar is titled Mynt platform admin and lists the nine sections, in order, each its own address", () => {
     const html = platformSidebar("/platform")
     expect(html).toContain(admin.PLATFORM_NAME)
     expect(PLATFORM_SECTIONS.map((s) => s.label)).toEqual(admin.ADMIN_TABS.map((t) => admin.ADMIN_TAB_LABELS[t]))
-    expect(PLATFORM_SECTIONS.map((s) => s.label)).toEqual(["Overview", "Workspaces", "Firms", "Licences", "Vendors", "Audit trails", "Security & risk", "Platform settings"])
+    expect(PLATFORM_SECTIONS.map((s) => s.label)).toEqual(["Overview", "Workspaces", "Firms", "Licences", "Vendors", "Audit trails", "Risk models", "Risk register", "Platform settings"])
     // The title has no "All workspaces and firms" line under it any more.
     expect(html).not.toContain("All workspaces")
-    const hrefs = [...html.matchAll(/<a[^>]*data-platform-link="([a-z]+)"[^>]*>/g)].map((m) => [m[1], m[0].match(/href="([^"]+)"/)?.[1]])
+    const hrefs = [...html.matchAll(/<a[^>]*data-platform-link="([a-z-]+)"[^>]*>/g)].map((m) => [m[1], m[0].match(/href="([^"]+)"/)?.[1]])
     expect(Object.fromEntries(hrefs)).toEqual({
       overview: "/platform",
       workspaces: "/platform/workspaces",
@@ -120,7 +120,8 @@ describe("the platform admin's own layout", () => {
       licences: "/platform/licences",
       vendors: "/platform/vendors",
       audit: "/platform/audit",
-      risks: "/platform/risks",
+      "risk-models": "/platform/risk-models",
+      "risk-register": "/platform/risk-register",
       settings: "/platform/settings",
     })
   })
@@ -147,7 +148,7 @@ describe("the platform admin's own layout", () => {
 
   it("/platform renders its own shell: its sidebar and header, not the studio's; the header has no scope tag and no Back to Studio", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ signedIn: true, name: "Ana Admin", email: "ana@example.com" }), { status: 200 })))
-    for (const [pathname, title] of [["/platform", "Mynt platform admin"], ["/platform/settings", "Platform settings"], ["/platform/audit", "Audit trails"], [`/platform/audit/${FIRM}`, "Audit trails"], ["/platform/risks", "Security & risk"]]) {
+    for (const [pathname, title] of [["/platform", "Mynt platform admin"], ["/platform/settings", "Platform settings"], ["/platform/audit", "Audit trails"], [`/platform/audit/${FIRM}`, "Audit trails"], ["/platform/risk-models", "Risk models"], [`/platform/risk-models/${FIRM}`, "Risk models"], ["/platform/risk-register", "Risk register"]]) {
       nav.pathname = pathname
       render(<PlatformShell><p data-page>Page</p></PlatformShell>)
       await act(async () => undefined)
@@ -182,9 +183,13 @@ describe("addresses", () => {
     expect(admin.platformRouteOf("/platform/vendors")).toEqual({ tab: "vendors", id: null })
     expect(admin.platformRouteOf(`/platform/workspaces/${FIRM}`)).toEqual({ tab: "workspaces", id: FIRM })
     expect(admin.platformRouteOf(`/platform/audit/${FIRM}`)).toEqual({ tab: "audit", id: FIRM })
-    expect(admin.platformRouteOf("/platform/risks")).toEqual({ tab: "risks", id: null })
+    expect(admin.platformRouteOf("/platform/risk-register")).toEqual({ tab: "risk-register", id: null })
+    expect(admin.platformRouteOf("/platform/risk-models")).toEqual({ tab: "risk-models", id: null })
+    expect(admin.platformRouteOf(`/platform/risk-models/${FIRM}`)).toEqual({ tab: "risk-models", id: FIRM })
+    // Security & risk moved: its old address isn't a section any more (the proxy sends it on to the Risk register).
+    expect(admin.platformRouteOf("/platform/risks")).toBeNull()
     // Apps, People and Products are no longer sections: their pages and details aren't platform admin pages (404).
-    for (const p of ["/platform/apps", `/platform/apps/${FIRM}`, "/platform/people", `/platform/people/${FIRM}`, "/platform/products", `/platform/products/${FIRM}`, `/platform/risks/${FIRM}`])
+    for (const p of ["/platform/apps", `/platform/apps/${FIRM}`, "/platform/people", `/platform/people/${FIRM}`, "/platform/products", `/platform/products/${FIRM}`, `/platform/risks/${FIRM}`, `/platform/risk-register/${FIRM}`])
       expect(admin.platformRouteOf(p), p).toBeNull()
     for (const p of ["/platform/nope", "/platform/overview", "/platform/firms/a%2Fb", `/platform/firms/${FIRM}/more`, "/platforms", "/admin"]) expect(admin.platformRouteOf(p), p).toBeNull()
     expect(admin.platformTitle("/platform")).toBe("Mynt platform admin")
@@ -210,6 +215,12 @@ describe("addresses", () => {
     expect(to("/admin?tab=firms&id=..%2Fx")).toBe("/platform/firms") // an id that isn't one is dropped
     expect(to(`/admin?tab=licences&id=${FIRM}`)).toBe("/platform/licences") // Licences has no detail page
     expect(to("/settings?tab=esign")).toBe("/platform/settings")
+    // Security & risk is the Risk register now: its old addresses go there.
+    expect(to("/platform/risks")).toBe("/platform/risk-register")
+    expect(to("/platform/risks/")).toBe("/platform/risk-register")
+    expect(to("/admin?tab=risks")).toBe("/platform/risk-register")
+    expect(to(`/admin?tab=risks&id=${FIRM}`)).toBe("/platform/risk-register")
+    for (const p of ["/platform/risk-register", "/platform/risk-models", `/platform/risks/${FIRM}`]) expect(to(p), p).toBeNull()
     for (const p of ["/settings", "/settings?tab=members", "/administer", "/platform", "/"]) expect(to(p), p).toBeNull()
   })
 
@@ -223,6 +234,9 @@ describe("addresses", () => {
       let res = await visit(`/admin?tab=firms&id=${FIRM}`)
       expect(res.status).toBe(307)
       expect(res.headers.get("location")).toBe(`https://mynt.example.test/platform/firms/${FIRM}`)
+      res = await visit("/platform/risks")
+      expect(res.status).toBe(307)
+      expect(res.headers.get("location")).toBe("https://mynt.example.test/platform/risk-register")
       res = await visit("/settings?tab=esign")
       expect(res.status).toBe(307)
       expect(res.headers.get("location")).toBe("https://mynt.example.test/platform/settings")
@@ -254,10 +268,12 @@ describe("addresses", () => {
     expect(found).toContain("/platform")
     expect(found.every((h) => h.startsWith("/platform"))).toBe(true)
     expect(searchStudio(searchIndex({ admin: true }), "esign").map((h) => h.href)).toContain("/platform/settings")
-    expect(found).toEqual(["/platform", "/platform/workspaces", "/platform/firms", "/platform/licences", "/platform/vendors", "/platform/audit", "/platform/risks", "/platform/settings"].filter((h) => found.includes(h)))
+    expect(found).toEqual(["/platform", "/platform/workspaces", "/platform/firms", "/platform/licences", "/platform/vendors", "/platform/audit", "/platform/risk-models", "/platform/risk-register", "/platform/settings"].filter((h) => found.includes(h)))
     for (const gone of ["/platform/apps", "/platform/people", "/platform/products"]) expect(searchIndex({ admin: true }).some((i) => i.href === gone)).toBe(false)
     expect(searchStudio(searchIndex({ admin: true }), "audit trails").map((h) => h.href)).toContain("/platform/audit")
-    expect(searchStudio(searchIndex({ admin: true }), "security risk").map((h) => h.href)).toContain("/platform/risks")
+    expect(searchStudio(searchIndex({ admin: true }), "security risk").map((h) => h.href)).toContain("/platform/risk-register")
+    expect(searchStudio(searchIndex({ admin: true }), "risk models validation").map((h) => h.href)).toContain("/platform/risk-models")
+    expect(searchIndex({ admin: true }).some((i) => i.href === "/platform/risks")).toBe(false)
     expect(searchIndex({ admin: false }).some((i) => i.href.startsWith("/platform") || i.href.startsWith("/admin"))).toBe(false)
   })
 })
@@ -285,7 +301,7 @@ describe("the platform admin's header: Docs and search, as the studio's header h
     Element.prototype.scrollIntoView ??= function () {}
   })
 
-  it("the sidebar has no Sections label above Overview; the eight sections are still listed", () => {
+  it("the sidebar has no Sections label above Overview; the nine sections are still listed", () => {
     const html = renderToStaticMarkup(
       <TooltipProvider>
         <SidebarProvider>
@@ -295,7 +311,7 @@ describe("the platform admin's header: Docs and search, as the studio's header h
     )
     expect(html).not.toContain("Sections")
     expect(html).not.toContain('data-sidebar="group-label"')
-    expect([...html.matchAll(/data-platform-link="([a-z]+)"/g)]).toHaveLength(8)
+    expect([...html.matchAll(/data-platform-link="([a-z-]+)"/g)]).toHaveLength(9)
   })
 
   it("every page's header has the labelled Docs button to /docs and the labelled search field; Invite person stays on the Overview", async () => {

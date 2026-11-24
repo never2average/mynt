@@ -2,7 +2,7 @@
 // answers. Every list is platform-wide (all workspaces, all firms), never scoped to a workspace picked in the studio. Pure, for
 // the routes, the views and the tests. A figure Mynt didn't measure is null here and "Not measured" on screen, never 0.
 
-export const ADMIN_TABS = ["overview", "workspaces", "firms", "licences", "vendors", "audit", "risks", "settings"] as const
+export const ADMIN_TABS = ["overview", "workspaces", "firms", "licences", "vendors", "audit", "risk-models", "risk-register", "settings"] as const
 export type AdminTab = (typeof ADMIN_TABS)[number]
 export const ADMIN_TAB_LABELS: Record<AdminTab, string> = {
   overview: "Overview",
@@ -11,19 +11,24 @@ export const ADMIN_TAB_LABELS: Record<AdminTab, string> = {
   licences: "Licences",
   vendors: "Vendors",
   audit: "Audit trails",
-  risks: "Security & risk",
+  "risk-models": "Risk models",
+  "risk-register": "Risk register",
   settings: "Platform settings",
 }
-// A section that isn't one (an old address's apps, people or products, which the platform admin no longer has) is the Overview.
-export const adminTabOf = (v: unknown): AdminTab => (ADMIN_TABS.includes(v as AdminTab) ? (v as AdminTab) : "overview")
+// Sections that moved: Security & risk (risks) is the Risk register now.
+export const MOVED_TABS: Record<string, AdminTab> = { risks: "risk-register" }
+// A section that isn't one (an old address's apps, people or products, which the platform admin no longer has) is the
+// Overview; one that moved is where it went.
+export const adminTabOf = (v: unknown): AdminTab =>
+  ADMIN_TABS.includes(v as AdminTab) ? (v as AdminTab) : typeof v === "string" && Object.hasOwn(MOVED_TABS, v) ? MOVED_TABS[v] : "overview"
 
 // Where it lives: its own base path and layout (app/(platform)), never inside the studio's shell. Overview is
-// /platform, each other section /platform/<section>, and a row opened in Workspaces, Firms or Audit trails
+// /platform, each other section /platform/<section>, and a row opened in Workspaces, Firms, Audit trails or Risk models
 // /platform/<section>/<id>. People are each firm's and each workspace's Members, not a section of their own.
 export const PLATFORM_BASE = "/platform"
 export const PLATFORM_NAME = "Mynt platform admin"
 // The sections whose rows open a detail page.
-export const ADMIN_DETAIL_TABS: readonly AdminTab[] = ["workspaces", "firms", "audit"]
+export const ADMIN_DETAIL_TABS: readonly AdminTab[] = ["workspaces", "firms", "audit", "risk-models"]
 // An id in the address: letters, digits and dashes (Mynt's uuids), nothing that could leave the path.
 export const ADMIN_ID = /^[A-Za-z0-9-]{1,100}$/
 /** Whether an id may be opened in a section: a detail section, and an id of its kind. */
@@ -176,6 +181,8 @@ export function opsFrom(reply: unknown): Ops | null {
       rows: [
         // Apps' and products' risks whose review date passed and that aren't closed (risk-register.ts).
         { label: "Risk reviews overdue", value: isObj(reply.risks) ? String(count(reply.risks.overdue_reviews)) : NOT_MEASURED },
+        // Mynt's own risk models past their next validation date and not retired (risk-models.ts).
+        { label: "Risk model validations overdue", value: isObj(reply.risk_models) ? String(count(reply.risk_models.overdue_validations)) : NOT_MEASURED },
       ],
     },
     {

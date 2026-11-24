@@ -9,6 +9,7 @@ import { Store } from "../dist/store.js";
 import { opsStatus } from "../dist/ops.js";
 import { riskLevel } from "../dist/risk-register.js";
 import { auditClass } from "../dist/audit-classes.js";
+import { RISK_AREA_OF_CATEGORY, RISK_AREAS, RISK_CATEGORIES, RISK_REGISTER_TABLES } from "../dist/risk-register-schema.js";
 import { personalWorkspace } from "../dist/workspaces.js";
 import { CATALOG } from "./helpers.js";
 
@@ -256,7 +257,7 @@ async function adminClient(store, name) {
 test("the platform's own register: Mynt admins keep and read it, nobody else sees it; admin_list_risks reads every register's open risks", async () => {
   const w = await setup();
   const admin = await adminClient(w.store, "Ada");
-  const platform = { subject_type: "platform", subject_id: "mynt", title: "Single admin can approve recoveries", category: "security", likelihood: 3, impact: 5, review_by: "2020-01-01" };
+  const platform = { subject_type: "platform", subject_id: "mynt", title: "Single admin can approve recoveries", category: "security", risk_area: "technology", likelihood: 3, impact: 5, review_by: "2020-01-01" };
   const added = ok(await admin.call("add_risk", platform));
   assert.deepEqual(added.subject, { type: "platform", id: "mynt", name: "Mynt platform" });
   assert.equal(added.risk.level, "critical");
@@ -297,4 +298,70 @@ test("the platform's own register: Mynt admins keep and read it, nobody else see
   // The platform's overdue review is in ops_status with the others.
   const ops = await opsStatus(w.store.db);
   assert.equal(ops.risks.overdue_reviews, 1);
+});
+
+test("risk areas: the seven platform areas, and every fine-grained category's area (other has none)", () => {
+  assert.deepEqual([...RISK_AREAS], ["financial", "compliance", "third_party", "operations", "business_process", "technology", "regulated_product"]);
+  assert.deepEqual(RISK_AREA_OF_CATEGORY, {
+    credit: "financial",
+    liquidity: "financial",
+    compliance: "compliance",
+    conduct: "compliance",
+    vendor: "third_party",
+    operational: "operations",
+    fraud: "operations",
+    security: "technology",
+    other: null,
+  });
+  for (const c of RISK_CATEGORIES) assert.ok(c in RISK_AREA_OF_CATEGORY, c);
+});
+
+test("risk_area: required on the platform's register, the category's by default elsewhere, filtered and reviewed", async () => {
+  const w = await setup();
+  const admin = await adminClient(w.store, "Ada");
+  const base = { subject_type: "platform", subject_id: "mynt", title: "Treasury concentration", category: "other", likelihood: 2, impact: 4 };
+  refused(await admin.call("add_risk", base), /risk_area/);
+  refused(await admin.call("add_risk", { ...base, risk_area: "nowhere" }));
+  const fin = ok(await admin.call("add_risk", { ...base, risk_area: "financial" }));
+  assert.equal(fin.risk.risk_area, "financial");
+
+  // An app's: its category's area unless it says otherwise; other stays unassigned.
+  const app = { subject_type: "app", subject_id: w.app.id, likelihood: 2, impact: 2 };
+  assert.equal(ok(await w.dev.call("add_risk", { ...app, title: "Card fraud", category: "fraud" })).risk.risk_area, "operations");
+  assert.equal(ok(await w.dev.call("add_risk", { ...app, title: "Vendor outage", category: "vendor", risk_area: "operations" })).risk.risk_area, "operations");
+  const loose = ok(await w.dev.call("add_risk", { ...app, title: "Something else", category: "other" }));
+  assert.equal(loose.risk.risk_area, null);
+
+  const listed = (args) => w.dev.call("list_risks", { subject_type: "app", subject_id: w.app.id, ...args });
+  assert.deepEqual(ok(await listed({ risk_area: "operations" })).risks.map((r) => r.title).sort(), ["Card fraud", "Vendor outage"]);
+  assert.deepEqual(ok(await listed({ risk_area: "unassigned" })).risks.map((r) => r.title), ["Something else"]);
+  assert.equal(ok(await listed({ risk_area: "technology" })).risks.length, 0);
+
+  // Reviewing it gives it an area; the change is in its history.
+  const reviewed = ok(await w.dev.call("update_risk", { risk_id: loose.risk.id, risk_area: "business_process" }));
+  assert.deepEqual(reviewed.changed, ["risk_area"]);
+  const history = ok(await listed({ risk_id: loose.risk.id })).history;
+  assert.deepEqual(history.at(-1).changes.risk_area, { from: null, to: "business_process" });
+
+  // admin_list_risks by area, across every register; unassigned are the ones with none.
+  const ops = ok(await admin.call("admin_list_risks", { risk_area: "operations" }));
+  assert.equal(ops.total, 2);
+  assert.ok(ops.risks.every((r) => r.risk_area === "operations"));
+  assert.deepEqual(ok(await admin.call("admin_list_risks", { risk_area: "financial" })).risks.map((r) => r.subject_type), ["platform"]);
+  assert.equal(ok(await admin.call("admin_list_risks", { risk_area: "unassigned" })).total, 0);
+});
+
+test("backfill: rows made before risk areas get their category's area, other stays unassigned, and running it again changes nothing", async () => {
+  const w = await setup();
+  const insert = (category, area = null) =>
+    w.store.db.query(`INSERT INTO ${T}.risk_register (id, subject_type, subject_id, title, category, risk_area, likelihood, impact) VALUES ($1, 'app', $2, $3, $4, $5, 2, 2) RETURNING id`, [randomUUID(), w.app.id, `Old ${category}`, category, area]);
+  for (const c of RISK_CATEGORIES) await insert(c);
+  // One already given an area by hand keeps it.
+  const kept = (await insert("security", "regulated_product")).rows[0].id;
+  await w.store.db.exec(RISK_REGISTER_TABLES);
+  const areas = async () => Object.fromEntries((await w.store.db.query(`SELECT title, risk_area FROM ${T}.risk_register WHERE title LIKE 'Old %' AND id <> $1`, [kept])).rows.map((r) => [r.title.slice(4), r.risk_area]));
+  assert.deepEqual(await areas(), RISK_AREA_OF_CATEGORY);
+  assert.equal((await w.store.db.query(`SELECT risk_area FROM ${T}.risk_register WHERE id = $1`, [kept])).rows[0].risk_area, "regulated_product");
+  await w.store.db.exec(RISK_REGISTER_TABLES);
+  assert.deepEqual(await areas(), RISK_AREA_OF_CATEGORY);
 });

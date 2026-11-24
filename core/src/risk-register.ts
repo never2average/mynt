@@ -3,12 +3,13 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { memberFirms } from "./app-agreements.js";
 import type { Db } from "./db.js";
-import { PLATFORM_SUBJECT_ID, RISK_CATEGORIES, RISK_STATUSES, RISK_SUBJECTS } from "./risk-register-schema.js";
+import { PLATFORM_SUBJECT_ID, RISK_AREA_OF_CATEGORY, RISK_AREAS, RISK_CATEGORIES, RISK_STATUSES, RISK_SUBJECTS, type RiskArea } from "./risk-register-schema.js";
 import { effectiveRoles, type App, type ProductRecord, type Store, type User } from "./store.js";
 import { appRole, memberApp } from "./workspaces.js";
 
-// A risk register, one shape for apps and financial products: each risk with its category, likelihood and impact (1-5
-// each; the score is their product), an owner, the mitigation, a status (open, mitigating, accepted, closed) and the
+// A risk register, one shape for apps and financial products: each risk with its category, its risk area (one of the
+// platform's seven: financial, compliance, third_party, operations, business_process, technology, regulated_product;
+// by default its category's, RISK_AREA_OF_CATEGORY), likelihood and impact (1-5 each; the score is their product), an owner, the mitigation, a status (open, mitigating, accepted, closed) and the
 // date it's next reviewed by.
 //
 // Who keeps it: for an app, its workspace's owners and admins (any member reads it); for a product, its own firm (the
@@ -32,6 +33,10 @@ const MANAGERS = ["owner", "admin"];
 const UUID = z.string().uuid();
 const DATE = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "A date as YYYY-MM-DD");
 const SCORE = z.number().int().min(1).max(5);
+const AREA = z.enum(RISK_AREAS);
+// A list's filter: one area, or the risks with none (unassigned).
+const AREA_FILTER = z.enum([...RISK_AREAS, "unassigned"]);
+const areaWhere = (col: string, n: number) => `($${n}::text IS NULL OR ${col} = $${n} OR ($${n} = 'unassigned' AND ${col} IS NULL))`;
 const iso = (v: unknown) => (v == null ? null : new Date(v as string).toISOString());
 const day = (v: unknown) => (v == null ? null : typeof v === "string" ? v.slice(0, 10) : new Date(v as Date).toISOString().slice(0, 10));
 const today = () => new Date().toISOString().slice(0, 10);
@@ -47,6 +52,7 @@ export interface Risk {
   subject_id: string;
   title: string;
   category: (typeof RISK_CATEGORIES)[number];
+  risk_area: RiskArea | null;
   description: string | null;
   likelihood: number;
   impact: number;
@@ -73,6 +79,7 @@ const toRisk = (r: Row): Risk => {
     subject_id: r.subject_id as string,
     title: r.title as string,
     category: r.category as Risk["category"],
+    risk_area: (r.risk_area as RiskArea | null) ?? null,
     description: (r.description as string | null) ?? null,
     likelihood,
     impact,
@@ -276,12 +283,13 @@ export function registerRiskRegisterTools(server: McpServer, store: Store, user:
       {
         title: "Add a risk to a register",
         description:
-          "Add a risk to an app's or a financial product's risk register (the app's workspace owners and admins, or the product's own firm), or, for Mynt's admins, to the platform's own (subject_type platform, subject_id mynt). Give a title, a category (security, fraud, vendor, conduct, operational, compliance, credit, liquidity, other), how likely it is and how bad it would be (1-5 each; the score is their product: 1-4 low, 5-9 medium, 10-14 high, 15-25 critical), and optionally a description, the mitigation, its owner (a member of the app's workspace or the product's firm, a Mynt admin for the platform's; you by default) and the date it's next reviewed by. It starts open. Audited.",
+          "Add a risk to an app's or a financial product's risk register (the app's workspace owners and admins, or the product's own firm), or, for Mynt's admins, to the platform's own (subject_type platform, subject_id mynt). Give a title, a category (security, fraud, vendor, conduct, operational, compliance, credit, liquidity, other), its risk area (financial, compliance, third_party, operations, business_process, technology, regulated_product: required on the platform's register; otherwise the category's by default: credit and liquidity financial, compliance and conduct compliance, vendor third_party, operational and fraud operations, security technology, other none), how likely it is and how bad it would be (1-5 each; the score is their product: 1-4 low, 5-9 medium, 10-14 high, 15-25 critical), and optionally a description, the mitigation, its owner (a member of the app's workspace or the product's firm, a Mynt admin for the platform's; you by default) and the date it's next reviewed by. It starts open. Audited.",
         inputSchema: {
           subject_type: z.enum(RISK_SUBJECTS),
           subject_id: z.string().min(1).max(200).describe("The app's id, the product's id, or mynt for the platform's register"),
           title: z.string().trim().min(3).max(200),
           category: z.enum(RISK_CATEGORIES),
+          risk_area: AREA.optional().describe("The platform's risk area; required for subject_type platform"),
           description: z.string().trim().max(4000).optional(),
           likelihood: SCORE,
           impact: SCORE,
@@ -290,20 +298,22 @@ export function registerRiskRegisterTools(server: McpServer, store: Store, user:
           review_by: DATE.optional(),
         },
       },
-      async ({ subject_type, subject_id, title, category, description, likelihood, impact, mitigation, owner_user_id, review_by }) => {
+      async ({ subject_type, subject_id, title, category, risk_area, description, likelihood, impact, mitigation, owner_user_id, review_by }) => {
         const a = await access(subject_type, subject_id);
         if (!a) return noSubject(subject_type, subject_id);
+        if (subject_type === "platform" && !risk_area) return fail(`Give the risk's area (risk_area: ${RISK_AREAS.join(", ")}): every risk on Mynt's own register has one`);
+        const area = risk_area ?? RISK_AREA_OF_CATEGORY[category];
         if (!a.manage) return fail(subject_type === "app" ? "Only the workspace's owners and admins keep its apps' risk registers" : "Only the product's own firm keeps its risk register; its sponsors read it");
         const owner = owner_user_id ?? user.id;
         if (!(await ownerOk(a, owner))) return fail(`The risk's owner must be ${ownerSide(subject_type)}`);
         const id = randomUUID();
         await store.db.query(
-          `INSERT INTO ${T}.risk_register (id, subject_type, subject_id, title, category, description, likelihood, impact, owner_user_id, mitigation, review_by, created_by)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-          [id, subject_type, a.subject.id, title, category, description ?? null, likelihood, impact, owner, mitigation ?? null, review_by ?? null, user.id],
+          `INSERT INTO ${T}.risk_register (id, subject_type, subject_id, title, category, risk_area, description, likelihood, impact, owner_user_id, mitigation, review_by, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+          [id, subject_type, a.subject.id, title, category, area, description ?? null, likelihood, impact, owner, mitigation ?? null, review_by ?? null, user.id],
         );
         const risk = (await getRisk(store, id))!;
-        await store.audit(user.id, "add_risk", id, { subject_type, subject_id: a.subject.id, ...a.audit, title, category, likelihood, impact, score: risk.score, status: risk.status, owner_user_id: owner, review_by: review_by ?? null });
+        await store.audit(user.id, "add_risk", id, { subject_type, subject_id: a.subject.id, ...a.audit, title, category, risk_area: area, likelihood, impact, score: risk.score, status: risk.status, owner_user_id: owner, review_by: review_by ?? null });
         return json({ subject: a.subject, risk });
       },
     );
@@ -313,10 +323,11 @@ export function registerRiskRegisterTools(server: McpServer, store: Store, user:
       {
         title: "Review a risk",
         description:
-          "Review a risk on a register you keep (see add_risk): change its status (open, mitigating, accepted, closed), mitigation, likelihood and impact, owner, or the date it's next reviewed by. Accepting or closing a risk needs a note saying why. Only what you pass changes; every change is audited with what it was and what it became, and list_risks with risk_id shows that history.",
+          "Review a risk on a register you keep (see add_risk): change its status (open, mitigating, accepted, closed), risk area, mitigation, likelihood and impact, owner, or the date it's next reviewed by. Accepting or closing a risk needs a note saying why. Only what you pass changes; every change is audited with what it was and what it became, and list_risks with risk_id shows that history.",
         inputSchema: {
           risk_id: UUID,
           status: z.enum(RISK_STATUSES).optional(),
+          risk_area: AREA.optional(),
           mitigation: z.string().trim().max(4000).optional(),
           likelihood: SCORE.optional(),
           impact: SCORE.optional(),
@@ -325,15 +336,15 @@ export function registerRiskRegisterTools(server: McpServer, store: Store, user:
           note: z.string().trim().max(2000).optional().describe("Why: needed to accept or close a risk"),
         },
       },
-      async ({ risk_id, status, mitigation, likelihood, impact, owner_user_id, review_by, note }) => {
+      async ({ risk_id, status, risk_area, mitigation, likelihood, impact, owner_user_id, review_by, note }) => {
         const before = await getRisk(store, risk_id);
         const a = before ? await access(before.subject_type, before.subject_id) : undefined;
         if (!before || !a) return fail(`No risk '${risk_id}' on a register you keep`);
         if (!a.manage) return fail(before.subject_type === "app" ? "Only the workspace's owners and admins keep its apps' risk registers" : "Only the product's own firm keeps its risk register; its sponsors read it");
         if ((status === "accepted" || status === "closed") && status !== before.status && !note) return fail(`Say why the risk is ${status} (note)`);
         if (owner_user_id && !(await ownerOk(a, owner_user_id))) return fail(`The risk's owner must be ${ownerSide(before.subject_type)}`);
-        const next: Record<string, unknown> = { status, mitigation, likelihood, impact, owner_user_id, review_by };
-        const was: Record<string, unknown> = { status: before.status, mitigation: before.mitigation, likelihood: before.likelihood, impact: before.impact, owner_user_id: before.owner?.user_id ?? null, review_by: before.review_by };
+        const next: Record<string, unknown> = { status, risk_area, mitigation, likelihood, impact, owner_user_id, review_by };
+        const was: Record<string, unknown> = { status: before.status, risk_area: before.risk_area, mitigation: before.mitigation, likelihood: before.likelihood, impact: before.impact, owner_user_id: before.owner?.user_id ?? null, review_by: before.review_by };
         const changes = Object.fromEntries(Object.entries(next).filter(([k, v]) => v !== undefined && v !== was[k]).map(([k, v]) => [k, { from: was[k], to: v }]));
         if (!Object.keys(changes).length) return fail("Nothing to change: pass what's different");
         const cols = Object.keys(changes);
@@ -350,18 +361,19 @@ export function registerRiskRegisterTools(server: McpServer, store: Store, user:
     {
       title: "A risk register",
       description:
-        "An app's or a financial product's risk register: each risk with its category, likelihood × impact score and level, owner, mitigation, status, review-by date and whether that review is overdue, newest first, with counts by status. Any member of the app's workspace reads an app's; the product's own firm, and the licence providers sponsoring it (read-only), read a product's; Mynt's admins read and keep the platform's (subject_type platform, subject_id mynt). can_manage says whether you may add and review risks. Filter by status, category or overdue_only. With risk_id: that one risk and its history (every change, from the audit trail). For an app, signals lists what Mynt measures around it, each a list or not available with why: fraud, vendors (failing conformance, erroring calls, ended subscriptions or contracts), conduct (open findings from marketing and complaints audits of its agreements) and products (sales paused by a covenant, or drifted).",
+        "An app's or a financial product's risk register: each risk with its category, likelihood × impact score and level, owner, mitigation, status, review-by date and whether that review is overdue, newest first, with counts by status. Any member of the app's workspace reads an app's; the product's own firm, and the licence providers sponsoring it (read-only), read a product's; Mynt's admins read and keep the platform's (subject_type platform, subject_id mynt). can_manage says whether you may add and review risks. Filter by status, category, risk_area (one area, or unassigned: none) or overdue_only. With risk_id: that one risk and its history (every change, from the audit trail). For an app, signals lists what Mynt measures around it, each a list or not available with why: fraud, vendors (failing conformance, erroring calls, ended subscriptions or contracts), conduct (open findings from marketing and complaints audits of its agreements) and products (sales paused by a covenant, or drifted).",
       inputSchema: {
         subject_type: z.enum(RISK_SUBJECTS),
         subject_id: z.string().min(1).max(200),
         status: z.enum(RISK_STATUSES).optional(),
         category: z.enum(RISK_CATEGORIES).optional(),
+        risk_area: AREA_FILTER.optional(),
         overdue_only: z.boolean().default(false),
         risk_id: UUID.optional(),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ subject_type, subject_id, status, category, overdue_only, risk_id }) => {
+    async ({ subject_type, subject_id, status, category, risk_area, overdue_only, risk_id }) => {
       const a = await access(subject_type, subject_id);
       if (!a) return noSubject(subject_type, subject_id);
       if (risk_id) {
@@ -380,8 +392,8 @@ export function registerRiskRegisterTools(server: McpServer, store: Store, user:
       }
       const { rows } = await store.db.query(
         `${SELECT} WHERE r.subject_type = $1 AND r.subject_id = $2 AND ($3::text IS NULL OR r.status = $3) AND ($4::text IS NULL OR r.category = $4)
-          AND (NOT $5::boolean OR (r.status <> 'closed' AND r.review_by < current_date)) ORDER BY r.created_at DESC LIMIT 500`,
-        [subject_type, a.subject.id, status ?? null, category ?? null, overdue_only],
+          AND (NOT $5::boolean OR (r.status <> 'closed' AND r.review_by < current_date)) AND ${areaWhere("r.risk_area", 6)} ORDER BY r.created_at DESC LIMIT 500`,
+        [subject_type, a.subject.id, status ?? null, category ?? null, overdue_only, risk_area ?? null],
       );
       const risks = rows.map(toRisk);
       const all = (await store.db.query(`SELECT status, review_by FROM ${T}.risk_register WHERE subject_type = $1 AND subject_id = $2`, [subject_type, a.subject.id])).rows;
@@ -397,20 +409,20 @@ export function registerRiskRegisterTools(server: McpServer, store: Store, user:
       {
         title: "Open risks across Mynt",
         description:
-          "Admin: the risks not yet closed on every register (apps', products' and the platform's own), or one kind (subject_type): counts by level (critical, high, medium, low), how many are overdue for review, the total, and the highest-scored risks (score, then the earliest review date), each with its subject's name.",
-        inputSchema: { limit: z.number().int().min(1).max(100).default(20), subject_type: z.enum(RISK_SUBJECTS).optional() },
+          "Admin: the risks not yet closed on every register (apps', products' and the platform's own), or one kind (subject_type), or one risk area (risk_area; unassigned: those with none): counts by level (critical, high, medium, low), how many are overdue for review, the total, and the highest-scored risks (score, then the earliest review date), each with its subject's name.",
+        inputSchema: { limit: z.number().int().min(1).max(100).default(20), subject_type: z.enum(RISK_SUBJECTS).optional(), risk_area: AREA_FILTER.optional() },
         annotations: { readOnlyHint: true },
       },
-      async ({ limit, subject_type }) => {
+      async ({ limit, subject_type, risk_area }) => {
         if (!(await me())?.roles.includes("admin")) return fail("Only Mynt's admins read every risk register");
-        const open = `r.status <> 'closed' AND ($1::text IS NULL OR r.subject_type = $1)`;
-        const all = (await store.db.query(`SELECT r.likelihood, r.impact, r.review_by FROM ${T}.risk_register r WHERE ${open}`, [subject_type ?? null])).rows;
+        const open = `r.status <> 'closed' AND ($1::text IS NULL OR r.subject_type = $1) AND ${areaWhere("r.risk_area", 2)}`;
+        const all = (await store.db.query(`SELECT r.likelihood, r.impact, r.review_by FROM ${T}.risk_register r WHERE ${open}`, [subject_type ?? null, risk_area ?? null])).rows;
         const counts = { critical: 0, high: 0, medium: 0, low: 0 };
         for (const x of all) counts[riskLevel(Number(x.likelihood) * Number(x.impact))] += 1;
         const overdue = all.filter((x) => x.review_by && day(x.review_by)! < today()).length;
         const { rows } = await store.db.query(
-          `${SELECT} WHERE ${open} ORDER BY r.likelihood * r.impact DESC, r.review_by ASC NULLS LAST, r.created_at DESC LIMIT $2`,
-          [subject_type ?? null, limit],
+          `${SELECT} WHERE ${open} ORDER BY r.likelihood * r.impact DESC, r.review_by ASC NULLS LAST, r.created_at DESC LIMIT $3`,
+          [subject_type ?? null, risk_area ?? null, limit],
         );
         const risks = [];
         for (const row of rows) {
