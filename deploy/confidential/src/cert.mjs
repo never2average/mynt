@@ -28,7 +28,9 @@ const CN = "550403"; // 2.5.4.3
 export function selfSignedEd25519(commonName, now = new Date(), days = 30) {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const serial = randomBytes(16);
-  serial[0] &= 0x7f; // positive
+  // Positive, and with a non-zero first byte: DER refuses a leading zero byte that isn't needed for the sign, which
+  // made about one boot in 256 fail to load its own certificate.
+  serial[0] = (serial[0] & 0x7f) | 0x40;
   const name = seq(set(seq(oid(CN), utf8(commonName))));
   const tbs = seq(
     tlv(0xa0, tlv(0x02, Buffer.from([2]))), // v3

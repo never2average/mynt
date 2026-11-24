@@ -8,21 +8,24 @@ import type { SealedHealthInput, SealedHealthResult } from "./shared/health.js";
 //
 //   local   in-process, keyed by MYNT_VAULT_KEY: today's behaviour, for development, tests, and every server until the
 //           operator deploys the confidential service. It attests nothing, and says so.
-//   remote  the confidential service (deploy/confidential) running as an attested confidential-VM workload, reached
-//           over mutually authenticated TLS whose server key is pinned to the one the hardware attested.
+//   remote  the confidential service (deploy/confidential) running in attested hardware (remote.ts), reached over
+//           mutually authenticated TLS whose server key is pinned to the one the hardware attested. One adapter per
+//           provider: an isolated enclave on a cloud VM (aws-nitro, the documented default) or a confidential-VM
+//           container (gcp-confidential-space).
 //
 // Later phases reuse these types rather than adding new ones: a build agent's confidential VM (behind SandboxHost) and a
 // confidential hosting tier both report `Measurements` and produce an `Attestation` checked the same way, against
-// image digests announced through the same release record (governance.ts).
+// measurements (an image digest, or an enclave's PCRs) announced through the same release record (governance.ts).
 
-export const CONFIDENTIAL_HOST_KINDS = ["local", "gcp-confidential-space"] as const;
+export const CONFIDENTIAL_HOST_KINDS = ["local", "aws-nitro", "gcp-confidential-space"] as const;
 export type ConfidentialHostKind = (typeof CONFIDENTIAL_HOST_KINDS)[number];
 
 // What a confidential workload is: the hardware and software that ran it and the exact image. Null where a host can't say.
 export interface Measurements {
   host: ConfidentialHostKind;
   attested: boolean; // false: nothing here is backed by hardware (the local host)
-  image_digest: string | null; // sha256:… of the container image the hardware measured
+  image_digest: string | null; // sha256:… of the container image the hardware measured (confidential-VM containers)
+  pcrs: EnclavePcrs | null; // the enclave image's measurements (enclave hosts)
   hardware: string | null; // e.g. the attestation's hardware model
   software: string | null; // the confidential OS image's name
   software_version: string | null;
@@ -30,10 +33,20 @@ export interface Measurements {
   reason: string | null; // why measurements are missing, when they are
 }
 
+// An enclave's platform configuration registers, hex SHA-384: pcr0 the whole image file, pcr1 the kernel and boot
+// ramdisk, pcr2 the application. What a release announces for an enclave host, and what its key policy names (pcr0).
+export interface EnclavePcrs {
+  pcr0: string;
+  pcr1: string;
+  pcr2: string;
+}
+
 export interface Attestation {
   host: ConfidentialHostKind;
-  format: "oidc-jwt" | "none";
-  token: string | null; // the attestation service's signed token (verify-mynt-enclave checks it); null on the local host
+  // oidc-jwt: a token from a cloud attestation service; nitro-cose: an enclave's attestation document (COSE_Sign1,
+  // base64), signed by the hardware's security module; none: the local host.
+  format: "oidc-jwt" | "nitro-cose" | "none";
+  token: string | null; // the signed token or document (verify-mynt-enclave checks it); null on the local host
   nonce: string;
   keys: EnclaveKeys; // bound into the token's nonces (shared/binding.ts)
   measurements: Measurements;
@@ -79,4 +92,6 @@ export interface ConfidentialHost {
   // A host whose root key is kept wrapped outside it: made once, the wrapped form (ciphertext only the host can unwrap)
   // returned for the operator to store where the host reads it at start.
   initialise?(): Promise<{ wrapped_root: string }>;
+  // Hosts whose wrapped root Mynt keeps (it holds nothing a restart keeps): handed back after a restart.
+  unlock?(wrappedRoot: string): Promise<void>;
 }

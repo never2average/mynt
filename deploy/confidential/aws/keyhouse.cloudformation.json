@@ -1,0 +1,178 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Mynt's confidential service (keyhouse) in an AWS Nitro Enclave: one EC2 instance with enclaves enabled, the KMS key that wraps the service's root (usable only by an enclave attesting the release's PCR0), the instance's role, and a security group open to Mynt's server only. Creates nothing else. docs/reference.md, Confidential computing.",
+  "Parameters": {
+    "ReleaseCommit": {
+      "Type": "String",
+      "AllowedPattern": "^[0-9a-f]{40}$",
+      "Description": "The full commit the release was built from (CI's confidential-image job ran on it). The instance builds the enclave from this commit."
+    },
+    "AllowedPcr0s": {
+      "Type": "CommaDelimitedList",
+      "Description": "The release's PCR0 as CI printed it (96 hex digits). During an upgrade, the old and the new, separated by a comma."
+    },
+    "MyntServerAddress": {
+      "Type": "String",
+      "AllowedPattern": "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}/32$",
+      "Description": "Mynt's server's public IPv4 address followed by /32. Only it may connect."
+    },
+    "ClientAuthorityBase64": {
+      "Type": "String",
+      "MinLength": 100,
+      "Description": "The authority certificate for Mynt's client certificate, as make-client-cert.sh printed it (base64; a certificate, not a key)."
+    },
+    "InstanceType": {
+      "Type": "String",
+      "Default": "c6a.xlarge",
+      "AllowedValues": ["c6a.xlarge", "c6i.xlarge", "m6a.xlarge", "m6i.xlarge", "c5.xlarge", "m5.xlarge"],
+      "Description": "4 vCPUs, 2 of them for the enclave. Every choice here supports Nitro Enclaves."
+    },
+    "RepositoryUrl": {
+      "Type": "String",
+      "Default": "https://github.com/never2average/mynt.git",
+      "Description": "Where the instance fetches the release's commit from."
+    },
+    "AllowSessionManager": {
+      "Type": "String",
+      "Default": "false",
+      "AllowedValues": ["false", "true"],
+      "Description": "true lets the operator open a shell on the instance (never in the enclave) through Systems Manager, to read its logs."
+    }
+  },
+  "Conditions": {
+    "SessionManager": { "Fn::Equals": [{ "Ref": "AllowSessionManager" }, "true"] }
+  },
+  "Resources": {
+    "InstanceRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "Description": "Mynt keyhouse parent instance: may ask KMS to unwrap the keyhouse's root, which KMS answers only to an attested enclave",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{ "Effect": "Allow", "Principal": { "Service": "ec2.amazonaws.com" }, "Action": "sts:AssumeRole" }]
+        },
+        "ManagedPolicyArns": { "Fn::If": ["SessionManager", [{ "Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore" }], { "Ref": "AWS::NoValue" }] }
+      }
+    },
+    "InstanceRoleKmsPolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "keyhouse-wrap-key",
+        "Roles": [{ "Ref": "InstanceRole" }],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{ "Effect": "Allow", "Action": ["kms:Decrypt", "kms:GenerateDataKey"], "Resource": { "Fn::GetAtt": ["WrapKey", "Arn"] } }]
+        }
+      }
+    },
+    "InstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": { "Roles": [{ "Ref": "InstanceRole" }] }
+    },
+    "WrapKey": {
+      "Type": "AWS::KMS::Key",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "Description": "Mynt keyhouse wrap key: wraps the keyhouse's root; usable only by an enclave attesting an allowed PCR0",
+        "KeySpec": "SYMMETRIC_DEFAULT",
+        "KeyUsage": "ENCRYPT_DECRYPT",
+        "EnableKeyRotation": true,
+        "KeyPolicy": {
+          "Version": "2012-10-17",
+          "Id": "mynt-keyhouse-wrap-key",
+          "Statement": [
+            {
+              "Sid": "AccountManagesButDoesNotUse",
+              "Effect": "Allow",
+              "Principal": { "AWS": { "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" } },
+              "Action": [
+                "kms:Describe*",
+                "kms:Get*",
+                "kms:List*",
+                "kms:PutKeyPolicy",
+                "kms:Enable*",
+                "kms:Disable*",
+                "kms:Update*",
+                "kms:TagResource",
+                "kms:UntagResource",
+                "kms:ScheduleKeyDeletion",
+                "kms:CancelKeyDeletion"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "EnclaveUsesWithAttestation",
+              "Effect": "Allow",
+              "Principal": { "AWS": { "Fn::GetAtt": ["InstanceRole", "Arn"] } },
+              "Action": ["kms:Decrypt", "kms:GenerateDataKey"],
+              "Resource": "*",
+              "Condition": { "StringEqualsIgnoreCase": { "kms:RecipientAttestation:ImageSha384": { "Ref": "AllowedPcr0s" } } }
+            },
+            {
+              "Sid": "NobodyUsesWithoutAttestation",
+              "Effect": "Deny",
+              "Principal": { "AWS": "*" },
+              "Action": ["kms:Decrypt", "kms:GenerateDataKey", "kms:GenerateDataKeyPair"],
+              "Resource": "*",
+              "Condition": { "StringNotEqualsIgnoreCase": { "kms:RecipientAttestation:ImageSha384": { "Ref": "AllowedPcr0s" } } }
+            },
+            {
+              "Sid": "NobodyReEncrypts",
+              "Effect": "Deny",
+              "Principal": { "AWS": "*" },
+              "Action": ["kms:ReEncryptFrom", "kms:ReEncryptTo", "kms:CreateGrant", "kms:Encrypt", "kms:GenerateDataKeyWithoutPlaintext", "kms:GenerateDataKeyPairWithoutPlaintext"],
+              "Resource": "*"
+            }
+          ]
+        }
+      }
+    },
+    "SecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Mynt keyhouse: port 8443 from Mynt's server only",
+        "SecurityGroupIngress": [{ "IpProtocol": "tcp", "FromPort": 8443, "ToPort": 8443, "CidrIp": { "Ref": "MyntServerAddress" }, "Description": "Mynt's server" }]
+      }
+    },
+    "LaunchTemplate": {
+      "Type": "AWS::EC2::LaunchTemplate",
+      "Properties": {
+        "LaunchTemplateData": {
+          "ImageId": "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}",
+          "InstanceType": { "Ref": "InstanceType" },
+          "IamInstanceProfile": { "Arn": { "Fn::GetAtt": ["InstanceProfile", "Arn"] } },
+          "SecurityGroupIds": [{ "Fn::GetAtt": ["SecurityGroup", "GroupId"] }],
+          "EnclaveOptions": { "Enabled": true },
+          "MetadataOptions": { "HttpEndpoint": "enabled", "HttpTokens": "required", "HttpPutResponseHopLimit": 1 },
+          "BlockDeviceMappings": [{ "DeviceName": "/dev/xvda", "Ebs": { "VolumeSize": 30, "VolumeType": "gp3", "Encrypted": true, "DeleteOnTermination": true } }],
+          "TagSpecifications": [{ "ResourceType": "instance", "Tags": [{ "Key": "Name", "Value": "mynt-keyhouse" }] }],
+          "UserData": {
+            "Fn::Base64": {
+              "Fn::Sub": [
+                "#!/bin/bash\nset -euo pipefail\ndnf install -y -q git\nmkdir -p /opt/mynt-keyhouse/src && cd /opt/mynt-keyhouse/src\ngit init -q && git remote add origin '${RepositoryUrl}'\ngit fetch -q --depth 1 origin '${ReleaseCommit}' && git checkout -q FETCH_HEAD\ndeploy/confidential/aws/parent-setup.sh --region '${AWS::Region}' --kms-key '${KeyArn}' --client-ca-b64 '${ClientAuthorityBase64}' --allowed-pcr0 '${Pcr0s}'\n",
+                { "KeyArn": { "Fn::GetAtt": ["WrapKey", "Arn"] }, "Pcr0s": { "Fn::Join": [",", { "Ref": "AllowedPcr0s" }] } }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "Instance": {
+      "Type": "AWS::EC2::Instance",
+      "DependsOn": ["InstanceRoleKmsPolicy"],
+      "Properties": {
+        "LaunchTemplate": { "LaunchTemplateId": { "Ref": "LaunchTemplate" }, "Version": { "Fn::GetAtt": ["LaunchTemplate", "LatestVersionNumber"] } }
+      }
+    },
+    "Address": {
+      "Type": "AWS::EC2::EIP",
+      "Properties": { "InstanceId": { "Ref": "Instance" }, "Tags": [{ "Key": "Name", "Value": "mynt-keyhouse" }] }
+    }
+  },
+  "Outputs": {
+    "ConfidentialHostUrl": { "Description": "Set as CONFIDENTIAL_HOST_URL on Mynt's server", "Value": { "Fn::Sub": "https://${Address}:8443" } },
+    "WrapKeyArn": { "Description": "Set as CONFIDENTIAL_HOST_KMS_KEY on Mynt's server", "Value": { "Fn::GetAtt": ["WrapKey", "Arn"] } },
+    "InstanceId": { "Description": "The parent instance", "Value": { "Ref": "Instance" } }
+  }
+}

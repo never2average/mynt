@@ -66,7 +66,14 @@ test("the service's policy and Mynt's agree on which purposes ever come back out
 
 test("the service's image is pinned and has no dependencies to drift", () => {
   const docker = readFileSync(`${KEYHOUSE}Dockerfile`, "utf8");
-  assert.match(docker, /^FROM [^\s]+@sha256:[0-9a-f]{64}$/m);
+  // Every base is pinned by digest; any other FROM names an earlier stage of the same file.
+  const stages = [];
+  for (const [, image, stage] of docker.matchAll(/^FROM (\S+)(?: AS (\S+))?$/gm)) {
+    assert.ok(/@sha256:[0-9a-f]{64}$/.test(image) || stages.includes(image), `${image} is neither pinned by digest nor an earlier stage`);
+    if (stage) stages.push(stage);
+  }
+  assert.deepEqual(stages, ["enclave-io", "keyhouse", "nitro", "confidential-space"]);
+  assert.match(docker, /^FROM keyhouse AS confidential-space$/m, "the default target (the last stage) stays the container phase 1 built");
   const pkg = JSON.parse(readFileSync(`${KEYHOUSE}package.json`, "utf8"));
   const lock = JSON.parse(readFileSync(`${KEYHOUSE}package-lock.json`, "utf8"));
   assert.deepEqual(pkg.dependencies, {});

@@ -221,7 +221,7 @@ async function confidentialAttestation(ctx: AdminContext, req: IncomingMessage, 
   lastAttestation = Date.now();
   try {
     const attestation = await host.attest(nonce);
-    const releases = ctx.confidentialReleases ? (await ctx.confidentialReleases.list()).filter((r) => r.valid && !r.withdrawn_at).map((r) => ({ image_digest: r.image_digest, release: r.release, effective_at: r.effective_at, in_effect: r.in_effect })) : [];
+    const releases = ctx.confidentialReleases ? (await ctx.confidentialReleases.list()).filter((r) => r.valid && !r.withdrawn_at).map((r) => ({ image_digest: r.image_digest, pcrs: r.pcrs, release: r.release, effective_at: r.effective_at, in_effect: r.in_effect })) : [];
     return sendJson(res, 200, { ...attestation, releases }, { "Cache-Control": "no-store" });
   } catch (e) {
     console.error(`confidential attestation: ${(e as Error).message}`);

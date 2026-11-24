@@ -113,14 +113,15 @@ jobs:
       - run: npm ci --workspaces=false
       - run: npm run build
       - run: npm run demo:partner
-  # Mynt's confidential service (deploy/confidential): its tests, then its image built twice from scratch and the two
-  # digests compared, so the digest partners check (and the cloud key policy names) is reproducible from this commit.
-  # The digest is printed and kept with the run. Nothing is pushed and nothing is deployed.
+  # Mynt's confidential service (deploy/confidential): its tests, then its container image and its enclave image file
+  # each built twice from scratch and compared (image digests, enclave PCRs), so what partners check (and the key
+  # policy names) is reproducible from this commit. Both are printed and kept with the run. Nothing is pushed and
+  # nothing is deployed.
   confidential-image:
     needs: changes
     if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -149,10 +150,34 @@ jobs:
           echo "$one" > keyhouse-digest.txt
           echo "### Confidential service image digest" >> "$GITHUB_STEP_SUMMARY"
           echo "\`$one\` (commit \`$GITHUB_SHA\`). Announce it with announce_enclave_release; partners check it with verify-mynt-enclave." >> "$GITHUB_STEP_SUMMARY"
+      # The enclave helper (Go, standard library only), in the same pinned toolchain the image builds it with.
+      - name: Enclave helper tests
+        run: |
+          go_image="$(sed -n 's/^FROM \(golang:[^ ]*\) AS enclave-io$/\1/p' deploy/confidential/Dockerfile)"
+          docker run --rm -v "$PWD/deploy/confidential/enclave-io:/src:ro" -w /tmp/b "$go_image" \
+            sh -c 'cp -r /src/. . && test -z "$(gofmt -l .)" && go vet ./... && go test ./...'
+      # The enclave image file (EIF): built twice from scratch with the release's pinned nitro-cli, and the PCRs compared.
+      # They're what the hardware measures, what the KMS key policy names (PCR0) and what partners check.
+      - name: Build the enclave image file twice and compare PCRs
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          deploy/confidential/aws/build-eif.sh /tmp/eif-1 mynt-keyhouse-nitro:1
+          docker image rm mynt-keyhouse-nitro:1 >/dev/null
+          deploy/confidential/aws/build-eif.sh /tmp/eif-2 mynt-keyhouse-nitro:2
+          cmp /tmp/eif-1/pcrs.json /tmp/eif-2/pcrs.json || { echo "The enclave image isn't reproducible:"; cat /tmp/eif-1/pcrs.json /tmp/eif-2/pcrs.json; exit 1; }
+          cp /tmp/eif-1/pcrs.json keyhouse-pcrs.json
+          echo "Enclave PCRs for $GITHUB_SHA:"; cat keyhouse-pcrs.json
+          {
+            echo "### Enclave image PCRs"
+            echo "Commit \`$GITHUB_SHA\`. Announce them with announce_enclave_release; the key policy's AllowedPcr0s takes pcr0; partners check all three with verify-mynt-enclave."
+            echo '```json'; cat keyhouse-pcrs.json; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: confidential-image-digest
-          path: keyhouse-digest.txt
+          path: |
+            keyhouse-digest.txt
+            keyhouse-pcrs.json
   # Mynt's Solana toolchain, installed by the same pinned, checksum-verified script the sandboxes run, builds the
   # coding agents' template Anchor program verifiably and tests it on a local validator, exactly as Mynt's verify
   # sandbox does (src/solana/toolchain.ts).
