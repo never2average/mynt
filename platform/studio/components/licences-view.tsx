@@ -37,8 +37,10 @@ import {
   type Licence,
   type LicenceFilters,
 } from "@/lib/compliance"
-import type { LicencesView as View } from "@/lib/licences-tabs"
 import type { Loaded } from "@/lib/use-compliance"
+
+// The table, or the coverage map in its place.
+type View = "table" | "map"
 
 export const selectClass =
   "h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/20"

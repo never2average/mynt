@@ -12,8 +12,7 @@ import { auditFiltersOn, auditQuery, AuditsView, AuditTabs, NO_AUDIT_FILTERS, Ob
 import { NotReady } from "@/components/not-available";
 import { Button } from "@/components/ui/button";
 import { useWorkspace } from "@/components/workspace-context";
-import { AddRequirementSheet, AgreementAuditSheet, AgreementAuditsView } from "@/components/agreement-audits-view";
-import { NO_AGREEMENT_AUDIT_FILTERS, type AgreementAuditList, type AgreementAuditRow } from "@/lib/agreement-audits";
+import { AgreementAuditsPanel, pickAgreementAudits } from "@/components/agreement-audits-panel";
 import { auditsTabOf, type AuditClass, type AuditRow, type AuditRowPage, type AuditsTab, type Obligation } from "@/lib/audit-classes";
 import { useComplianceData } from "@/lib/use-compliance";
 import { withWorkspace } from "@/lib/workspaces";
@@ -69,9 +68,6 @@ function ClassTab({ auditClass, members, apps, initialAction }: { auditClass: Ex
   );
 }
 
-type AgreementAuditsData = { list: AgreementAuditList; canAddRequirement: boolean };
-const pickAgreementAudits = (body: Record<string, unknown>) => (body.list ? ({ list: body.list as AgreementAuditList, canAddRequirement: body.canAddRequirement === true } as AgreementAuditsData) : undefined);
-
 // Agreement audits past their due date flag the apps here too, without touching the regulator's
 // obligations: a line above the table, with a labelled button to the overdue ones.
 function OverdueAgreementAudits({ onShow }: { onShow: () => void }) {
@@ -100,19 +96,9 @@ function ObligationsTab({ onShowOverdue }: { onShowOverdue: () => void }) {
   );
 }
 
+// The list, its sheets and its data are shared with the Licences page's Audit obligations tab (read-only there).
 function AgreementAuditsTab({ agreement, overdue }: { agreement: string; overdue: boolean }) {
-  const { state, reload } = useComplianceData("/api/agreement-audits", pickAgreementAudits);
-  const [open, setOpen] = useState<AgreementAuditRow | null>(null);
-  const [adding, setAdding] = useState(false);
-  if (state.kind !== "ready") return <NotReady state={state} what="Agreement audits" />;
-  const initial = { ...NO_AGREEMENT_AUDIT_FILTERS, agreement: agreement ? [agreement] : [], status: overdue ? ["overdue"] : [] };
-  return (
-    <>
-      <AgreementAuditsView list={state.data.list} initial={initial} canAddRequirement={state.data.canAddRequirement} onOpen={setOpen} onAddRequirement={() => setAdding(true)} />
-      <AgreementAuditSheet auditId={open?.id ?? null} title={open?.name ?? "Audit"} open={open !== null} onClose={() => setOpen(null)} onChanged={reload} />
-      <AddRequirementSheet agreements={state.data.list.agreements} open={adding} onClose={() => setAdding(false)} onDone={reload} />
-    </>
-  );
+  return <AgreementAuditsPanel agreement={agreement} overdue={overdue} />;
 }
 
 export default function AuditsPage() {

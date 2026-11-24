@@ -46,7 +46,7 @@ const { lpAgreementsFrom, isLicenceProvider } = await import("@/lib/lp-agreement
 const view = await import("@/components/lp-agreements-view");
 const listRoute = await import("@/app/api/agreements/route");
 const actionRoute = await import("@/app/api/agreements/[agreementId]/route");
-const { licencesTabsFor, shownLicencesTab, licencesTabOf } = await import("@/lib/licences-tabs");
+const { licencesTabOf, seesLicences } = await import("@/lib/licences-tabs");
 const { pageGateFor } = await import("@/components/studio-gates");
 
 const LP_SESSION = { id: "s", createdAt: 0, lastSeen: 0, tokens: { access_token: "t", token_type: "Bearer" }, roles: ["license_provider"], rolesAt: Date.now() } as Session;
@@ -81,26 +81,28 @@ describe("the provider's agreements", () => {
   it("the tab: one table with labelled actions per row (Review agreement, Accept, Decline, Sign, End agreement), never icon-only", () => {
     const html = renderToStaticMarkup(<view.LpAgreementsView rows={ROWS} />);
     const doc = new DOMParser().parseFromString(html, "text/html");
-    expect([...doc.querySelectorAll("th")].map((h) => h.textContent)).toEqual(["App", "Developer workspace", "Products", "Kind", "Status", "Effective", "Document", "Actions"]);
+    expect([...doc.querySelectorAll("th")].map((h) => h.textContent)).toEqual(["App", "Other party", "Products", "Kind", "Status", "Effective", "Document", "Actions"]);
     const labels = (id: string) => [...doc.querySelectorAll(`[data-agreement-actions="${id}"] [data-agreement-action]`)].map((b) => b.textContent);
     expect(labels(PROPOSED)).toEqual(["Accept", "Decline"]);
     expect(labels(ACCEPTED)).toEqual(["Sign", "End agreement"]);
     expect(labels(SIGNED)).toEqual(["End agreement"]);
     expect(labels(ENDED)).toEqual([]);
+    // The Business agreements tab lists program and data-sharing agreements: all four here.
     expect(doc.querySelectorAll("[data-review]").length).toBe(4);
     expect(doc.querySelector(`[data-review="${PROPOSED}"]`)?.textContent).toBe("Review agreement");
     expect(doc.querySelector(`[data-lp-document="${PROPOSED}"]`)?.getAttribute("href")).toBe("https://docs.example.com/p.pdf");
-    expect(doc.querySelector("[data-lp-waiting]")?.textContent).toContain("2 agreements wait for your firm");
+    expect(doc.querySelector("[data-lp-waiting]")?.textContent).toContain("2 agreements wait for you");
     expect(html).toContain('aria-label="Search agreements"');
     expect(html).toContain("Export CSV");
     expect(renderToStaticMarkup(<view.LpAgreementsView rows={[]} />)).toContain("No agreements yet");
   });
 
   it("search and the status filter narrow the rows; Export CSV writes what's shown", () => {
-    expect(view.filterLpAgreements(ROWS, "beta", "").map((r) => r.id)).toEqual([ACCEPTED]);
-    expect(view.filterLpAgreements(ROWS, "", "signed").map((r) => r.id)).toEqual([SIGNED]);
-    expect(view.filterLpAgreements(ROWS, "card", "proposed").map((r) => r.id)).toEqual([PROPOSED]);
-    expect(view.lpAgreementsCsv([ROWS[0]]).split("\n")[1]).toContain("Cards,Acme Labs,Card,Program agreement,Proposed,2026-12-01");
+    expect(view.filterLpAgreements(ROWS, { query: "beta" }).map((r) => r.id)).toEqual([ACCEPTED]);
+    expect(view.filterLpAgreements(ROWS, { status: ["signed"] }).map((r) => r.id)).toEqual([SIGNED]);
+    expect(view.filterLpAgreements(ROWS, { query: "card", status: ["proposed"] }).map((r) => r.id)).toEqual([PROPOSED]);
+    expect(view.filterLpAgreements(ROWS, { kind: ["data_sharing"] }).map((r) => r.id)).toEqual([SIGNED]);
+    expect(view.lpAgreementsCsv([ROWS[0]]).split("\n")[1]).toContain("Cards,Acme Labs,Your firm's side,Them,Card,Program agreement,Proposed,2026-12-01");
   });
 
   it("Review agreement shows the terms in full, with the same actions; Accept opens a sheet that posts to the firm's route", async () => {
@@ -141,7 +143,7 @@ describe("the provider's agreements", () => {
 });
 
 describe("the routes", () => {
-  const get = () => listRoute.GET();
+  const get = () => listRoute.GET(new Request("http://localhost:3000/api/agreements"));
   const post = (body: unknown, id = PROPOSED) =>
     actionRoute.POST(new Request(`http://localhost:3000/api/agreements/${id}`, { method: "POST", body: JSON.stringify(body) }), { params: Promise.resolve({ agreementId: id }) });
 
@@ -150,7 +152,7 @@ describe("the routes", () => {
     expect(res.status).toBe(200);
     expect(fake.calls.find((c) => c.name === "list_app_agreements")?.args).toEqual({});
     expect(((await res.json()) as { agreements: { id: string }[] }).agreements.map((a) => a.id)).toEqual([PROPOSED, ACCEPTED, SIGNED, ENDED]);
-    fake.session = { ...LP_SESSION, roles: ["developer"] };
+    fake.session = { ...LP_SESSION, roles: ["consumer"] };
     expect((await get()).status).toBe(403);
     fake.session = undefined;
     expect((await get()).status).toBe(401);
@@ -182,7 +184,7 @@ describe("the routes", () => {
     expect(refused.status).toBe(422);
     expect(((await refused.json()) as { message: string }).message).toContain("not waiting for an answer");
     fake.refuse = null;
-    fake.session = { ...LP_SESSION, roles: ["developer"] };
+    fake.session = { ...LP_SESSION, roles: ["consumer"] };
     expect((await post({ action: "accept" })).status).toBe(403);
     fake.session = { ...LP_SESSION };
     fake.tools = [{ name: "list_app_agreements" }];
@@ -190,15 +192,13 @@ describe("the routes", () => {
   });
 });
 
-describe("who sees the Agreements tab", () => {
-  it("licence providers: on the Licences page, even without the developer role; developers keep the Licences tab", () => {
-    expect(licencesTabsFor({ developer: true })).toEqual(["licences"]);
-    expect(licencesTabsFor({ developer: true, licenceProvider: true })).toEqual(["licences", "agreements"]);
-    expect(licencesTabsFor({ developer: false, licenceProvider: true })).toEqual(["agreements"]);
-    expect(shownLicencesTab("licences", ["agreements"])).toBe("agreements");
-    expect(shownLicencesTab("agreements", ["licences"])).toBe("licences");
-    expect(licencesTabOf("agreements")).toBe("agreements");
-    expect(licencesTabOf("coverage")).toBe("licences");
+describe("who sees the Licences page", () => {
+  it("licence providers, even without the developer role, and developers; the old Agreements tab is Business agreements", () => {
+    expect(seesLicences({ developer: true })).toBe(true);
+    expect(seesLicences({ developer: false, licenceProvider: true })).toBe(true);
+    expect(seesLicences({ developer: false, licenceProvider: false })).toBe(false);
+    expect(licencesTabOf("agreements")).toBe("business-agreements");
+    expect(licencesTabOf("coverage")).toBe("business-agreements");
     const lpOnly = { developer: false, licenceProvider: true, liquidity: { builder: false, liquidityProvider: false }, owner: null };
     expect(pageGateFor("/licences", lpOnly, false)).toBe("none");
     expect(pageGateFor("/audits", lpOnly, false)).toBe("developer");

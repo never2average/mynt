@@ -231,9 +231,9 @@ export type AgreementActionBody = { action: "sign" | "terminate" | "accept" | "d
 const ACTION_COPY: Record<AgreementAction, { title: string; says: string; button: string; busy: string; reason: "required" | "optional" | null }> = {
   sign: { title: "Sign agreement", says: "Records your side's signature, with your name and the time, in the audit trail. It's signed once both sides have signed.", button: "Sign agreement", busy: "Signing…", reason: null },
   end: { title: "End agreement", says: "Ends it for both sides. The other side is told, with your reason. An app in production that relied on it keeps running, but its production checks fail until a new program agreement is signed.", button: "End agreement", busy: "Ending…", reason: "required" },
-  withdraw: { title: "Withdraw proposal", says: "Withdraws your proposal before the other firm answers it. They're told, with your reason.", button: "Withdraw proposal", busy: "Withdrawing…", reason: "required" },
-  accept: { title: "Accept agreement", says: "Accepts the proposal for your firm. Then both sides sign it; it's signed only once both have.", button: "Accept agreement", busy: "Accepting…", reason: "optional" },
-  decline: { title: "Decline agreement", says: "Declines the proposal for your firm. The app's side can propose another.", button: "Decline agreement", busy: "Declining…", reason: "optional" },
+  withdraw: { title: "Withdraw proposal", says: "Withdraws your proposal before the other side answers it. They're told, with your reason.", button: "Withdraw proposal", busy: "Withdrawing…", reason: "required" },
+  accept: { title: "Accept agreement", says: "Accepts the other side's proposal for your side. Then both sides sign it; it's in force only once both have.", button: "Accept agreement", busy: "Accepting…", reason: "optional" },
+  decline: { title: "Decline agreement", says: "Declines the other side's proposal for your side. Either side can propose another.", button: "Decline agreement", busy: "Declining…", reason: "optional" },
 }
 export const actionTitle = (a: AgreementAction) => ACTION_COPY[a].title
 
@@ -278,7 +278,7 @@ export function AgreementActionView({
       <p className="text-sm text-muted-foreground">{copy.says}</p>
       {copy.reason && (
         <label className="flex flex-col gap-1 text-sm">
-          {needs ? "Reason" : "Note to the app's side (optional)"}
+          {needs ? "Reason" : "Note to the other side (optional)"}
           <textarea className={`${field} min-h-20`} value={text} onChange={(e) => setText(e.target.value)} maxLength={2000} required={needs} data-agreement-reason />
         </label>
       )}

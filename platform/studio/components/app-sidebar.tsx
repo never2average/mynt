@@ -1,7 +1,7 @@
 "use client"
 
 // The studio's sidebar, laid out as shadcn/ui's sidebar-07 block (MIT), collapsible to icons:
-// the workspace switcher at the top, Dashboard, Licences (with Coverage as a tab), Marketplace (service providers'
+// the workspace switcher at the top, Dashboard, Licences (agreements with licence providers), Marketplace (service providers'
 // standard services), Audits and Workspace (its
 // members, invitations, apps and settings), the workspace's apps in three folders by stage
 // (Production, Staging, Ideas: a rocket, a flask and a lightbulb) together with the user's financial
@@ -93,7 +93,7 @@ export type SidebarViewProps = {
   onAnswerInvitation?: (id: string, action: "accept" | "decline") => Promise<string | null>
   liquidity?: boolean
   developer?: boolean // false: only Dashboard (and Earn for liquidity providers, Licences for licence providers); no workspaces or apps
-  licenceProvider?: boolean // a licence provider: Licences (its Agreements tab) even without the developer role
+  licenceProvider?: boolean // a licence provider: Licences (its agreement tabs) even without the developer role
   workspaceSettings?: WorkspaceSettings // the switcher's Rename / Archive / Unarchive workspace
   products?: MyProduct[] | null // the user's own financial products, in the stage folders with the apps (null while loading)
   admin?: boolean // a Mynt admin: the Platform admin badge above their name

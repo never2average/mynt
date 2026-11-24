@@ -1,87 +1,35 @@
 "use client";
 
-// Licences: two tabs in the page header, each for the roles it serves (lib/licences-tabs.ts).
-// - Licences (developers): the selected workspace's partner licences as one table, or the coverage
-//   map in its place (components/licences-page-view.tsx). The view and map are kept in the address.
-// - Agreements (licence providers): what apps' workspaces proposed to or made with their firm, with
-//   Review agreement, Accept, Decline, Sign and End agreement on each row
-//   (components/lp-agreements-view.tsx).
-import { useState } from "react";
+// Licences: four tabs in the page body under the header (lib/licences-tabs.ts), each open to developers and licence
+// providers alike, each showing what the person's side holds. No row of figures above them.
+// - Business agreements: program and data-sharing agreements (components/lp-agreements-view.tsx). Either side
+//   proposes (Propose agreement); the other accepts or declines; both sign.
+// - MSA: master services agreements between a firm and a workspace, the same way (Propose MSA); below them, a licence
+//   provider's agreement templates, the starting documents it proposes from (Upload agreement template, Retire).
+// - SLA: service level agreements (Propose SLA), each with its Commitments and Breaches in its detail
+//   (components/agreement-slas-view.tsx): Add commitment before it's signed, Record breach and Resolve breach after.
+// - Audit obligations: the oversight audits under program agreements, shown only (components/agreement-audits-panel.tsx);
+//   they're acted on from the Audits page.
+import { useCallback, useState } from "react";
+import { FilePlus2 } from "lucide-react";
 
-import type { MapRegion } from "@/components/coverage-view";
-import { HeaderTabs } from "@/components/header-tabs";
-import { LicencesPageView } from "@/components/licences-page-view";
+import { AgreementAuditsPanel } from "@/components/agreement-audits-panel";
 import { AgreementTemplatesSection, useAgreementTemplates } from "@/components/agreement-esign";
-import { LpAgreementsView, useLpAgreements } from "@/components/lp-agreements-view";
+import { SlaSheet, slaDetailTabs, type SlaSheetMode } from "@/components/agreement-slas-view";
+import { LpAgreementsView, pickAgreements, type AgreementsData } from "@/components/lp-agreements-view";
+import { NotReady } from "@/components/not-available";
+import { Button } from "@/components/ui/button";
 import { Tab, TabList } from "@/components/ui/tabs";
-import type { Coverage, Licence } from "@/lib/compliance";
-import { LICENCES_TAB_LABELS, licencesTabsFor, shownLicencesTab, type LicencesTab, type LicencesView } from "@/lib/licences-tabs";
-import { useComplianceData } from "@/lib/use-compliance";
+import type { SlaList } from "@/lib/agreement-slas";
+import { LICENCES_TAB_LABELS, LICENCES_TABS, licencesHref, type LicencesTab } from "@/lib/licences-tabs";
+import { TAB_KINDS } from "@/lib/lp-agreements";
+import { useComplianceData, type Loaded } from "@/lib/use-compliance";
 import { useStudioAccess } from "@/lib/use-liquidity-access";
 
-const pickCoverage = (body: Record<string, unknown>) => body.coverage as Coverage | undefined;
-const pickLicences = (body: Record<string, unknown>) => body.licences as Licence[] | undefined;
-
-function LicencesTabPanel({ initialView, initialRegion }: { initialView: LicencesView; initialRegion: MapRegion }) {
-  const [view, setView] = useState<LicencesView>(initialView);
-  const [region, setRegion] = useState<MapRegion>(initialRegion);
-  const { state: coverage } = useComplianceData("/api/coverage", pickCoverage);
-  const { state: licences } = useComplianceData("/api/licences", pickLicences);
-  const remember = (v: LicencesView, r: MapRegion) => window.history.replaceState(null, "", v === "map" ? `/licences?view=map&region=${r}` : "/licences");
+export function LicencesTabs({ tab, onTab }: { tab: LicencesTab; onTab: (t: LicencesTab) => void }) {
   return (
-    <LicencesPageView
-      view={view}
-      onView={(v) => {
-        setView(v);
-        remember(v, region);
-      }}
-      region={region}
-      onRegion={(r) => {
-        setRegion(r);
-        remember(view, r);
-      }}
-      coverage={coverage}
-      licences={licences}
-    />
-  );
-}
-
-function AgreementsTabPanel() {
-  const { state, reload } = useLpAgreements(true);
-  if (state.kind === "loading") return <p className="text-sm text-muted-foreground">Loading agreements…</p>;
-  if (state.kind === "error")
-    return (
-      <p role="alert" className="text-sm text-destructive">
-        {state.message}
-      </p>
-    );
-  return (
-    <div className="flex min-h-0 flex-1 flex-col gap-6">
-      <LpAgreementsView rows={state.rows} onChanged={reload} />
-      <TemplatesPanel />
-    </div>
-  );
-}
-
-// The firm's agreement templates, below its agreements (components/agreement-esign.tsx). Nothing while Mynt has no
-// templates yet (an older Mynt).
-function TemplatesPanel() {
-  const { state, reload } = useAgreementTemplates(true);
-  if (state.kind === "loading" || state.kind === "unsupported") return null;
-  if (state.kind === "error")
-    return (
-      <p role="alert" className="text-sm text-destructive">
-        {state.message}
-      </p>
-    );
-  return <AgreementTemplatesSection data={state.data} onChanged={reload} />;
-}
-
-export function LicencesTabs({ tabs, tab, onTab }: { tabs: LicencesTab[]; tab: LicencesTab; onTab: (t: LicencesTab) => void }) {
-  if (tabs.length < 2) return null;
-  return (
-    <TabList aria-label="Licences">
-      {tabs.map((t) => (
+    <TabList aria-label="Licences" data-licences-tabs>
+      {LICENCES_TABS.map((t) => (
         <Tab key={t} selected={tab === t} data-tab={t} onClick={() => onTab(t)}>
           {LICENCES_TAB_LABELS[t]}
         </Tab>
@@ -90,25 +38,107 @@ export function LicencesTabs({ tabs, tab, onTab }: { tabs: LicencesTab[]; tab: L
   );
 }
 
-export function LicencesPage({ initialTab = "licences", initialView, initialRegion }: { initialTab?: LicencesTab; initialView: LicencesView; initialRegion: MapRegion }) {
+const pickSlas = (body: Record<string, unknown>) => (body.list ? (body.list as SlaList) : undefined);
+
+function AgreementsTab({ state, reload, children }: { state: Loaded<AgreementsData>; reload: () => void; children: (data: AgreementsData, reload: () => void) => React.ReactNode }) {
+  if (state.kind !== "ready") return <NotReady state={state} what="Agreements" />;
+  return <>{children(state.data, reload)}</>;
+}
+
+function MsaTab({ state, reload, licenceProvider }: { state: Loaded<AgreementsData>; reload: () => void; licenceProvider: boolean }) {
+  const { state: templates, reload: reloadTemplates } = useAgreementTemplates(licenceProvider);
+  return (
+    <AgreementsTab state={state} reload={reload}>
+      {(data) => (
+        <div className="flex min-h-0 flex-1 flex-col gap-6">
+          <LpAgreementsView
+            rows={data.agreements}
+            kinds={TAB_KINDS.msa}
+            targets={data.targets}
+            templates={templates.kind === "ready" ? templates.data.templates : []}
+            onChanged={reload}
+            auditRequirements={false}
+            csvName="msas.csv"
+            ctaLabel="Propose MSA"
+            empty="No master services agreements yet. Either side proposes one: the firm to a workspace building on its products, or the workspace to the firm."
+          />
+          {licenceProvider && templates.kind === "ready" && <AgreementTemplatesSection data={templates.data} onChanged={reloadTemplates} />}
+          {licenceProvider && templates.kind === "error" && (
+            <p role="alert" className="text-sm text-destructive">
+              {templates.message}
+            </p>
+          )}
+        </div>
+      )}
+    </AgreementsTab>
+  );
+}
+
+function SlaTab({ state, reload }: { state: Loaded<AgreementsData>; reload: () => void }) {
+  const { state: slas, reload: reloadSlas } = useComplianceData("/api/agreement-slas", pickSlas);
+  const [sheet, setSheet] = useState<SlaSheetMode | null>(null);
+  const list = slas.kind === "ready" ? slas.data : { slas: [], canAdd: [] };
+  const both = useCallback(() => {
+    reload();
+    reloadSlas();
+  }, [reload, reloadSlas]);
+  return (
+    <AgreementsTab state={state} reload={reload}>
+      {(data) => (
+        <>
+          <LpAgreementsView
+            rows={data.agreements}
+            kinds={TAB_KINDS.sla}
+            targets={data.targets}
+            onChanged={both}
+            auditRequirements={false}
+            csvName="slas.csv"
+            ctaLabel="Propose SLA"
+            empty="No service level agreements yet. Either side proposes one; its commitments are in force once both sides have signed."
+            detailTabs={(row) => slaDetailTabs(list.slas.filter((s) => s.agreementId === row.id), setSheet)}
+            detailActions={(row) =>
+              list.canAdd.includes(row.id) ? (
+                <Button size="sm" variant="outline" className="h-7" onClick={() => setSheet({ kind: "add", agreementId: row.id, title: `A commitment of the ${row.kind.toLowerCase()} with ${row.side === "app" ? row.counterparty : row.workspace}.` })} data-add-sla={row.id}>
+                  <FilePlus2 />
+                  Add commitment
+                </Button>
+              ) : null
+            }
+          />
+          {slas.kind === "unsupported" && <p className="text-sm text-muted-foreground">SLA commitments and breaches come with Mynt&apos;s next update.</p>}
+          <SlaSheet mode={sheet} onClose={() => setSheet(null)} onDone={reloadSlas} />
+        </>
+      )}
+    </AgreementsTab>
+  );
+}
+
+export function LicencesPage({ initialTab = "business-agreements" }: { initialTab?: LicencesTab }) {
   const access = useStudioAccess();
-  const [asked, setAsked] = useState<LicencesTab>(initialTab);
-  const tabs = access ? licencesTabsFor(access) : [];
-  const tab = shownLicencesTab(asked, tabs);
+  const [tab, setTab] = useState<LicencesTab>(initialTab);
+  // The agreement tabs share one read of the agreements (/api/agreements), from both sides.
+  const { state, reload } = useComplianceData("/api/agreements", pickAgreements);
   const onTab = (t: LicencesTab) => {
-    setAsked(t);
-    window.history.replaceState(null, "", t === "agreements" ? "/licences?tab=agreements" : "/licences");
+    setTab(t);
+    window.history.replaceState(null, "", licencesHref(t));
   };
   return (
     <div className="@container/main flex min-h-0 flex-1 flex-col overflow-y-auto">
-      {tab && (
-        <HeaderTabs>
-          <LicencesTabs tabs={tabs} tab={tab} onTab={onTab} />
-        </HeaderTabs>
-      )}
-      <div className="flex min-h-0 w-full flex-1 flex-col gap-4 p-4 lg:gap-5 lg:p-6" data-tab-panel={tab ?? "loading"}>
-        {/* Until the roles are read, nothing is fetched on a guess. */}
-        {tab === null ? null : tab === "agreements" ? <AgreementsTabPanel /> : <LicencesTabPanel initialView={initialView} initialRegion={initialRegion} />}
+      <div className="flex min-h-0 w-full flex-1 flex-col gap-4 p-4 lg:gap-5 lg:p-6">
+        <LicencesTabs tab={tab} onTab={onTab} />
+        <div className="flex min-h-0 flex-1 flex-col gap-3" data-tab-panel={tab}>
+          {tab === "business-agreements" ? (
+            <AgreementsTab state={state} reload={reload}>
+              {(data) => <LpAgreementsView rows={data.agreements} kinds={TAB_KINDS.business} targets={data.targets} onChanged={reload} />}
+            </AgreementsTab>
+          ) : tab === "msa" ? (
+            <MsaTab state={state} reload={reload} licenceProvider={Boolean(access?.licenceProvider)} />
+          ) : tab === "sla" ? (
+            <SlaTab state={state} reload={reload} />
+          ) : (
+            <AgreementAuditsPanel readOnly />
+          )}
+        </div>
       </div>
     </div>
   );

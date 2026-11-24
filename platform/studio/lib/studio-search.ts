@@ -1,6 +1,6 @@
 // The studio's pages and its search (the header's search field and its Cmd+K modal), as pure
 // functions: the page title for a path, and what a query finds among the pages, the workspace's
-// apps, members, licences and audit actions.
+// apps, members and audit actions.
 import { STAGE_LABELS, type Stage } from "./workspaces";
 
 export type StudioPage = { href: string; label: string; keywords?: string };
@@ -8,8 +8,11 @@ export type StudioPage = { href: string; label: string; keywords?: string };
 // Every fixed page, in the order search lists them.
 export const STUDIO_PAGES: readonly StudioPage[] = [
   { href: "/", label: "Dashboard", keywords: "home money customers spend" },
-  { href: "/licences", label: "Licences", keywords: "licenses partners regulators coverage states map where serve" },
-  { href: "/licences?view=map&region=us", label: "Coverage", keywords: "states map where serve licences world" },
+  { href: "/licences", label: "Licences", keywords: "licenses agreements business program data sharing msa sla audit obligations sponsors partners sign" },
+  { href: "/licences?tab=business-agreements", label: "Business agreements", keywords: "program agreement data sharing sponsor propose accept decline sign contract" },
+  { href: "/licences?tab=msa", label: "MSA", keywords: "master services agreement msa template contract propose sign" },
+  { href: "/licences?tab=sla", label: "SLA", keywords: "service level agreement sla commitments uptime breaches target" },
+  { href: "/licences?tab=audit-obligations", label: "Audit obligations", keywords: "oversight audits obligations requirements overdue findings cadence" },
   { href: "/marketplace", label: "Marketplace", keywords: "vendors service providers services identity kyc bureau account data esign subscribe standard terms pricing" },
   { href: "/audits", label: "Audits", keywords: "audit trail history log" },
   { href: "/settings", label: "Settings", keywords: "workspace members team invite invitations people roles apps repositories general rename" },
@@ -37,7 +40,7 @@ const RESTRICTED: readonly StudioPage[] = [
   { href: "/admin", label: "Mynt platform admin" },
 ];
 
-// A tab of a page (/licences?tab=coverage) is that page.
+// A tab of a page (/licences?tab=msa) is that page.
 const PAGE_BY_SEGMENT = new Map([...STUDIO_PAGES, ...MOVED, ...RESTRICTED].filter((p) => !p.href.includes("?")).map((p) => [p.href.split("/")[1] ?? "", p]));
 
 /** Whether a path is a financial product's workspace (/products/<product id>). */
@@ -82,8 +85,8 @@ export const APP_SEARCH_TABS = [
   { tab: "security", label: "Security & risk", keywords: "security risk risks register infosec fraud vendors conduct mitigation" },
 ] as const;
 
-export type SearchGroup = "Pages" | "Apps" | "Financial products" | "Members" | "Licences" | "Audit actions" | PlatformSearchGroup;
-export const SEARCH_GROUPS: readonly SearchGroup[] = ["Pages", "Apps", "Financial products", "Members", "Licences", "Audit actions"];
+export type SearchGroup = "Pages" | "Apps" | "Financial products" | "Members" | "Audit actions" | PlatformSearchGroup;
+export const SEARCH_GROUPS: readonly SearchGroup[] = ["Pages", "Apps", "Financial products", "Members", "Audit actions"];
 
 // `requires`: an item found only when one of the words typed is among these (an app's tab isn't listed for its name alone).
 export type SearchItem = { id: string; group: SearchGroup; label: string; hint?: string; href: string; text: string; requires?: string };
@@ -93,7 +96,6 @@ export type SearchSources = {
   // The user's own financial products: each opens its workspace (/products/<id>).
   products?: { id: string; name: string; stage?: Stage }[];
   members?: { userId: string; name: string | null; email: string | null; role: string }[];
-  licences?: { partner: string | null; type: string | null; regulator: string | null; number: string | null; states: string[]; status: string | null }[];
   auditActions?: string[];
   // A Mynt admin: the platform admin's sections are pages too (/platform/…), for nobody else.
   admin?: boolean;
@@ -132,11 +134,6 @@ export function searchIndex(sources: SearchSources): SearchItem[] {
     const label = m.name ?? m.email ?? "Member";
     items.push({ id: `member:${m.userId}`, group: "Members", label, hint: m.role, href: "/settings?tab=members", text: lower(m.name, m.email, m.role) });
   }
-  (sources.licences ?? []).forEach((l, i) => {
-    const label = [l.partner, l.type].filter(Boolean).join(" · ") || l.number || "Licence";
-    const hint = [l.regulator, l.status].filter(Boolean).join(" · ") || undefined;
-    items.push({ id: `licence:${i}`, group: "Licences", label, hint, href: "/licences", text: lower(l.partner, l.type, l.regulator, l.number, l.status, ...l.states) });
-  });
   for (const action of [...new Set(sources.auditActions ?? [])].sort()) {
     items.push({ id: `audit:${action}`, group: "Audit actions", label: action, href: `/audits?action=${encodeURIComponent(action)}`, text: lower(action, action.replace(/[._]/g, " ")) });
   }

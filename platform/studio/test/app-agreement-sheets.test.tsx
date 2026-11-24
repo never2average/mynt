@@ -258,7 +258,9 @@ describe("Agreements tab: each row's labelled actions", () => {
     fake.sameOrigin = false;
     expect((await call({ action: "sign" })).status).toBe(403);
     fake.sameOrigin = true;
-    expect((await call({ action: "accept" })).status).toBe(400); // the other firm's
+    expect((await call({ action: "approve" })).status).toBe(400);
+    // Accept and Decline: a proposal the other firm made (either side proposes); this Mynt has no respond tool for the app side yet.
+    expect((await call({ action: "accept" })).status).toBe(501);
     expect((await call({ action: "terminate" })).status).toBe(400); // a reason
     expect((await call({ action: "sign", extra: 1 })).status).toBe(400);
     expect((await call({ action: "sign" }, APP, "not-a-uuid")).status).toBe(400);

@@ -16,7 +16,7 @@
       "id": "apps",
       "title": "Apps & developers",
       "summary": "Register apps, read a product's developer contract, make an app's agreements with the firms behind its products and run their oversight audits, keep apps' and products' risk registers, and start from app kinds and ideas.",
-      "tools": 49
+      "tools": 55
     },
     {
       "id": "builds",
@@ -122,7 +122,7 @@
     {
       "role": "developer",
       "summary": "the builder role, under its other name: builds apps (keys, webhooks, SDKs, journeys, GTM campaigns) with coding agents Mynt verifies and hosts, and composes and publishes products too. The same tools as innovator. Also a consumer.",
-      "tools": 243,
+      "tools": 249,
       "get_started": [
         {
           "tool": "list_buildable_products",
@@ -149,7 +149,7 @@
     {
       "role": "innovator",
       "summary": "the builder role: composes, tests, publishes and versions financial products from regulated primitives, decides who may build on them, and builds apps on them. Needn't be licensed: a licence provider can sponsor a product under its licences. The same tools as developer. Also a consumer.",
-      "tools": 243,
+      "tools": 249,
       "get_started": [
         {
           "tool": "create_entity",
@@ -203,7 +203,7 @@
     {
       "role": "license_provider",
       "summary": "a firm, added by an admin, holding licences (verified by admins) that sponsor builders' products: it approves, declines or revokes sponsorship of a product's component under a held licence, in the jurisdictions it covers. A peer of builders.",
-      "tools": 94,
+      "tools": 100,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
-      "tools": 398,
+      "tools": 404,
       "get_started": [
         {
           "tool": "define_region",
@@ -499,6 +499,79 @@
           "name",
           "kind",
           "cadence"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "add_agreement_sla",
+      "title": "Add a service-level commitment to an SLA agreement",
+      "description": "Either party to a service-level agreement (kind 'sla', for one app or a whole workspace: the counterparty firm's licence providers, or the workspace's owners and admins): add a commitment while the agreement is proposed or accepted: the metric, its target (a number or words) and unit, the window it's measured over (daily, weekly, monthly, quarterly), where the measurement comes from and the remedy when it's missed. Commitments are the agreement's terms: there's no separate acceptance, and they're in force once it's signed. Either party records breaches then (record_sla_breach). Audited; both sides see it in list_agreement_slas.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agreement_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "metric": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 200
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            ]
+          },
+          "unit": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "measurement_window": {
+            "type": "string",
+            "enum": [
+              "daily",
+              "weekly",
+              "monthly",
+              "quarterly"
+            ]
+          },
+          "measurement_source": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 500,
+            "description": "Where the measured value comes from"
+          },
+          "remedy": {
+            "description": "What happens when it's missed",
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "agreement_id",
+          "metric",
+          "target",
+          "measurement_window",
+          "measurement_source"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -3551,9 +3624,11 @@
                 "app_agreement.proposed",
                 "app_agreement.signed",
                 "app_agreement.terminated",
+                "app_agreement.answered",
                 "agreement_audit.opened",
                 "agreement_audit.submitted",
-                "agreement_audit.closed"
+                "agreement_audit.closed",
+                "agreement_sla.breached"
               ]
             }
           }
@@ -9105,6 +9180,52 @@
       }
     },
     {
+      "name": "list_agreement_slas",
+      "title": "Service levels under app agreements",
+      "description": "The service-level commitments under the SLA agreements (kind sla) you're a party to, each with its breaches (open ones first counted in open_breaches) and what you may do (actions), and those agreements (can_add_slas: whether you can add one to it). Developer: your apps' (any member of the app's workspace; workspace_id or app_id narrow it). Licence provider: those on agreements with your firm. agreement_id narrows it further; side picks one side when you're both; include_retired lists retired ones too.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "license_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "app_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "agreement_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "app",
+              "counterparty"
+            ]
+          },
+          "include_retired": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "list_agreement_templates",
       "title": "Your firm's agreement templates",
       "description": "Licence provider: your firm's program agreement templates, each version with what it's attached to, its SHA-256 and whether it's the active one. include_retired lists the versions no longer in use too.",
@@ -9375,7 +9496,7 @@
     {
       "name": "list_app_agreements",
       "title": "App agreements",
-      "description": "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, program_coverage (each product and the licence provider sponsoring it where the app serves, and whether a signed program agreement in force covers it: production needs every one; production_gate says what's missing, and flagged when the app is already in production without one), the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on (each with the version of the vendor's standard terms accepted for this app, or no_standard_terms when none were), and introductions the business-development agent has in progress for its members (null when that agent isn't running here). Without app_id (licence provider or vendor): the agreements apps have proposed to or made with your firm. status filters either list.",
+      "description": "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, program_coverage (each product and the licence provider sponsoring it where the app serves, and whether a signed program agreement in force covers it: production needs every one; production_gate says what's missing, and flagged when the app is already in production without one), the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on (each with the version of the vendor's standard terms accepted for this app, or no_standard_terms when none were), and introductions the business-development agent has in progress for its members (null when that agent isn't running here). With workspace_id (developer, any member): every agreement of the workspace (its apps' and the workspace's own msa and sla), can_manage, and proposable_counterparties (the sponsors of its apps' products). Without either (licence provider or vendor): the agreements made with your firm, both those apps' workspaces proposed and those your firm proposed, and proposable_workspaces (those whose apps use products your firm sponsors, or that already have an agreement with it). Each agreement says which side proposed it (proposed_by_side), the template it was made on, your_side and what you may do now (actions: accept, decline, sign, withdraw, end). status filters any list.",
       "area": "apps",
       "roles": [
         "developer",
@@ -9390,6 +9511,11 @@
         "type": "object",
         "properties": {
           "app_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "workspace_id": {
             "type": "string",
             "format": "uuid",
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
@@ -12076,8 +12202,8 @@
     },
     {
       "name": "propose_app_agreement",
-      "title": "Propose an agreement for an app",
-      "description": "Developer (the app's workspace owners and admins): propose a business agreement between the app's workspace and another firm: 'program' with a licence provider that sponsors every product named (see list_app_agreements' products and their sponsors), 'vendor' with a firm that lists vendor services on Mynt, or 'data_sharing' with either. Name the products it covers (from the app's own), a short summary of the terms, and optionally a link to the document (https) with its SHA-256 and the dates it runs between. The other firm is told and accepts or declines it (respond_to_app_agreement); then both sides sign (sign_app_agreement). Apps hold no licences themselves: licence coverage is the products'. Audited.",
+      "title": "Propose an agreement for an app or a workspace",
+      "description": "Developer (the workspace's owners and admins): propose a business agreement between your workspace and another firm, for one app (app_id) or, for an 'msa' or 'sla', for the whole workspace (workspace_id): 'program' with a licence provider that sponsors every product named (see list_app_agreements' products and their sponsors), 'vendor' with a firm that lists vendor services on Mynt, 'data_sharing' with either, 'msa' (a master services agreement) or 'sla' (service levels, set with add_agreement_sla) with either. Name the products it covers (from the app's or workspace's own), a short summary of the terms, and optionally a link to the document (https) with its SHA-256 and the dates it runs between. The other firm is told and accepts or declines it (respond_to_app_agreement); then both sides sign (sign_app_agreement). Apps hold no licences themselves: licence coverage is the products'. Audited.",
       "area": "apps",
       "roles": [
         "developer",
@@ -12094,6 +12220,12 @@
             "format": "uuid",
             "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
           },
+          "workspace_id": {
+            "description": "For an msa or sla with the whole workspace, in place of app_id",
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
           "counterparty_entity_id": {
             "type": "string",
             "format": "uuid",
@@ -12105,7 +12237,9 @@
             "enum": [
               "program",
               "vendor",
-              "data_sharing"
+              "data_sharing",
+              "msa",
+              "sla"
             ]
           },
           "products": {
@@ -12143,7 +12277,6 @@
           }
         },
         "required": [
-          "app_id",
           "counterparty_entity_id",
           "kind",
           "terms_summary"
@@ -12254,6 +12387,85 @@
         "required": [
           "entry",
           "rationale"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "propose_workspace_agreement",
+      "title": "Propose an agreement to a workspace",
+      "description": "Licence provider (for your own firm): propose a business agreement to a developer workspace whose apps use products your firm sponsors (see list_app_agreements without app_id: proposable_workspaces): 'program' for one app (app_id) covering products you sponsor for it, 'data_sharing' for one app, or 'msa' (a master services agreement) or 'sla' (service levels, set with add_agreement_sla) for one app or the whole workspace. Optionally name one of your firm's active agreement templates (template_id: a program agreement signed by e-signature is made from it), a link to the document (https) with its SHA-256, and the dates it runs between. The workspace's owners and admins accept or decline it (respond_to_app_agreement); then both sides sign. Audited; the workspace is told.",
+      "area": "apps",
+      "roles": [
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "app_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "program",
+              "data_sharing",
+              "msa",
+              "sla"
+            ]
+          },
+          "products": {
+            "default": [],
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "terms_summary": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 4000
+          },
+          "document_url": {
+            "type": "string",
+            "maxLength": 2000,
+            "format": "uri"
+          },
+          "document_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "template_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "effective_from": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "effective_to": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "kind",
+          "terms_summary"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -12436,6 +12648,61 @@
           "audit_id",
           "severity",
           "title"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "record_sla_breach",
+      "title": "Record a missed service level",
+      "description": "Either party to a signed service-level agreement (the counterparty firm's licence providers, or the workspace's owners and admins): record that an active service level was missed in a period (period_start to period_end, YYYY-MM-DD) with the measured value and an optional note. It's open until either party resolves it (resolve_sla_breach). Audited; both parties' firms are told (agreement_sla.breached) and the app's workspace sees it in its attention list.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sla_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "period_start": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "period_end": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "measured_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            ]
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "required": [
+          "sla_id",
+          "period_start",
+          "period_end",
+          "measured_value"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -13767,6 +14034,38 @@
       }
     },
     {
+      "name": "resolve_sla_breach",
+      "title": "Resolve a missed service level",
+      "description": "Either party (the counterparty firm's licence providers, or the app's workspace owners and admins): mark an open SLA breach resolved, with an optional note. Audited.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "breach_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "breach_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "respond_to_agreement_audit_finding",
       "title": "Answer a finding on an oversight audit",
       "description": "Developer (the app's workspace owners and admins): answer an open finding the licence provider recorded on an open audit of your app (what you changed, or why it stands). The licence provider resolves it. Audited; the licence provider is told.",
@@ -13807,10 +14106,12 @@
     },
     {
       "name": "respond_to_app_agreement",
-      "title": "Accept or decline an app agreement",
-      "description": "Licence provider or vendor: accept or decline an agreement an app's workspace proposed to your firm (see list_app_agreements, without app_id). Accepting lets both sides sign it (sign_app_agreement); declining ends it. Audited.",
+      "title": "Accept or decline an agreement",
+      "description": "The side that didn't propose an agreement answers it: a licence provider or vendor for its firm (an agreement an app's workspace proposed to it), or the workspace's owners and admins (one a licence provider proposed to it). Accepting lets both sides sign it (sign_app_agreement); declining ends it. The side that proposed it can't answer it, only withdraw it (terminate_app_agreement). Audited.",
       "area": "apps",
       "roles": [
+        "developer",
+        "innovator",
         "vendor",
         "license_provider",
         "admin"
@@ -14053,6 +14354,40 @@
         },
         "required": [
           "requirement_id",
+          "reason"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "retire_agreement_sla",
+      "title": "Retire a service-level commitment",
+      "description": "Either party (as for add_agreement_sla): stop a commitment on an open service-level agreement, with the reason. Its breaches stay as they are (open ones can still be resolved). Audited.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sla_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "sla_id",
           "reason"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -16112,7 +16447,7 @@
     {
       "name": "sign_app_agreement",
       "title": "Sign an app agreement",
-      "description": "Either side of an accepted app agreement records its signature: the app's workspace owners or admins for the app, a member of the other firm for it. It becomes signed only once both sides have. Where e-signature is configured, program agreements are signed by e-signature instead (get_agreement_signing_link) and this refuses them. Audited, and the other firm is told when it's signed.",
+      "description": "Either side of an accepted agreement records its signature: the workspace's owners or admins for the app's side, a member of the other firm for it. It becomes signed only once both sides have. Where e-signature is configured, program agreements are signed by e-signature instead (get_agreement_signing_link) and this refuses them. Audited, and the other firm is told when it's signed.",
       "area": "apps",
       "roles": [
         "developer",
@@ -16823,7 +17158,7 @@
     {
       "name": "terminate_app_agreement",
       "title": "End an app agreement",
-      "description": "Either side ends an app agreement that's proposed (withdrawing it), accepted or signed, with the reason. Audited, and the other firm is told. A vendor's standard terms accepted with a subscription (vendor_subscription_id): ending the last such agreement ends the subscription too, refused while live products hand off through it.",
+      "description": "Either side ends an agreement that's proposed (withdrawing it), accepted or signed, with the reason. Audited, and the other firm is told. A vendor's standard terms accepted with a subscription (vendor_subscription_id): ending the last such agreement ends the subscription too, refused while live products hand off through it.",
       "area": "apps",
       "roles": [
         "developer",

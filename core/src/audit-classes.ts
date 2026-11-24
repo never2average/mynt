@@ -204,6 +204,12 @@ const OBLIGATIONS = [
   "pass_agreement_audit",
   "fail_agreement_audit",
   "waive_agreement_audit",
+  // service levels under app agreements: set and retired by the licence provider, breaches recorded and resolved by
+  // either party (agreement-slas.ts)
+  "add_agreement_sla",
+  "retire_agreement_sla",
+  "record_sla_breach",
+  "resolve_sla_breach",
   // a vendor's standard terms accepted by click-through, one agreement per app (vendor-terms.ts)
   "accept_vendor_terms",
   // covenants on sponsorships

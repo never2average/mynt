@@ -76,9 +76,11 @@ test("the tools each side gets", async () => {
   const w = await setup();
   const dev = await w.dev.tools();
   for (const t of ["propose_app_agreement", "sign_app_agreement", "terminate_app_agreement", "list_app_agreements", "get_app_customers", "set_app_target_segments"]) assert.ok(dev.includes(t), t);
-  assert.ok(!dev.includes("respond_to_app_agreement"), "a developer doesn't answer agreements as a counterparty");
+  // Agreements are two-sided: a developer answers what a licence provider proposed to the workspace.
+  assert.ok(dev.includes("respond_to_app_agreement"));
+  assert.ok(!dev.includes("propose_workspace_agreement"), "a developer proposes for its own workspace, not to others'");
   const lp = await w.lp.tools();
-  for (const t of ["respond_to_app_agreement", "sign_app_agreement", "terminate_app_agreement", "list_app_agreements"]) assert.ok(lp.includes(t), t);
+  for (const t of ["respond_to_app_agreement", "sign_app_agreement", "terminate_app_agreement", "list_app_agreements", "propose_workspace_agreement"]) assert.ok(lp.includes(t), t);
   assert.ok(!lp.includes("propose_app_agreement") && !lp.includes("get_app_customers"));
 });
 
@@ -387,4 +389,96 @@ test("production: an agreement ending after the app went live doesn't move it ba
   await w.store.db.query(`UPDATE ${T}.app_agreements SET effective_to = $2 WHERE id = $1`, [b.id, day(-1)]);
   assert.equal((await opsStatus(w.store.db)).apps.production_without_program_agreements.length, 1);
   assert.match((await failing()).detail, /ended on/);
+});
+
+test("a licence provider proposes to a workspace: its owners answer (not members), both sign; told and listed both ways", async () => {
+  const w = await setup();
+  // The firm sees the workspaces it may propose to: those whose apps use products it sponsors.
+  const before = ok(await w.lp.call("list_app_agreements"));
+  const ws = before.proposable_workspaces.find((x) => x.workspace.id === w.workspace);
+  assert.ok(ws, JSON.stringify(before.proposable_workspaces));
+  assert.deepEqual(ws.apps.map((a) => a.id), [w.app.id]);
+
+  const proposal = { workspace_id: w.workspace, app_id: w.app.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" };
+  refused(await w.lp.call("propose_workspace_agreement", { ...proposal, app_id: undefined }), /names its app/);
+  refused(await w.lp.call("propose_workspace_agreement", { ...proposal, products: ["fixed-deposit"] }), /doesn't sponsor/);
+  refused(await w.lp.call("propose_workspace_agreement", { ...proposal, template_id: "00000000-0000-4000-8000-000000000000" }), /No template/);
+  const a = ok(await w.lp.call("propose_workspace_agreement", proposal));
+  assert.equal(a.proposed_by_side, "counterparty");
+  assert.equal(a.your_side, "counterparty");
+  assert.deepEqual(a.actions, ["withdraw"]);
+  refused(await w.lp.call("propose_workspace_agreement", proposal), /already an open program agreement/);
+
+  // The proposer can't answer its own proposal.
+  refused(await w.lp.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }), /Your side proposed it/);
+  // The workspace is told in its attention list.
+  const waiting = ok(await w.member.call("get_workspace_attention", { workspace_id: w.workspace })).items.find((i) => i.kind === "app_agreement_proposed");
+  assert.ok(waiting);
+  assert.match(waiting.title, /Pay app: Sponsor Bank proposed a program agreement/);
+  assert.equal(waiting.href, "/licences?tab=business-agreements");
+
+  // The workspace lists it with what each may do.
+  const listed = ok(await w.dev.call("list_app_agreements", { workspace_id: w.workspace }));
+  assert.equal(listed.can_manage, true);
+  const mine = listed.agreements.find((x) => x.id === a.id);
+  assert.deepEqual([mine.your_side, mine.actions], ["app", ["accept", "decline"]]);
+  assert.ok(listed.proposable_counterparties.some((c) => c.entity_id === w.lpFirm.id && c.product_ids.includes("savings-account") && c.app_ids.includes(w.app.id)));
+  assert.deepEqual(ok(await w.member.call("list_app_agreements", { workspace_id: w.workspace })).agreements.find((x) => x.id === a.id).actions, [], "a plain member reads only");
+  refused(await w.outsider.call("list_app_agreements", { workspace_id: w.workspace }), /No workspace/);
+
+  refused(await w.member.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }), /owners and admins/);
+  refused(await w.outsider.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }), /No agreement/);
+  refused(await w.otherLp.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }), /No agreement/);
+  const accepted = ok(await w.dev.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept", note: "Happy to go ahead" }));
+  assert.equal(accepted.status, "accepted");
+  assert.deepEqual(accepted.actions, ["sign", "end"]);
+  // The firm is told the app's side answered; the workspace isn't told of its own answer.
+  assert.ok(JSON.stringify(ok(await w.lp.call("list_firm_notices"))).includes("app_agreement.answered"));
+  assert.ok(!ok(await w.member.call("get_workspace_attention", { workspace_id: w.workspace })).items.some((i) => i.kind === "app_agreement_proposed" || (i.kind === "app_agreement_update" && i.title.includes("accepted"))));
+
+  ok(await w.dev.call("sign_app_agreement", { agreement_id: a.id }));
+  const signed = ok(await w.lp.call("sign_app_agreement", { agreement_id: a.id }));
+  assert.equal(signed.status, "signed");
+  assert.deepEqual(signed.actions, ["end"]);
+  const trail = await audits(w.store, a.id);
+  assert.deepEqual(trail.map((r) => [r.action, r.details.side]), [["propose_app_agreement", "counterparty"], ["accept_app_agreement", "app"], ["sign_app_agreement", "app"], ["sign_app_agreement", "counterparty"]]);
+  // It counts for production like any other program agreement.
+  assert.ok(ok(await w.dev.call("list_app_agreements", { app_id: w.app.id })).program_coverage.some((c) => c.sponsor_entity_id === w.lpFirm.id && c.covered));
+});
+
+test("msa and sla with a whole workspace (no app), from either side; the developer flow is unchanged", async () => {
+  const w = await setup();
+  refused(await w.dev.call("propose_app_agreement", { workspace_id: w.workspace, counterparty_entity_id: w.lpFirm.id, kind: "program", products: ["savings-account"], terms_summary: "A program for everything" }), /Only an msa or sla/);
+  refused(await w.member.call("propose_app_agreement", { workspace_id: w.workspace, counterparty_entity_id: w.lpFirm.id, kind: "msa", terms_summary: "Master services for the workspace" }), /owners and admins/);
+  refused(await w.dev.call("propose_app_agreement", { app_id: w.app.id, workspace_id: w.workspace, counterparty_entity_id: w.lpFirm.id, kind: "msa", terms_summary: "Master services for the workspace" }), /one of them/);
+  const msa = ok(await w.dev.call("propose_app_agreement", { workspace_id: w.workspace, counterparty_entity_id: w.lpFirm.id, kind: "msa", terms_summary: "Master services for the workspace" }));
+  assert.equal(msa.app_id, null);
+  assert.equal(msa.workspace_id, w.workspace);
+  assert.equal(msa.proposed_by_side, "app");
+  assert.deepEqual(msa.actions, ["withdraw"]);
+  refused(await w.dev.call("propose_app_agreement", { workspace_id: w.workspace, counterparty_entity_id: w.lpFirm.id, kind: "msa", terms_summary: "Master services for the workspace" }), /already an open msa/);
+  // The proposer can't accept its own; the firm does.
+  refused(await w.dev.call("respond_to_app_agreement", { agreement_id: msa.id, decision: "accept" }), /Your side proposed it/);
+  const firmView = ok(await w.lp.call("list_app_agreements")).agreements.find((x) => x.id === msa.id);
+  assert.deepEqual([firmView.your_side, firmView.actions, firmView.app, firmView.workspace.id], ["counterparty", ["accept", "decline"], null, w.workspace]);
+  ok(await w.lp.call("respond_to_app_agreement", { agreement_id: msa.id, decision: "accept" }));
+  ok(await w.dev.call("sign_app_agreement", { agreement_id: msa.id }));
+  assert.equal(ok(await w.lp.call("sign_app_agreement", { agreement_id: msa.id })).status, "signed");
+
+  // The firm's sla with the workspace: no app. The proposer withdraws it before it's answered.
+  const sla = ok(await w.lp.call("propose_workspace_agreement", { workspace_id: w.workspace, kind: "sla", terms_summary: "Service levels for the workspace's apps" }));
+  assert.equal(sla.app_id, null);
+  const waiting = ok(await w.dev.call("get_workspace_attention", { workspace_id: w.workspace })).items.find((i) => i.kind === "app_agreement_proposed");
+  assert.match(waiting.title, /Sponsor Bank proposed a service-level agreement with your workspace/);
+  assert.equal(ok(await w.lp.call("terminate_app_agreement", { agreement_id: sla.id, reason: "Wrong targets" })).status, "terminated");
+
+  // Listed with the workspace's other agreements.
+  const listed = ok(await w.member.call("list_app_agreements", { workspace_id: w.workspace }));
+  assert.deepEqual(listed.agreements.map((x) => x.kind).sort(), ["msa", "sla"]);
+  assert.ok(listed.agreements.every((x) => x.template === null && x.your_side === "app"));
+
+  // A developer's own program proposal still works as before.
+  const program = ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" }));
+  assert.equal(program.proposed_by_side, "app");
+  assert.equal(ok(await w.lp.call("respond_to_app_agreement", { agreement_id: program.id, decision: "accept" })).status, "accepted");
 });

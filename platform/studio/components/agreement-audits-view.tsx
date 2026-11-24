@@ -48,6 +48,8 @@ import {
 import { toCsv } from "@/lib/compliance"
 
 const field = "rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+// One function for the default, so the audit sheet (which reads the audit when it opens) doesn't read it again on every render.
+const browserFetch: typeof fetch = (...a) => fetch(...a)
 const STATUS_TONE: Record<string, DotTone> = { scheduled: "gray", in_progress: "blue", submitted: "amber", passed: "green", failed: "red", waived: "gray" }
 
 /** The audit's status in words, with "Overdue" beside it when it's past due and not closed. */
@@ -556,7 +558,8 @@ export function AgreementAuditSheet({
   open,
   onClose,
   onChanged,
-  fetcher = (...a) => fetch(...a),
+  fetcher = browserFetch,
+  readOnly = false,
 }: {
   auditId: string | null
   title: string
@@ -564,6 +567,7 @@ export function AgreementAuditSheet({
   onClose: () => void
   onChanged: () => void
   fetcher?: typeof fetch
+  readOnly?: boolean // the Licences page's Audit obligations tab: the audit shown, without its actions
 }) {
   const [detail, setDetail] = useState<AgreementAuditDetail | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -607,7 +611,7 @@ export function AgreementAuditSheet({
         </SheetHeader>
         <div className="px-4 pb-6">
           {detail ? (
-            <AgreementAuditDetailView detail={detail} busy={busy} error={error} result={result} onAction={(b) => void act(b)} />
+            <AgreementAuditDetailView detail={readOnly ? { ...detail, actions: [] } : detail} busy={busy} error={error} result={result} onAction={(b) => void act(b)} />
           ) : (
             <p className="text-sm text-muted-foreground" role={loadError ? "alert" : undefined}>
               {loadError ?? "Loading…"}

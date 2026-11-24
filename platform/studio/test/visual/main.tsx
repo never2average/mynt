@@ -23,7 +23,10 @@ import { EarnWorkspace } from "@/components/earn-assistant";
 import type { LiquidityActions } from "@/components/earn-view";
 import type { EarnWalletState } from "@/components/earn-wallet";
 import { BuildsView } from "@/components/builds-view";
-import { LicencesPageView } from "@/components/licences-page-view";
+import { LicencesTabs } from "@/app/(studio)/licences/licences-page";
+import { LpAgreementsView } from "@/components/lp-agreements-view";
+import type { LicencesTab } from "@/lib/licences-tabs";
+import { lpAgreementsFrom } from "@/lib/lp-agreements";
 import { AuditsView, AuditTabs, NO_AUDIT_FILTERS, ObligationsView } from "@/components/audits-view";
 import { AgreementAuditsView } from "@/components/agreement-audits-view";
 import { fromAgreementAuditList } from "@/lib/agreement-audits";
@@ -381,12 +384,20 @@ function Dashboard({ empty = false }: { empty?: boolean }) {
   );
 }
 
-function Licences({ map = false }: { map?: boolean }) {
-  const [view, setView] = useState<"table" | "map">(map ? "map" : "table");
-  const [region, setRegion] = useState<"us" | "world">("us");
+// The Licences page: its four tabs in the body, on Business agreements (a proposal from the firm waiting for the
+// workspace, and a signed program agreement).
+const LICENCE_AGREEMENTS = lpAgreementsFrom({
+  agreements: [
+    { id: "11111111-1111-4111-8111-111111111111", kind: "program", status: "proposed", proposed_by_side: "app", app: { id: "a1", name: "Round-up savings" }, workspace: { id: "w1", name: "Acme Labs" }, counterparty: { name: "Harbor Bank" }, products: [{ id: "p1", name: "Savings" }], terms_summary: "Harbor Bank's savings program", effective_from: "2026-12-01" },
+    { id: "22222222-2222-4222-8222-222222222222", kind: "data_sharing", status: "signed", app: { id: "a1", name: "Round-up savings" }, workspace: { id: "w1", name: "Acme Labs" }, counterparty: { name: "Harbor Bank" }, products: [], terms_summary: "Account data", signatures: { app_side: true, counterparty_side: true } },
+  ],
+})!;
+function Licences() {
+  const [tab, setTab] = useState<LicencesTab>("business-agreements");
   return (
     <Page>
-      <LicencesPageView view={view as never} onView={(v) => setView(v as never)} region={region} onRegion={setRegion} coverage={{ kind: "ready", data: coverage }} licences={{ kind: "ready", data: licences }} now={Date.parse("2026-11-13T00:00:00Z")} />
+      <LicencesTabs tab={tab} onTab={setTab} />
+      <LpAgreementsView rows={LICENCE_AGREEMENTS} />
     </Page>
   );
 }
@@ -450,7 +461,6 @@ const SCREENS: Record<string, { path: string; render: () => React.ReactNode }> =
   builds: { path: "/builds", render: () => <Page><BuildsView rows={buildRows} /></Page> },
   "builds-empty": { path: "/builds", render: () => <Page><BuildsView rows={[]} /></Page> },
   licences: { path: "/licences", render: () => <Licences /> },
-  "licences-map": { path: "/licences", render: () => <Licences map /> },
   "audits-security": { path: "/audits", render: () => <Audits tab="security" /> },
   "audits-obligations": { path: "/audits", render: () => <Audits tab="obligations" /> },
   "audits-agreements": { path: "/audits", render: () => <Audits tab="agreements" /> },

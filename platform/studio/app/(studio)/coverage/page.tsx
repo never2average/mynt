@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 
-// Coverage is now the Licences page's map view (US).
+// Coverage was the Licences page's map view; licence coverage is now on each product's Compliance tab.
 export default function CoveragePage() {
-  redirect("/licences?view=map&region=us");
+  redirect("/licences");
 }

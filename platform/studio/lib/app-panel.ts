@@ -142,7 +142,7 @@ export function appProductsFrom(reply: unknown): AppProduct[] {
 /** A state code as people read it: "us-ny" is "NY", a country code stays as it is ("US"). */
 export const stateLabel = (code: string) => (code.includes("-") ? code.split("-").slice(1).join("-") : code).toUpperCase();
 
-export const AGREEMENT_KIND_LABELS: Record<string, string> = { program: "Program agreement", vendor: "Vendor contract", data_sharing: "Data sharing" };
+export const AGREEMENT_KIND_LABELS: Record<string, string> = { program: "Program agreement", vendor: "Vendor contract", data_sharing: "Data sharing", msa: "Master services agreement", sla: "Service level agreement" };
 export const AGREEMENT_STATUS_LABELS: Record<string, string> = {
   proposed: "Proposed: waiting for them",
   accepted: "Accepted: waiting for signatures",
@@ -166,6 +166,7 @@ export type AgreementRow = {
   counterpartySigned: boolean;
   documentUrl: string | null; // https only
   endedReason: string | null;
+  proposedBy?: "app" | "counterparty"; // either side proposes; the other accepts or declines
 };
 // termsVersion: the provider's standard terms accepted for this app (the Marketplace's click-through); noStandardTerms:
 // subscribed with none on file (or before the provider had any).
@@ -206,8 +207,10 @@ export function documentLink(v: unknown): string | null {
 // accepted or signed one; the other firm accepts or declines a proposal, signs an accepted one it hasn't, and
 // ends an accepted or signed one.
 export type AgreementAction = "sign" | "withdraw" | "end" | "accept" | "decline";
-export function agreementActions(a: { statusKey: string; appSigned: boolean; counterpartySigned: boolean }, side: "app" | "counterparty"): AgreementAction[] {
-  if (a.statusKey === "proposed") return side === "app" ? ["withdraw"] : ["accept", "decline"];
+// Either side may propose (proposedBy, the app's side when Mynt doesn't say): the proposer withdraws, the other side
+// accepts or declines.
+export function agreementActions(a: { statusKey: string; appSigned: boolean; counterpartySigned: boolean; proposedBy?: "app" | "counterparty" }, side: "app" | "counterparty"): AgreementAction[] {
+  if (a.statusKey === "proposed") return (a.proposedBy ?? "app") === side ? ["withdraw"] : ["accept", "decline"];
   if (a.statusKey === "accepted") return [...((side === "app" ? !a.appSigned : !a.counterpartySigned) ? (["sign"] as const) : []), "end"];
   if (a.statusKey === "signed") return ["end"];
   return [];
@@ -264,6 +267,7 @@ export function fromAgreements(reply: unknown): AppAgreements | null {
             counterpartySigned: esign?.byEsign ? esign.counterpartySigned || sig.counterparty_side === true : sig.counterparty_side === true,
             documentUrl: documentLink(a.document_url),
             endedReason: str(a.termination_reason),
+            proposedBy: a.proposed_by_side === "counterparty" ? "counterparty" : "app",
           },
         ];
       }),

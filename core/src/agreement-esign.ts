@@ -251,13 +251,18 @@ export async function startSigning(store: Store, esign: ESign | null, agreementI
   const existing = await documentOf(store, agreementId);
   if (existing && existing.status !== "failed") return { ok: true, created: false };
   const products = Array.isArray(a.products) ? (a.products as string[]) : [];
-  const template = await templateFor(store, a.counterparty_entity_id as string, products);
+  // The template the licence provider proposed it on, while it's still in use; else the firm's most specific one.
+  const chosen = a.template_id ? (await store.db.query(`SELECT * FROM ${T}.agreement_templates WHERE id = $1 AND entity_id = $2 AND active`, [a.template_id, a.counterparty_entity_id])).rows[0] : undefined;
+  const template = chosen ? toTemplate(chosen) : await templateFor(store, a.counterparty_entity_id as string, products);
   const firm = await store.getEntity(a.counterparty_entity_id as string);
   if (!template) return { ok: false, error: `${firm?.name ?? "The licence provider"} hasn't uploaded a program agreement template yet; its licence providers add one with upload_agreement_template` };
   if (template.source === "provider_template" && template.provider && template.provider !== esign.provider.name) return { ok: false, error: "The licence provider's template is kept at a different e-signature service than this deployment's" };
-  const [lp, dev] = await Promise.all([a.responded_by ? store.getUser(a.responded_by as string) : undefined, a.proposed_by ? store.getUser(a.proposed_by as string) : undefined]);
-  if (!lp?.email) return { ok: false, error: "The person who accepted it for the licence provider has no email address on Mynt, which the signature needs" };
-  if (!dev?.email) return { ok: false, error: "The person who proposed it for the app has no email address on Mynt, which the signature needs" };
+  // The licence provider's signer is whoever acted for it (accepted it, or proposed it), and the app's likewise.
+  const lpSide = a.proposed_by_side === "counterparty" ? a.proposed_by : a.responded_by;
+  const appSide = a.proposed_by_side === "counterparty" ? a.responded_by : a.proposed_by;
+  const [lp, dev] = await Promise.all([lpSide ? store.getUser(lpSide as string) : undefined, appSide ? store.getUser(appSide as string) : undefined]);
+  if (!lp?.email) return { ok: false, error: "The person who acted for the licence provider has no email address on Mynt, which the signature needs" };
+  if (!dev?.email) return { ok: false, error: "The person who acted for the app has no email address on Mynt, which the signature needs" };
   const signers: ESignSigner[] = [
     { role: "counterparty", name: lp.name, email: lp.email },
     { role: "app", name: dev.name, email: dev.email },
