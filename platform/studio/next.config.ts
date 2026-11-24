@@ -21,7 +21,9 @@ const nextConfig: NextConfig = {
   serverExternalPackages: ["@modelcontextprotocol/sdk"],
   poweredByHeader: false,
   // lib/redirects.ts: /connect shows the docs' Connect your agent page (a rewrite, ahead of the file routes, so the
-  // address stays /connect), and /docs/connect redirects there.
+  // address stays /connect), and /docs/connect redirects there. Addresses whose new one depends on their query (the
+  // old /admin?tab=…&id=…, /settings?tab=esign) are redirected by proxy.ts (lib/redirects.ts legacyRedirect), which
+  // leaves the old query behind; these config redirects would carry it over.
   async redirects() {
     return STUDIO_REDIRECTS.map((r) => ({ ...r }));
   },

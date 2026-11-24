@@ -28,9 +28,12 @@ const MOVED: readonly StudioPage[] = [
   { href: "/coverage", label: "Licences" },
 ];
 
-// Pages only some accounts have (the Admin area, for Mynt admins): fixed pages, never an app's id, and not offered in
-// search.
-const RESTRICTED: readonly StudioPage[] = [{ href: "/admin", label: "Admin" }];
+// Pages only some accounts have (the platform admin, /platform, for Mynt admins, in its own layout; /admin was its old
+// address and redirects there): fixed pages, never an app's id, and not offered in search.
+const RESTRICTED: readonly StudioPage[] = [
+  { href: "/platform", label: "Mynt platform admin" },
+  { href: "/admin", label: "Mynt platform admin" },
+];
 
 // A tab of a page (/licences?tab=coverage) is that page.
 const PAGE_BY_SEGMENT = new Map([...STUDIO_PAGES, ...MOVED, ...RESTRICTED].filter((p) => !p.href.includes("?")).map((p) => [p.href.split("/")[1] ?? "", p]));
@@ -90,13 +93,28 @@ export type SearchSources = {
   members?: { userId: string; name: string | null; email: string | null; role: string }[];
   licences?: { partner: string | null; type: string | null; regulator: string | null; number: string | null; states: string[]; status: string | null }[];
   auditActions?: string[];
+  // A Mynt admin: the platform admin's sections are pages too (/platform/…), for nobody else.
+  admin?: boolean;
 };
+
+// The platform admin's sections, as search lists them for Mynt admins (lib/admin.ts has their addresses).
+export const PLATFORM_SEARCH_PAGES: readonly StudioPage[] = [
+  { href: "/platform", label: "Platform admin: Overview", keywords: "mynt platform admin attention operations status" },
+  { href: "/platform/workspaces", label: "Platform admin: Workspaces", keywords: "all workspaces teams" },
+  { href: "/platform/apps", label: "Platform admin: Apps", keywords: "all apps builds hosting remove" },
+  { href: "/platform/products", label: "Platform admin: Products", keywords: "all financial products" },
+  { href: "/platform/firms", label: "Platform admin: Firms", keywords: "firms licence providers vendors liquidity providers register members" },
+  { href: "/platform/licences", label: "Platform admin: Licences", keywords: "licences licenses review verify approve reject" },
+  { href: "/platform/vendors", label: "Platform admin: Vendors", keywords: "vendors service types offerings suspend" },
+  { href: "/platform/settings", label: "Platform admin: Platform settings", keywords: "platform settings esign e-signature pricing budget audit" },
+];
 
 const lower = (...parts: (string | null | undefined)[]) => parts.filter(Boolean).join(" ").toLowerCase();
 
 /** Everything search can find, from what the studio has loaded for the selected workspace. */
 export function searchIndex(sources: SearchSources): SearchItem[] {
-  const items: SearchItem[] = STUDIO_PAGES.map((p) => ({ id: `page:${p.href}`, group: "Pages", label: p.label, href: p.href, text: lower(p.label, p.keywords) }));
+  const pages = [...STUDIO_PAGES, ...(sources.admin ? PLATFORM_SEARCH_PAGES : [])];
+  const items: SearchItem[] = pages.map((p) => ({ id: `page:${p.href}`, group: "Pages", label: p.label, href: p.href, text: lower(p.label, p.keywords) }));
   for (const a of sources.apps ?? []) {
     const stage = STAGE_LABELS[a.stage];
     items.push({ id: `app:${a.id}`, group: "Apps", label: a.name, hint: stage, href: `/${encodeURIComponent(a.id)}`, text: lower(a.name, stage, a.stage) });

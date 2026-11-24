@@ -1,5 +1,5 @@
-// The Admin area (/admin), for Mynt's own staff: its tabs, and what each shows of Mynt's admin tools' answers. Every
-// list is platform-wide (all workspaces, all firms), never scoped to the workspace picked in the sidebar. Pure, for
+// The platform admin (/platform), for Mynt's own staff: its sections, and what each shows of Mynt's admin tools'
+// answers. Every list is platform-wide (all workspaces, all firms), never scoped to a workspace picked in the studio. Pure, for
 // the routes, the views and the tests. A figure Mynt didn't measure is null here and "Not measured" on screen, never 0.
 
 export const ADMIN_TABS = ["overview", "workspaces", "apps", "products", "firms", "licences", "vendors", "settings"] as const
@@ -15,10 +15,38 @@ export const ADMIN_TAB_LABELS: Record<AdminTab, string> = {
   settings: "Platform settings",
 }
 export const adminTabOf = (v: unknown): AdminTab => (ADMIN_TABS.includes(v as AdminTab) ? (v as AdminTab) : "overview")
-export const adminHref = (tab: AdminTab, id?: string) => (tab === "overview" && !id ? "/admin" : `/admin?tab=${tab}${id ? `&id=${encodeURIComponent(id)}` : ""}`)
+
+// Where it lives: its own base path and layout (app/(platform)), never inside the studio's shell. Overview is
+// /platform, each other section /platform/<section>, and a row opened in Workspaces, Apps or Firms
+// /platform/<section>/<id>.
+export const PLATFORM_BASE = "/platform"
+export const PLATFORM_NAME = "Mynt platform admin"
+// The sections whose rows open a detail page.
+export const ADMIN_DETAIL_TABS: readonly AdminTab[] = ["workspaces", "apps", "firms"]
+// An id in the address: letters, digits and dashes (Mynt's uuids), nothing that could leave the path.
+export const ADMIN_ID = /^[A-Za-z0-9-]{1,100}$/
+export const adminHref = (tab: AdminTab, id?: string) =>
+  tab === "overview" ? PLATFORM_BASE : `${PLATFORM_BASE}/${tab}${id ? `/${encodeURIComponent(id)}` : ""}`
+export const isPlatformPath = (pathname: string) => pathname === PLATFORM_BASE || pathname.startsWith(`${PLATFORM_BASE}/`)
+
+/** The section and item a /platform address shows; null when it isn't one (the page answers 404). */
+export function platformRouteOf(pathname: string): { tab: AdminTab; id: string | null } | null {
+  if (!isPlatformPath(pathname)) return null
+  const [section, id, ...rest] = pathname.slice(PLATFORM_BASE.length).split("/").filter(Boolean)
+  if (section === undefined) return { tab: "overview", id: null }
+  if (section === "overview" || !ADMIN_TABS.includes(section as AdminTab) || rest.length) return null
+  const tab = section as AdminTab
+  if (id === undefined) return { tab, id: null }
+  return ADMIN_DETAIL_TABS.includes(tab) && ADMIN_ID.test(id) ? { tab, id } : null
+}
+
+/** The header's and the tab's title for a /platform address: the section's name, or the platform admin's own. */
+export function platformTitle(pathname: string): string {
+  const route = platformRouteOf(pathname)
+  return route && route.tab !== "overview" ? ADMIN_TAB_LABELS[route.tab] : PLATFORM_NAME
+}
+
 export const NOT_MEASURED = "Not measured"
-// Sent on window when the Admin area changes its tab in the address (the sidebar marks it).
-export const ADMIN_TAB_CHANGED = "mynt:admin-tab"
 
 type Obj = Record<string, unknown>
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v)

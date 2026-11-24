@@ -3,6 +3,7 @@ import { contentSecurityPolicy } from "./lib/csp";
 import { esignFrameOrigins } from "./lib/esign-frame";
 import { appUrlFor, clientAddress, loginAllowed, shouldGoToAppUrl, warnUntrustedEdgeOnce } from "./lib/rate-limit";
 import { pageNeedsSignIn, signInPathFor } from "./lib/page-gate";
+import { legacyRedirect } from "./lib/redirects";
 import { sessionCookieName } from "./lib/session";
 import { sessionStore } from "./lib/session-store";
 
@@ -18,13 +19,19 @@ import { sessionStore } from "./lib/session-store";
 //   address not in TRUSTED_EDGE_IPS is served with a warning instead, so a missing server
 //   address can't loop its users;
 // - sends a visit to any page without a signed-in session straight to sign-in, which comes
-//   back to that page afterwards (lib/page-gate.ts).
+//   back to that page afterwards (lib/page-gate.ts);
+// - sends an old address that moved (the platform admin's /admin?tab=…) to its new one (lib/redirects.ts).
 export async function proxy(req: NextRequest) {
   // Before the redirect, so a server address missing from TRUSTED_EDGE_IPS is named in the logs.
   warnUntrustedEdgeOnce(req.headers);
   if (shouldGoToAppUrl(req.headers)) {
     return NextResponse.redirect(appUrlFor(req.nextUrl.pathname, req.nextUrl.search), 308);
   }
+
+  // Old addresses that moved (lib/redirects.ts: /admin?tab=…&id=… is /platform/…), before sign-in, so signing in
+  // comes back to the new one.
+  const moved = legacyRedirect(req.nextUrl.pathname, req.nextUrl.searchParams);
+  if (moved) return NextResponse.redirect(appUrlFor(moved, ""), 307);
 
   if (req.nextUrl.pathname === "/api/auth/login" && !(await loginAllowed(sessionStore(), clientAddress(req.headers)))) {
     return new NextResponse("Too many sign-in attempts. Please wait a few minutes and try again.", {

@@ -3,22 +3,20 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-// The Admin area's screens: the sidebar's Admin group (Mynt admins only; on /admin, "All workspaces" in place of the
-// switcher and no workspace folders), the header's scope, each tab's view and its not-available state, and each action
+// The platform admin's screens (/platform; its own layout and the studio sidebar's badge are in platform-admin.test.tsx):
+// the studio sidebar without the old Admin group, each section's view and its not-available state, and each action
 // sheet posting to its route with exactly what was typed.
 
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/admin",
+  usePathname: () => "/platform",
   useRouter: () => ({ push: () => undefined, replace: () => undefined, prefetch: () => undefined, back: () => undefined }),
 }));
 
 const { SidebarView } = await import("@/components/app-sidebar");
 const { SidebarProvider } = await import("@/components/ui/sidebar");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
-const { SiteHeader } = await import("@/components/site-header");
-const { pageGateFor } = await import("@/components/studio-gates");
 const { pageTitle, isAppPath } = await import("@/lib/studio-search");
-const { AdminTabs } = await import("@/components/admin-view");
+const { PlatformSidebarView, PLATFORM_SECTIONS } = await import("@/components/platform-shell");
 const { OverviewView } = await import("@/components/admin-overview");
 const { OperationalSettingsView } = await import("@/components/admin-settings");
 const { WorkspacesListView, WorkspaceDetailView } = await import("@/components/admin-workspaces");
@@ -62,7 +60,6 @@ const sidebar = (pathname: string, isAdmin: boolean) =>
           onSelectWorkspace={() => undefined}
           onCreateWorkspace={async () => null}
           admin={isAdmin}
-          adminTab={pathname === "/admin" ? "firms" : null}
         />
       </SidebarProvider>
     </TooltipProvider>,
@@ -95,36 +92,19 @@ const APP_ROW: import("@/lib/admin").AdminApp = { id: APP, name: "Saver", status
 const LICENCE: import("@/lib/admin").AdminLicence = { id: LIC, entityId: FIRM, firm: "Acme Trust", region: "US", regulator: "occ", licenceType: "trust_charter", jurisdiction: null, number: "T-1", validFrom: null, validTo: "2027-01-01", status: "pending", reviewNote: null, createdAt: null }
 
 describe("the sidebar and header", () => {
-  it("the Admin group only for Mynt admins; on /admin, All workspaces in place of the switcher and no workspace folders", () => {
-    const notAdmin = sidebar("/", false)
-    expect(notAdmin).not.toContain("data-admin-group")
-    expect(notAdmin).not.toContain('href="/admin')
-    const adminHome = sidebar("/", true)
-    expect(adminHome).toContain("data-admin-group")
-    for (const t of admin.ADMIN_TABS) expect(adminHome).toContain(`data-admin-link="${t}"`)
-    expect(adminHome).toContain("Round-up savings") // the workspace's folders, outside the Admin area
-    expect(adminHome).not.toContain("data-all-workspaces")
-    const inAdmin = sidebar("/admin", true)
-    expect(inAdmin).toContain("data-all-workspaces")
-    expect(inAdmin).toContain("All workspaces")
-    expect(inAdmin).not.toContain("Round-up savings")
-    const tag = (html: string, t: string) => html.match(new RegExp(`<a[^>]*data-admin-link="${t}"[^>]*>`))?.[0] ?? ""
-    expect(tag(inAdmin, "firms")).toContain('data-active="true"')
-    expect(tag(inAdmin, "apps")).toContain('data-active="false"')
-    expect(tag(adminHome, "firms")).toContain('data-active="false"') // outside /admin, nothing marked
-    // A non-admin who types /admin gets the same sidebar as anywhere (the page itself is a 404).
-    expect(sidebar("/admin", false)).not.toContain("data-all-workspaces")
+  it("the studio sidebar has no Admin group and no All workspaces switcher, for anyone, on any page; admins get the Platform admin badge", () => {
+    for (const [pathname, isAdmin] of [["/", false], ["/", true], ["/admin", true], ["/platform", true], ["/admin", false]] as const) {
+      const html = sidebar(pathname, isAdmin)
+      for (const gone of ["data-admin-group", "data-admin-link", "data-all-workspaces", "All workspaces"]) expect(html).not.toContain(gone)
+      expect(html).toContain("Round-up savings") // the workspace's folders stay
+      expect(html.includes("data-platform-admin-link")).toBe(isAdmin)
+    }
   })
 
-  it("the header says the page covers all workspaces; /admin is a fixed page, never an app, and needs no workspace", () => {
-    const header = (ui: React.ReactNode) => renderToStaticMarkup(<TooltipProvider><SidebarProvider>{ui}</SidebarProvider></TooltipProvider>)
-    expect(header(<SiteHeader title="Admin" scope="All workspaces" />)).toContain("data-header-scope")
-    expect(header(<SiteHeader title="Dashboard" />)).not.toContain("data-header-scope")
-    expect(pageTitle("/admin")).toBe("Admin")
+  it("/platform is a fixed page, never an app; the studio header has no scope badge any more", () => {
+    expect(isAppPath("/platform")).toBe(false)
     expect(isAppPath("/admin")).toBe(false)
-    const access = { developer: true, admin: true, liquidity: { builder: false, liquidityProvider: false }, owner: null }
-    expect(pageGateFor("/admin", access, true)).toBe("none")
-    expect(pageGateFor("/admin", { ...access, admin: false }, true)).toBe("workspace")
+    expect(pageTitle("/platform")).toBe("Mynt platform admin")
   })
 
   it("workspace Settings has no E-signature tab any more", () => {
@@ -135,11 +115,12 @@ describe("the sidebar and header", () => {
 })
 
 describe("each tab", () => {
-  it("the tab bar names every tab; an unknown tab opens Overview", () => {
-    const html = renderToStaticMarkup(<AdminTabs tab="licences" onTab={() => undefined} />)
+  it("the platform sidebar names every section; an unknown section opens Overview", () => {
+    const html = renderToStaticMarkup(<TooltipProvider><SidebarProvider><PlatformSidebarView pathname="/platform/licences" account={{ name: null, email: null }} /></SidebarProvider></TooltipProvider>)
     for (const t of admin.ADMIN_TABS) expect(html).toContain(admin.ADMIN_TAB_LABELS[t])
+    expect(PLATFORM_SECTIONS.map((x) => x.tab)).toEqual([...admin.ADMIN_TABS])
     expect(admin.adminTabOf("nope")).toBe("overview")
-    expect(admin.adminHref("firms", FIRM)).toBe(`/admin?tab=firms&id=${FIRM}`)
+    expect(admin.adminHref("firms", FIRM)).toBe(`/platform/firms/${FIRM}`)
   })
 
   it("Overview: what needs attention first; an agent this server doesn't run is Not measured, never $0", () => {
