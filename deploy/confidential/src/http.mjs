@@ -7,7 +7,8 @@ import { Refused } from "./keyhouse.mjs";
 
 const MAX_BODY = 1024 * 1024;
 
-export function startKeyhouseServer(keyhouse, { cert, key, ca, port = 8443, host, log = console.log }) {
+// `path`: a Unix socket instead of a port (inside an enclave, where the helper relays vsock to it).
+export function startKeyhouseServer(keyhouse, { cert, key, ca, port = 8443, host, path, log = console.log }) {
   const server = createServer({ cert, key, ca, requestCert: true, rejectUnauthorized: true, minVersion: "TLSv1.3" }, async (req, res) => {
     const url = new URL(req.url ?? "/", "https://keyhouse");
     const caller = req.socket.getPeerCertificate()?.subject?.CN ?? "";
@@ -37,5 +38,5 @@ export function startKeyhouseServer(keyhouse, { cert, key, ca, port = 8443, host
       send(status, { error: code });
     }
   });
-  return new Promise((resolve) => server.listen(port, host, () => resolve(server)));
+  return new Promise((resolve) => (path ? server.listen(path, () => resolve(server)) : server.listen(port, host, () => resolve(server))));
 }

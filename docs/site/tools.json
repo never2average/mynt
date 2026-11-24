@@ -1200,7 +1200,7 @@
     {
       "name": "announce_enclave_release",
       "title": "Announce a confidential service release",
-      "description": "Admin: announce a build of the confidential service by its image digest (the one CI's confidential-image job printed for that commit). It takes effect 48 hours later (the first ever at once); until then Mynt's server won't talk to a service running it. Audited, and told to every licence-provider firm (a notice to each member and confidential.release_announced on its webhooks). The cloud key policy must name the same digest before the service can use its keys: the operator changes that, and docs/reference.md says how.",
+      "description": "Admin: announce a build of the confidential service by what the hardware measures, as CI's confidential-image job printed it for that commit: pcr0, pcr1 and pcr2 for the enclave image (the default host), or image_digest for a confidential-VM container. It takes effect 48 hours later (the first ever at once); until then Mynt's server won't talk to a service running it. Audited, and told to every licence-provider firm (a notice to each member and confidential.release_announced on its webhooks). The cloud key policy must name the same measurement (an enclave's pcr0) before the service can use its keys: the operator changes that, and docs/reference.md says how.",
       "area": "admin",
       "roles": [
         "admin"
@@ -1210,10 +1210,25 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "image_digest": {
+          "pcr0": {
+            "description": "Enclave image: 96 lowercase hex digits, as CI printed it",
             "type": "string",
-            "pattern": "^sha256:[0-9a-f]{64}$",
-            "description": "sha256:<64 hex>, as CI printed it"
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "pcr1": {
+            "description": "Enclave kernel and boot ramdisk",
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "pcr2": {
+            "description": "Enclave application",
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          },
+          "image_digest": {
+            "description": "Confidential-VM container instead: sha256:<64 hex>, as CI printed it",
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
           },
           "release": {
             "type": "string",
@@ -1229,7 +1244,6 @@
           }
         },
         "required": [
-          "image_digest",
           "release",
           "reason"
         ],
@@ -9567,7 +9581,7 @@
     {
       "name": "list_enclave_releases",
       "title": "Confidential service releases",
-      "description": "Licence providers, liquidity providers and admins: the builds of Mynt's confidential service (the enclave that computes product health from partners' sealed statements and keeps Mynt's keys): each image digest, its release, why it was announced, when it takes effect (48 hours after it's announced, except the first) and whether it's in effect. Compare an attestation's image digest with these and with the digest CI published for that release (verify-mynt-enclave does both).",
+      "description": "Licence providers, liquidity providers and admins: the builds of Mynt's confidential service (the enclave that computes product health from partners' sealed statements and keeps Mynt's keys): what the hardware measures for each (an enclave image's pcr0, pcr1 and pcr2, or a container image digest), its release, why it was announced, when it takes effect (48 hours after it's announced, except the first) and whether it's in effect. Compare an attestation's measurements with these and with the ones CI published for that release (verify-mynt-enclave does both).",
       "area": "licences",
       "roles": [
         "license_provider",

@@ -6,7 +6,8 @@ import { canonicalJson } from "./figures.js";
 //
 // The attestation token carries two nonces (eat_nonce): the caller's, as given, and `mynt-keys-<sha256 hex>` over the
 // canonical JSON of the enclave's public keys. A verifier recomputes the second from the keys returned beside the token,
-// so a key Mynt's server swapped in on the way wouldn't match what the hardware attested.
+// so a key Mynt's server swapped in on the way wouldn't match what the hardware attested. Hosts whose attestation has no
+// nonce list carry the same two values in their own fields (an enclave's attestation document: nonce and user_data).
 
 export const KEYS_SCHEMA = "mynt.enclave_keys.v1";
 export const KEYS_NONCE_PREFIX = "mynt-keys-";
@@ -19,6 +20,9 @@ export interface EnclaveKeys {
   tls_spki_sha256: string; // hex: the service's TLS key, made inside the enclave at boot, so callers pin it
   ingest_public_key: string; // base64url X25519: what partners seal their statements to (envelope.ts)
   signing: Record<string, string>; // key name -> base64url raw Ed25519 public key (e.g. health-attester)
+  // Settings the service was started with that decide whose keys it uses (on hosts where they reach it from outside the
+  // measured image, e.g. the KMS key that wraps its root): bound with the keys, so a verifier sees exactly which.
+  config?: Record<string, string>;
 }
 
 export const keysDigest = (k: EnclaveKeys) => createHash("sha256").update(canonicalJson(k), "utf8").digest("hex");

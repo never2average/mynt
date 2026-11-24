@@ -1,23 +1,29 @@
 #!/usr/bin/env node
 // Checks Mynt's confidential service yourself, before you seal your books to it. Run from a checkout of the release you
-// expect (after `npm ci && npm run build` in core/):
+// expect (after `npm ci && npm run build` in core/), with the measurements that release's CI published (they're also in
+// list_enclave_releases; take them from the release, not from Mynt's answer):
 //
-//   node scripts/verify-mynt-enclave.mjs --url https://<mynt>/confidential/attestation --expected-digest sha256:<64 hex>
+//   An enclave (the default deployment):
+//     node scripts/verify-mynt-enclave.mjs --url https://<mynt>/confidential/attestation \
+//       --expected-pcr0 <96 hex> --expected-pcr1 <96 hex> --expected-pcr2 <96 hex> [--expected-kms-key <arn>]
+//   A confidential-VM container:
+//     node scripts/verify-mynt-enclave.mjs --url https://<mynt>/confidential/attestation --expected-digest sha256:<64 hex>
 //
-// The expected digest is the one CI's confidential-image job printed for that release (and list_enclave_releases
-// shows); take it from the release, not from Mynt's answer. What's checked, and every problem printed:
-//   - the attestation token's signature, with the attestation service's published keys (fetched from Google, never
-//     from Mynt), its issuer, audience and expiry;
-//   - a production confidential OS (swname, STABLE support), secure boot on, and debugging off since boot, so nobody,
-//     Mynt's operators included, could read the service's memory;
-//   - the container image digest equals the one you expect;
-//   - your fresh nonce is in the token (not a replay), and so is the binding of the keys returned beside it, so the
-//     ingest key you'll seal to and the attester key that signs snapshots are the ones the hardware attested.
+// What's checked, and every problem printed:
+//   - an enclave's attestation document: its COSE signature (ES384), its certificate chain up to the AWS Nitro
+//     Enclaves root certificate pinned in core/src/confidential/aws-nitro.ts (never one from Mynt), its freshness, and
+//     pcr0, pcr1 and pcr2 equal to the ones you expect (and not a debug-mode enclave's zeros);
+//   - or a container's attestation token: its signature, with the attestation service's published keys (fetched from
+//     Google, never from Mynt), issuer, audience and expiry; a production confidential OS with secure boot and
+//     debugging off since boot; the image digest you expect;
+//   - either way, your fresh nonce (not a replay), and the binding of the keys returned beside it, so the ingest key
+//     you'll seal to and the attester key that signs snapshots are the ones the hardware attested.
 // Exit status 0 only when all of it holds; then it prints the keys to use. Offline: --attestation-file <json> --nonce
-// <the nonce it was fetched with> --jwks-file <json>.
+// <the nonce it was fetched with> (and --jwks-file <json> for a container token).
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { verifyNitroAttestation } from "../dist/confidential/aws-nitro.js";
 import { fetchAttestationJwks, verifyAttestationToken } from "../dist/confidential/attestation-verify.js";
 import { ATTESTATION_AUDIENCE } from "../dist/confidential/shared/binding.js";
 
@@ -25,9 +31,15 @@ const { values } = parseArgs({
   options: {
     url: { type: "string" },
     "expected-digest": { type: "string" },
+    "expected-pcr0": { type: "string" },
+    "expected-pcr1": { type: "string" },
+    "expected-pcr2": { type: "string" },
+    "expected-kms-key": { type: "string" },
     "attestation-file": { type: "string" },
     nonce: { type: "string" },
     "jwks-file": { type: "string" },
+    // Tests only: a test authority instead of the pinned root.
+    "test-root-file": { type: "string" },
     json: { type: "boolean" },
   },
 });
@@ -35,8 +47,13 @@ const die = (m) => {
   console.error(m);
   process.exit(2);
 };
-const expected = values["expected-digest"] ?? die("--expected-digest sha256:<64 hex> is required: the digest published for the release you expect");
-if (!/^sha256:[0-9a-f]{64}$/.test(expected)) die("--expected-digest must be sha256: and 64 lowercase hex digits");
+const PCR = /^[0-9a-f]{96}$/;
+const wantsPcrs = values["expected-pcr0"] !== undefined || values["expected-pcr1"] !== undefined || values["expected-pcr2"] !== undefined;
+const expectedPcrs = wantsPcrs ? { pcr0: values["expected-pcr0"] ?? "", pcr1: values["expected-pcr1"] ?? "", pcr2: values["expected-pcr2"] ?? "" } : null;
+if (expectedPcrs && !Object.values(expectedPcrs).every((p) => PCR.test(p))) die("--expected-pcr0, --expected-pcr1 and --expected-pcr2 are each 96 lowercase hex digits");
+const expected = values["expected-digest"];
+if (!expectedPcrs && !expected) die("Give the measurements published for the release you expect: --expected-pcr0/1/2 for an enclave, or --expected-digest for a container");
+if (expected && !/^sha256:[0-9a-f]{64}$/.test(expected)) die("--expected-digest must be sha256: and 64 lowercase hex digits");
 
 let nonce;
 let attestation;
@@ -52,28 +69,32 @@ if (values["attestation-file"]) {
 }
 
 const problems = [];
-if (attestation.format !== "oidc-jwt" || !attestation.token) problems.push(`no hardware attestation: ${attestation.measurements?.reason ?? "the service gave no token"}`);
+const out = { ok: false, problems, notes: [], host: attestation.host ?? null };
 if (attestation.nonce !== nonce) problems.push("the answer names another nonce");
-let claims = null;
-if (attestation.token) {
-  const jwks = values["jwks-file"] ? JSON.parse(readFileSync(values["jwks-file"], "utf8")) : await fetchAttestationJwks();
-  const check = verifyAttestationToken(attestation.token, { jwks, audience: ATTESTATION_AUDIENCE, nonce, keys: attestation.keys, allowedDigests: [expected] });
+if (attestation.format === "nitro-cose" && attestation.token) {
+  if (!expectedPcrs) problems.push("this is an enclave's attestation: give --expected-pcr0, --expected-pcr1 and --expected-pcr2");
+  const roots = values["test-root-file"] ? [readFileSync(values["test-root-file"], "utf8")] : undefined;
+  const check = verifyNitroAttestation(attestation.token, { nonce, keys: attestation.keys, allowedPcrs: expectedPcrs ? [expectedPcrs] : [], expectedKmsKey: values["expected-kms-key"] ?? null, roots });
   problems.push(...check.problems);
-  claims = check.claims;
+  Object.assign(out, { pcrs: check.pcrs, module: check.document?.module_id ?? null, kms_key: attestation.keys?.config?.kms_key ?? null });
+  const announced = expectedPcrs && (attestation.releases ?? []).find((r) => r.pcrs?.pcr0 === expectedPcrs.pcr0 && r.pcrs?.pcr1 === expectedPcrs.pcr1 && r.pcrs?.pcr2 === expectedPcrs.pcr2);
+  if (!announced) out.notes.push("Mynt hasn't announced these PCRs (list_enclave_releases): ask why before relying on them");
+  else if (!announced.in_effect) out.notes.push(`Mynt announced these PCRs, in effect from ${announced.effective_at}`);
+} else if (attestation.format === "oidc-jwt" && attestation.token) {
+  if (!expected) problems.push("this is a container's attestation: give --expected-digest");
+  const jwks = values["jwks-file"] ? JSON.parse(readFileSync(values["jwks-file"], "utf8")) : await fetchAttestationJwks();
+  const check = verifyAttestationToken(attestation.token, { jwks, audience: ATTESTATION_AUDIENCE, nonce, keys: attestation.keys, allowedDigests: expected ? [expected] : [] });
+  problems.push(...check.problems);
+  const claims = check.claims;
+  Object.assign(out, { image_digest: claims?.submods?.container?.image_digest ?? null, hardware: claims?.hwmodel ?? null, os_version: claims?.swversion?.[0] ?? null });
+  const announced = (attestation.releases ?? []).find((r) => r.image_digest === expected);
+  if (!announced) out.notes.push("Mynt hasn't announced this digest (list_enclave_releases): ask why before relying on it");
+  else if (!announced.in_effect) out.notes.push(`Mynt announced this digest, in effect from ${announced.effective_at}`);
+} else {
+  problems.push(`no hardware attestation: ${attestation.measurements?.reason ?? "the service gave no token"}`);
 }
-const announced = (attestation.releases ?? []).find((r) => r.image_digest === expected);
-const notes = [];
-if (!announced) notes.push("Mynt hasn't announced this digest (list_enclave_releases): ask why before relying on it");
-else if (!announced.in_effect) notes.push(`Mynt announced this digest, in effect from ${announced.effective_at}`);
 
-const out = {
-  ok: problems.length === 0,
-  problems,
-  notes,
-  image_digest: claims?.submods?.container?.image_digest ?? null,
-  hardware: claims?.hwmodel ?? null,
-  os_version: claims?.swversion?.[0] ?? null,
-  ...(problems.length === 0 ? { ingest_public_key: attestation.keys.ingest_public_key, health_attester_key: attestation.keys.signing?.["health-attester"] ?? null } : {}),
-};
+out.ok = problems.length === 0;
+if (out.ok) Object.assign(out, { ingest_public_key: attestation.keys.ingest_public_key, health_attester_key: attestation.keys.signing?.["health-attester"] ?? null });
 console.log(JSON.stringify(out, null, 2));
 process.exit(out.ok ? 0 : 1);

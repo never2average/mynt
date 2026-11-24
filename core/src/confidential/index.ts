@@ -1,6 +1,7 @@
 // Picks the confidential host from the environment. Provider names appear here and in their adapters only.
 import type { Db } from "../db.js";
 import { installReleasedVaultKeys, legacyVaultRoot, rewrapLegacyValue, LEGACY_SEALED } from "../vault.js";
+import { NitroEnclaveHost, nitroHostOptionsFromEnv } from "./aws-nitro.js";
 import { ConfidentialSpaceHost, remoteHostOptionsFromEnv } from "./gcp-confidential-space.js";
 import { ConfidentialReleases, TABLES } from "./governance.js";
 import { CONFIDENTIAL_HOST_KINDS, ConfidentialRefused, type ConfidentialHost } from "./host.js";
@@ -10,18 +11,41 @@ export * from "./host.js";
 export { ConfidentialReleases } from "./governance.js";
 export { LocalConfidentialHost } from "./local.js";
 
-// CONFIDENTIAL_HOST: local (the default) or gcp-confidential-space, with CONFIDENTIAL_HOST_URL,
-// CONFIDENTIAL_HOST_CLIENT_CERT and CONFIDENTIAL_HOST_CLIENT_KEY (paths to files, never the material).
-export function confidentialHostFromEnv(env: NodeJS.ProcessEnv, releases: ConfidentialReleases | null): ConfidentialHost {
+// CONFIDENTIAL_HOST: local (the default), aws-nitro (the documented deployment) or gcp-confidential-space, with
+// CONFIDENTIAL_HOST_URL, CONFIDENTIAL_HOST_CLIENT_CERT and CONFIDENTIAL_HOST_CLIENT_KEY (paths to files, never the
+// material), and for aws-nitro CONFIDENTIAL_HOST_KMS_KEY (the wrap key's ARN). With a database, an enclave that
+// restarted gets its wrapped root back from it (`mynt confidential init` stored it).
+export function confidentialHostFromEnv(env: NodeJS.ProcessEnv, releases: ConfidentialReleases | null, db?: Db): ConfidentialHost {
   const kind = env.CONFIDENTIAL_HOST || "local";
   if (!(CONFIDENTIAL_HOST_KINDS as readonly string[]).includes(kind)) throw new ConfidentialRefused(`CONFIDENTIAL_HOST must be one of ${CONFIDENTIAL_HOST_KINDS.join(", ")}`);
   if (kind === "local") return new LocalConfidentialHost();
   if (!releases) throw new ConfidentialRefused("The confidential service needs the release record");
+  if (kind === "aws-nitro") return new NitroEnclaveHost(nitroHostOptionsFromEnv(env, () => releases.pcrsInEffect(), db ? () => storedWrappedRoot(db, kind) : undefined));
   return new ConfidentialSpaceHost(remoteHostOptionsFromEnv(env, () => releases.inEffect()));
 }
 
 const T = "financial_products";
 const VAULT_KEYS = "vault-keys";
+const HOST_ROOT = "host-root";
+
+export async function storedWrappedRoot(db: Db, host: string): Promise<string | null> {
+  const { rows } = await db.query(`SELECT sealed FROM ${T}.confidential_keys WHERE name = $1 AND host = $2`, [HOST_ROOT, host]);
+  return (rows[0]?.sealed as string | undefined) ?? null;
+}
+
+// Once, on a new confidential service: it makes its root and returns it wrapped (ciphertext only it can unwrap). On a
+// host that keeps nothing across restarts (an enclave), Mynt stores the wrapped root and hands it back after each
+// restart, so the operator has nothing to copy; elsewhere the operator puts it in the VM's settings.
+export async function initialiseHost(db: Db, host: ConfidentialHost): Promise<{ wrapped_root: string; stored: boolean }> {
+  if (!host.initialise) throw new ConfidentialRefused("This confidential host has no root to initialise");
+  await db.exec(TABLES);
+  if (host.unlock && (await storedWrappedRoot(db, host.kind))) throw new ConfidentialRefused("This confidential service already has a root (Mynt keeps it wrapped): initialising again would orphan everything sealed under it");
+  const { wrapped_root } = await host.initialise();
+  if (!host.unlock) return { wrapped_root, stored: false };
+  await db.query(`INSERT INTO ${T}.confidential_keys (name, sealed, host) VALUES ($1, $2, $3)`, [HOST_ROOT, wrapped_root, host.kind]);
+  await host.unlock(wrapped_root);
+  return { wrapped_root, stored: true };
+}
 
 // At boot: when the vault's keys were adopted by the host, release them into this process (vault.ts). They live only in
 // memory. Returns whether they were; false means MYNT_VAULT_KEY is still the vault's key, as before the migration.

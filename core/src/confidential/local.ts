@@ -34,7 +34,7 @@ export class LocalConfidentialHost implements ConfidentialHost {
   }
 
   async measurements(): Promise<Measurements> {
-    return { host: "local", attested: false, image_digest: null, hardware: null, software: null, software_version: null, debug: null, reason: NOT_ATTESTED };
+    return { host: "local", attested: false, image_digest: null, pcrs: null, hardware: null, software: null, software_version: null, debug: null, reason: NOT_ATTESTED };
   }
 
   async keys(): Promise<EnclaveKeys> {

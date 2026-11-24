@@ -1,5 +1,7 @@
+import { createPublicKey, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { request } from "node:http";
+import { ATTESTATION_AUDIENCE, keysNonce } from "./shared/binding.js";
 
 // The two things the service asks of the confidential VM's cloud, and nothing else:
 //
@@ -77,6 +79,65 @@ export function kmsClient({ provider, subjectToken, fetchImpl = fetch, stsUrl = 
     },
     async publicKeyPem(version) {
       return (await call("GET", `${version}/publicKey`)).pem;
+    },
+  };
+}
+
+// The Confidential Space platform for the keyhouse (keyhouse.mjs): attestation tokens from the launcher, the root
+// wrapped by a Cloud KMS symmetric key, and named keys signed by Cloud KMS Ed25519 keys, each usable only by this image.
+const ROOT_AAD = Buffer.from("mynt-keyhouse-root-v1");
+
+export function confidentialSpacePlatform({ kms, launcher, wrapKey, signingKeys = {} }) {
+  const publicKeys = new Map();
+  const publicKey = async (name) => {
+    if (!publicKeys.has(name)) publicKeys.set(name, createPublicKey(await kms.publicKeyPem(signingKeys[name])).export({ format: "jwk" }).x);
+    return publicKeys.get(name);
+  };
+  // Informational only: what the token claims, unverified here. Callers verify the token itself.
+  const claimsOf = (token) => {
+    try {
+      return JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
+    } catch {
+      return {};
+    }
+  };
+  return {
+    host: "gcp-confidential-space",
+    tag: "cs",
+    signingNames: Object.keys(signingKeys),
+    derivedSigning: false,
+    config: null,
+    async attest(nonce, keys) {
+      const token = await launcher.token({ audience: ATTESTATION_AUDIENCE, nonces: [nonce, keysNonce(keys)] });
+      const c = claimsOf(token);
+      return {
+        format: "oidc-jwt",
+        token,
+        measurements: {
+          host: "gcp-confidential-space",
+          attested: true,
+          image_digest: c.submods?.container?.image_digest ?? null,
+          pcrs: null,
+          hardware: c.hwmodel ?? null,
+          software: c.swname ?? null,
+          software_version: c.swversion?.[0] ?? null,
+          debug: c.dbgstat ? c.dbgstat !== "disabled-since-boot" : null,
+          reason: null,
+        },
+      };
+    },
+    async newWrappedRoot() {
+      const fresh = randomBytes(32);
+      try {
+        return await kms.encrypt(wrapKey, fresh, ROOT_AAD);
+      } finally {
+        fresh.fill(0);
+      }
+    },
+    unwrapRoot: (wrapped) => kms.decrypt(wrapKey, wrapped, ROOT_AAD),
+    publicKey: (name) => publicKey(name),
+    async sign(name, message) {
+      return { public_key: await publicKey(name), signature: (await kms.sign(signingKeys[name], message)).toString("hex") };
     },
   };
 }

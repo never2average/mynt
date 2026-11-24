@@ -42,7 +42,7 @@ import { Keypair } from "./solana/codec.js";
 import { gateConfigFromEnv, MainnetGateService } from "./solana/mainnet-gate.js";
 import { CLUSTERS, type Cluster } from "./solana/rpc.js";
 import { readFileSync } from "node:fs";
-import { adoptVault, bootVault, ConfidentialReleases, confidentialHostFromEnv, rewrapVault } from "./confidential/index.js";
+import { adoptVault, bootVault, ConfidentialReleases, confidentialHostFromEnv, initialiseHost, rewrapVault } from "./confidential/index.js";
 import type { Db } from "./db.js";
 import { ROLES, Store, type Role } from "./store.js";
 
@@ -70,7 +70,7 @@ const USAGE = `Usage:
   mynt product-health publisher --program-id <address>      The devnet publisher key's address (created in the vault if new)
   mynt product-health init --program-id <address> --file <upgrade-authority-keypair.json>   Once, after deploying: name the publisher on chain
   mynt confidential status             Which confidential host this server uses, what it attests, and whether it holds the vault's keys
-  mynt confidential init               Once, on a new confidential service: makes its root key and prints the wrapped form for its VM
+  mynt confidential init               Once, on a new confidential service: makes its root key (wrapped; Mynt stores it for an enclave)
   mynt confidential adopt              Once, after deploying the confidential service: it adopts MYNT_VAULT_KEY (restart after)
   mynt confidential rewrap [--apply]   Then: count (or, with --apply, re-seal) every value sealed with MYNT_VAULT_KEY under the
                                        released data key, after which MYNT_VAULT_KEY can be removed from the server
@@ -101,8 +101,9 @@ Environment:
   PRODUCT_HEALTH_PROGRAM_ID The deployed product-health program (devnet); unset, the worker doesn't run. PRODUCT_HEALTH_INTERVAL_MINUTES (default 60)
   HOSTING_DO_TOKEN          With HOSTING_GATEWAY_ENDPOINT, HOSTING_GATEWAY_PUBLIC_KEY and PUBLIC_URL: a VM per developer for hosted apps
                             (HOSTING_REGION, HOSTING_SIZE, HOSTING_DO_IMAGE, HOSTING_GATEWAY_IP, HOSTING_APPS_DOMAIN)
-  CONFIDENTIAL_HOST         local (default: in-process, keyed by MYNT_VAULT_KEY) or gcp-confidential-space, with
-                            CONFIDENTIAL_HOST_URL and CONFIDENTIAL_HOST_CLIENT_CERT / CONFIDENTIAL_HOST_CLIENT_KEY (file paths)
+  CONFIDENTIAL_HOST         local (default: in-process, keyed by MYNT_VAULT_KEY), aws-nitro or gcp-confidential-space, with
+                            CONFIDENTIAL_HOST_URL and CONFIDENTIAL_HOST_CLIENT_CERT / CONFIDENTIAL_HOST_CLIENT_KEY (file paths);
+                            aws-nitro also CONFIDENTIAL_HOST_KMS_KEY (the wrap key's ARN)
   ESIGN_PROVIDER=signwell   Overrides for e-signature, which admins set up in Mynt Studio (Settings → E-signature):
                             SIGNWELL_API_KEY, SIGNWELL_WEBHOOK_ID, ESIGN_TEST_MODE=off. Keys and signed copies are
                             sealed with MYNT_VAULT_KEY`;
@@ -135,7 +136,7 @@ const openStore = () => Store.open(openDb());
 // Commands that open the vault: its keys come from the confidential host once they've moved there.
 const bootConfidential = async (db: Db) => {
   const releases = await ConfidentialReleases.open(db);
-  const host = confidentialHostFromEnv(process.env, releases);
+  const host = confidentialHostFromEnv(process.env, releases, db);
   await bootVault(db, host);
   return host;
 };
@@ -145,7 +146,7 @@ const openServices = async () => {
   const store = await Store.open(db);
   // The confidential host first: once the vault's keys live there, nothing else can open the vault until it releases them.
   const confidentialReleases = await ConfidentialReleases.open(db);
-  const confidential = confidentialHostFromEnv(process.env, confidentialReleases);
+  const confidential = confidentialHostFromEnv(process.env, confidentialReleases, db);
   await bootVault(db, confidential);
   const sandboxes = sandboxesFromEnv();
   const buildConfig = buildConfigFromEnv();
@@ -437,9 +438,9 @@ if (values.help) {
   const host = await bootConfidential(db).catch((e) => die((e as Error).message));
   if (sub === "init") {
     // The wrapped root is ciphertext that only the attested image can unwrap: safe to print, and the operator needs it.
-    if (!host.initialise) die("This confidential host has no root to initialise");
-    const { wrapped_root } = await host.initialise!().catch((e) => die((e as Error).message));
-    console.log(`Set this as the confidential VM's KEYHOUSE_WRAPPED_ROOT metadata value, then restart the VM:\n${wrapped_root}`);
+    const { wrapped_root, stored } = await initialiseHost(db, host).catch((e) => die((e as Error).message));
+    if (stored) console.log(`The confidential service made its root; Mynt stored it wrapped and hands it back after every enclave restart. Keep a copy of the wrapped form somewhere safe too (it's ciphertext only the attested enclave can open):\n${wrapped_root}`);
+    else console.log(`Set this as the confidential VM's KEYHOUSE_WRAPPED_ROOT metadata value, then restart the VM:\n${wrapped_root}`);
   } else if (sub === "status") {
     const { rows } = await db.query("SELECT host, created_at FROM financial_products.confidential_keys WHERE name = 'vault-keys'");
     const measurements = await host.measurements().catch((e) => ({ error: (e as Error).message }));

@@ -1,0 +1,49 @@
+{
+  "$comment": "The wrap key's key policy, for setting the key up by hand (keyhouse.cloudformation.json makes the same one). Replace <ACCOUNT_ID>, <INSTANCE_ROLE_ARN> and <PCR0> (the release's PCR0, 96 hex digits, as CI printed it; list two during an upgrade). Remove this $comment before pasting. The account can manage the key but not use it; the instance's role can use it only from an enclave attesting that PCR0; nobody can use it without an attestation, or re-encrypt under another key, whatever their IAM permissions say.",
+  "Version": "2012-10-17",
+  "Id": "mynt-keyhouse-wrap-key",
+  "Statement": [
+    {
+      "Sid": "AccountManagesButDoesNotUse",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::<ACCOUNT_ID>:root" },
+      "Action": [
+        "kms:Describe*",
+        "kms:Get*",
+        "kms:List*",
+        "kms:PutKeyPolicy",
+        "kms:Enable*",
+        "kms:Disable*",
+        "kms:Update*",
+        "kms:TagResource",
+        "kms:UntagResource",
+        "kms:ScheduleKeyDeletion",
+        "kms:CancelKeyDeletion"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EnclaveUsesWithAttestation",
+      "Effect": "Allow",
+      "Principal": { "AWS": "<INSTANCE_ROLE_ARN>" },
+      "Action": ["kms:Decrypt", "kms:GenerateDataKey"],
+      "Resource": "*",
+      "Condition": { "StringEqualsIgnoreCase": { "kms:RecipientAttestation:ImageSha384": ["<PCR0>"] } }
+    },
+    {
+      "Sid": "NobodyUsesWithoutAttestation",
+      "Effect": "Deny",
+      "Principal": { "AWS": "*" },
+      "Action": ["kms:Decrypt", "kms:GenerateDataKey", "kms:GenerateDataKeyPair"],
+      "Resource": "*",
+      "Condition": { "StringNotEqualsIgnoreCase": { "kms:RecipientAttestation:ImageSha384": ["<PCR0>"] } }
+    },
+    {
+      "Sid": "NobodyReEncrypts",
+      "Effect": "Deny",
+      "Principal": { "AWS": "*" },
+      "Action": ["kms:ReEncryptFrom", "kms:ReEncryptTo", "kms:CreateGrant", "kms:Encrypt", "kms:GenerateDataKeyWithoutPlaintext", "kms:GenerateDataKeyPairWithoutPlaintext"],
+      "Resource": "*"
+    }
+  ]
+}
