@@ -82,7 +82,7 @@ export const APP_SEARCH_TABS = [
   { tab: "security", label: "Security & risk", keywords: "security risk risks register infosec fraud vendors conduct mitigation" },
 ] as const;
 
-export type SearchGroup = "Pages" | "Apps" | "Financial products" | "Members" | "Licences" | "Audit actions";
+export type SearchGroup = "Pages" | "Apps" | "Financial products" | "Members" | "Licences" | "Audit actions" | PlatformSearchGroup;
 export const SEARCH_GROUPS: readonly SearchGroup[] = ["Pages", "Apps", "Financial products", "Members", "Licences", "Audit actions"];
 
 // `requires`: an item found only when one of the words typed is among these (an app's tab isn't listed for its name alone).
@@ -143,6 +143,43 @@ export function searchIndex(sources: SearchSources): SearchItem[] {
   return items;
 }
 
+// The platform admin's own search (its header, /platform): its sections first, then workspaces and firms by name, then
+// the studio's pages as a secondary group. Across Mynt, never a workspace picked in the studio.
+export type PlatformSearchGroup = "Platform admin" | "Workspaces" | "Firms" | "Studio";
+export const PLATFORM_SEARCH_GROUPS: readonly PlatformSearchGroup[] = ["Platform admin", "Workspaces", "Firms", "Studio"];
+
+export type PlatformSearchSources = {
+  workspaces?: { id: string; name: string; personal?: boolean; status?: string | null }[];
+  firms?: { id: string; name: string; status?: string | null; country?: string | null }[];
+};
+
+const PLATFORM_PREFIX = "Platform admin: ";
+const platformItemHref = (section: "workspaces" | "firms", id: string) => `/platform/${section}/${encodeURIComponent(id)}`;
+
+/** Everything the platform admin's search can find: its sections, every workspace and firm loaded, and the studio's pages. */
+export function platformSearchIndex(sources: PlatformSearchSources): SearchItem[] {
+  const items: SearchItem[] = PLATFORM_SEARCH_PAGES.map((p) => {
+    const label = p.label.startsWith(PLATFORM_PREFIX) ? p.label.slice(PLATFORM_PREFIX.length) : p.label;
+    return { id: `platform:${p.href}`, group: "Platform admin", label, href: p.href, text: lower(label, "platform admin", p.keywords) };
+  });
+  for (const w of sources.workspaces ?? []) {
+    const hint = w.personal ? "Personal" : w.status || undefined;
+    items.push({ id: `workspace:${w.id}`, group: "Workspaces", label: w.name, hint, href: platformItemHref("workspaces", w.id), text: lower(w.name, w.id, "workspace", hint) });
+  }
+  for (const f of sources.firms ?? []) {
+    const hint = [f.country, f.status].filter(Boolean).join(" · ") || undefined;
+    items.push({ id: `firm:${f.id}`, group: "Firms", label: f.name, hint, href: platformItemHref("firms", f.id), text: lower(f.name, f.id, "firm", f.country, f.status) });
+  }
+  for (const p of STUDIO_PAGES)
+    items.push({ id: `studio:${p.href}`, group: "Studio", label: `Studio: ${p.label}`, href: p.href, text: lower("studio", p.label, p.keywords) });
+  return items;
+}
+
+/** What a query finds in the platform admin's search: as searchStudio, in its groups; an empty query lists the sections and the studio's pages. */
+export function searchPlatform(items: SearchItem[], query: string, perGroup = PLATFORM_SEARCH_PAGES.length): SearchItem[] {
+  return searchStudio(items, query, perGroup, { groups: PLATFORM_SEARCH_GROUPS, browse: ["Platform admin", "Studio"] });
+}
+
 export const PER_GROUP = 6;
 
 /**
@@ -150,17 +187,25 @@ export const PER_GROUP = 6;
  * (label starts with the query, then label contains it), at most PER_GROUP per group, in group
  * order. An empty query lists the pages and the first apps.
  */
-export function searchStudio(items: SearchItem[], query: string, perGroup = PER_GROUP): SearchItem[] {
+export function searchStudio(
+  items: SearchItem[],
+  query: string,
+  perGroup = PER_GROUP,
+  // Which groups, in order, and which an empty query lists (the platform admin's search has its own).
+  { groups = SEARCH_GROUPS, browse }: { groups?: readonly SearchGroup[]; browse?: readonly SearchGroup[] } = {},
+): SearchItem[] {
   const q = query.trim().toLowerCase();
   const words = q.split(/\s+/).filter(Boolean);
   const hits = words.length
     ? items.filter((i) => words.every((w) => i.text.includes(w) || i.label.toLowerCase().includes(w)) && (!i.requires || words.some((w) => i.requires!.includes(w))))
-    : items.filter((i) => i.group === "Pages" || (i.group === "Apps" && !i.requires) || i.group === "Financial products");
+    : browse
+      ? items.filter((i) => browse.includes(i.group) && !i.requires)
+      : items.filter((i) => i.group === "Pages" || (i.group === "Apps" && !i.requires) || i.group === "Financial products");
   const rank = (i: SearchItem) => {
     const label = i.label.toLowerCase();
     return !q ? 0 : label.startsWith(q) ? 0 : label.includes(q) ? 1 : 2;
   };
-  return SEARCH_GROUPS.flatMap((g) =>
+  return groups.flatMap((g) =>
     hits
       .filter((i) => i.group === g)
       .map((i, n) => ({ i, n }))

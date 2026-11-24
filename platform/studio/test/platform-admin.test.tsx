@@ -21,7 +21,7 @@ const { TooltipProvider } = await import("@/components/ui/tooltip");
 const admin = await import("@/lib/admin");
 const { legacyRedirect } = await import("@/lib/redirects");
 const { pageNeedsSignIn, signInPathFor } = await import("@/lib/page-gate");
-const { isAppPath, searchIndex, searchStudio } = await import("@/lib/studio-search");
+const { isAppPath, platformSearchIndex, searchIndex, searchPlatform, searchStudio } = await import("@/lib/studio-search");
 const { pageGateFor } = await import("@/components/studio-gates");
 const { groupByStage } = await import("@/lib/workspaces");
 
@@ -259,5 +259,107 @@ describe("addresses", () => {
     expect(searchStudio(searchIndex({ admin: true }), "audit trails").map((h) => h.href)).toContain("/platform/audit")
     expect(searchStudio(searchIndex({ admin: true }), "security risk").map((h) => h.href)).toContain("/platform/risks")
     expect(searchIndex({ admin: false }).some((i) => i.href.startsWith("/platform") || i.href.startsWith("/admin"))).toBe(false)
+  })
+})
+
+describe("the platform admin's header: Docs and search, as the studio's header has them", () => {
+  const WS = "44444444-4444-4444-8444-444444444444"
+  // The admin list routes and a session; every request recorded.
+  const stubApi = () => {
+    const urls: string[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        urls.push(url)
+        const body = url === "/api/admin/workspaces"
+          ? { workspaces: [{ id: WS, name: "Harbor Lending", personal: false, status: "active", owner: null, members: 2, apps: 1, createdAt: null }], total: 1 }
+          : url === "/api/admin/firms"
+            ? { firms: [{ id: FIRM, name: "Atlas Trust Bank", status: "active", legalForm: null, country: "US", regions: [], members: [], licences: [], types: [], createdAt: null }] }
+            : { signedIn: true, name: "Ana Admin", email: "ana@example.com" }
+        return new Response(JSON.stringify(body), { status: 200 })
+      }),
+    )
+    return urls
+  }
+  beforeAll(() => {
+    Element.prototype.scrollIntoView ??= function () {}
+  })
+
+  it("the sidebar has no Sections label above Overview; the eight sections are still listed", () => {
+    const html = renderToStaticMarkup(
+      <TooltipProvider>
+        <SidebarProvider>
+          <PlatformSidebarView pathname="/platform" account={{ name: null, email: null }} />
+        </SidebarProvider>
+      </TooltipProvider>,
+    )
+    expect(html).not.toContain("Sections")
+    expect(html).not.toContain('data-sidebar="group-label"')
+    expect([...html.matchAll(/data-platform-link="([a-z]+)"/g)]).toHaveLength(8)
+  })
+
+  it("every page's header has the labelled Docs button to /docs and the labelled search field; Invite person stays on the Overview", async () => {
+    stubApi()
+    for (const pathname of ["/platform", "/platform/firms", `/platform/workspaces/${WS}`]) {
+      nav.pathname = pathname
+      render(<PlatformShell><p data-page>Page</p></PlatformShell>)
+      await act(async () => undefined)
+      const header = document.querySelector("[data-platform-header]")!
+      const docs = header.querySelector("a[data-docs-open]")!
+      expect(docs.getAttribute("href")).toBe("/docs")
+      expect(docs.textContent).toBe("Docs")
+      const search = header.querySelector("[data-search-trigger]")!
+      expect(search.textContent).toContain("Search")
+      expect(search.textContent).not.toContain("ask AI")
+      expect(Boolean(header.querySelector("[data-header-invite-person]"))).toBe(pathname === "/platform")
+      cleanup()
+    }
+    nav.pathname = "/platform"
+  })
+
+  it("search opens with Cmd+K, lists the sections first and the studio's pages after, and finds workspaces and firms by name", async () => {
+    const urls = stubApi()
+    render(<PlatformShell><p data-page>Page</p></PlatformShell>)
+    await act(async () => undefined)
+    // Nothing of the admin lists is loaded before search opens.
+    expect(urls.filter((u) => u.startsWith("/api/admin"))).toEqual([])
+    await act(async () => {
+      fireEvent.keyDown(document, { key: "k", metaKey: true })
+    })
+    expect(document.querySelector("[data-platform-search]")).not.toBeNull()
+    await act(async () => undefined)
+    expect(urls.filter((u) => u.startsWith("/api/admin")).sort()).toEqual(["/api/admin/firms", "/api/admin/workspaces"])
+    // No workspace is read (nothing of the studio's workspace-scoped routes) and there's no Ask AI.
+    expect(urls.some((u) => u.startsWith("/api/workspaces") || u.startsWith("/api/projects") || u.startsWith("/api/ask"))).toBe(false)
+    expect(document.querySelector("[data-ask-ai]")).toBeNull()
+    const shown = () => [...document.querySelectorAll("[data-result]")].map((e) => [e.getAttribute("data-result"), e.textContent])
+    const groups = () => [...new Set(shown().map(([g]) => g))]
+    expect(groups()).toEqual(["Platform admin", "Studio"])
+    expect(shown().filter(([g]) => g === "Platform admin").map(([, t]) => t)).toEqual(PLATFORM_SECTIONS.map((s) => s.label))
+    expect(shown().some(([g, t]) => g === "Studio" && t === "Studio: Dashboard")).toBe(true)
+
+    const input = document.querySelector("[data-platform-search] input")!
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "harbor" } })
+    })
+    expect(shown()).toEqual([["Workspaces", "Harbor Lendingactive"]])
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "atlas" } })
+    })
+    expect(shown()).toEqual([["Firms", "Atlas Trust BankUS · active"]])
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "licences" } })
+    })
+    expect(groups()).toEqual(["Platform admin", "Studio"])
+  })
+
+  it("its index: sections at /platform/…, workspaces and firms at their detail pages, studio pages labelled Studio", () => {
+    const index = platformSearchIndex({ workspaces: [{ id: WS, name: "Harbor Lending" }], firms: [{ id: FIRM, name: "Atlas Trust Bank" }] })
+    expect(searchPlatform(index, "harbor").map((h) => h.href)).toEqual([`/platform/workspaces/${WS}`])
+    expect(searchPlatform(index, "atlas").map((h) => h.href)).toEqual([`/platform/firms/${FIRM}`])
+    const audit = searchPlatform(index, "audit")
+    expect(audit[0]).toMatchObject({ group: "Platform admin", label: "Audit trails", href: "/platform/audit" })
+    expect(audit.some((h) => h.group === "Studio" && h.href === "/audits")).toBe(true)
+    expect(searchPlatform(index, "docs").map((h) => [h.label, h.href])).toContainEqual(["Studio: Docs", "/docs"])
   })
 })
