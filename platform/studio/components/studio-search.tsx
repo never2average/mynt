@@ -18,7 +18,18 @@ import { useWorkspace } from "@/components/workspace-context";
 import { Button } from "@/components/ui/button";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandShortcut } from "@/components/ui/command";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { SEARCH_GROUPS, searchIndex, searchStudio, type SearchItem, type SearchSources } from "@/lib/studio-search";
+import {
+  PLATFORM_SEARCH_GROUPS,
+  platformSearchIndex,
+  SEARCH_GROUPS,
+  searchIndex,
+  searchPlatform,
+  searchStudio,
+  type PlatformSearchSources,
+  type SearchGroup,
+  type SearchItem,
+  type SearchSources,
+} from "@/lib/studio-search";
 import { myProductsFrom } from "@/lib/threads";
 import { cn } from "@/lib/utils";
 import { withWorkspace } from "@/lib/workspaces";
@@ -32,21 +43,24 @@ type SearchState = {
   setOpen: (open: boolean) => void;
   mode: SearchMode;
   setMode: (mode: SearchMode) => void;
+  // Whether the modal offers Ask AI (the studio's does; the platform admin's searches only).
+  askAi: boolean;
 };
 
-const Ctx = createContext<SearchState>({ open: false, setOpen: () => undefined, mode: "search", setMode: () => undefined });
+const Ctx = createContext<SearchState>({ open: false, setOpen: () => undefined, mode: "search", setMode: () => undefined, askAi: true });
 export const useStudioSearch = () => useContext(Ctx);
 
 /** The header's search field: opens the search modal. `compact`: an icon button (the app top bar). */
 export function SearchTrigger({ compact = false, className }: { compact?: boolean; className?: string }) {
-  const { setOpen, setMode } = useStudioSearch();
+  const { setOpen, setMode, askAi } = useStudioSearch();
+  const label = askAi ? "Search or ask AI" : "Search";
   const open = () => {
     setMode("search");
     setOpen(true);
   };
   if (compact)
     return (
-      <Button type="button" variant="ghost" size="icon" className={cn("size-8", className)} onClick={open} aria-label="Search or ask AI" title="Search or ask AI (⌘K)" data-search-trigger>
+      <Button type="button" variant="ghost" size="icon" className={cn("size-8", className)} onClick={open} aria-label={label} title={`${label} (⌘K)`} data-search-trigger>
         <Search />
       </Button>
     );
@@ -55,7 +69,7 @@ export function SearchTrigger({ compact = false, className }: { compact?: boolea
       type="button"
       variant="outline"
       onClick={open}
-      aria-label="Search or ask AI"
+      aria-label={label}
       data-search-trigger
       className={cn(
         "relative h-8 w-auto justify-start rounded-md bg-background text-sm font-normal text-muted-foreground shadow-none sm:pr-12 md:w-48 lg:w-64",
@@ -63,7 +77,7 @@ export function SearchTrigger({ compact = false, className }: { compact?: boolea
       )}
     >
       <Search className="mr-1" />
-      <span className="hidden md:inline">Search or ask AI…</span>
+      <span className="hidden md:inline">{label}…</span>
       <span className="md:hidden">Search</span>
       <kbd className="pointer-events-none absolute top-1/2 right-1.5 hidden h-5 -translate-y-1/2 items-center gap-0.5 rounded border bg-muted px-1.5 font-mono text-[10px] font-medium select-none sm:flex">
         <span className="text-xs">⌘</span>K
@@ -82,26 +96,35 @@ export function SearchResults({
   askStatus,
   onSelect,
   onAsk,
+  groups = SEARCH_GROUPS,
+  search = searchStudio,
+  empty = "Nothing in the studio matches that. Try Ask AI.",
 }: {
   items: SearchItem[];
   query: string;
-  askStatus: AskStatus;
+  // Without onAsk there's no Ask AI (the platform admin's search).
+  askStatus?: AskStatus;
   onSelect: (item: SearchItem) => void;
-  onAsk: () => void;
+  onAsk?: () => void;
+  groups?: readonly SearchGroup[];
+  search?: (items: SearchItem[], query: string) => SearchItem[];
+  empty?: string;
 }) {
-  const results = useMemo(() => searchStudio(items, query), [items, query]);
+  const results = useMemo(() => search(items, query), [search, items, query]);
   const off = askStatus === "disabled";
   return (
     <>
-      <CommandGroup heading="Ask AI">
-        <CommandItem value="ask-ai" onSelect={onAsk} disabled={off} data-ask-ai>
-          <Sparkles className="text-link" />
-          <span className="truncate">{query.trim() ? `Ask AI: “${query.trim()}”` : "Ask AI about your apps"}</span>
-          <CommandShortcut className="tracking-normal">{off ? "AI is not configured" : "Enter"}</CommandShortcut>
-        </CommandItem>
-      </CommandGroup>
-      {results.length === 0 && <CommandEmpty>Nothing in the studio matches that. Try Ask AI.</CommandEmpty>}
-      {SEARCH_GROUPS.map((group) => {
+      {onAsk && (
+        <CommandGroup heading="Ask AI">
+          <CommandItem value="ask-ai" onSelect={onAsk} disabled={off} data-ask-ai>
+            <Sparkles className="text-link" />
+            <span className="truncate">{query.trim() ? `Ask AI: “${query.trim()}”` : "Ask AI about your apps"}</span>
+            <CommandShortcut className="tracking-normal">{off ? "AI is not configured" : "Enter"}</CommandShortcut>
+          </CommandItem>
+        </CommandGroup>
+      )}
+      {results.length === 0 && <CommandEmpty>{empty}</CommandEmpty>}
+      {groups.map((group) => {
         const hits = results.filter((r) => r.group === group);
         if (!hits.length) return null;
         return (
@@ -177,11 +200,8 @@ function useAskStatus(open: boolean): AskStatus {
   return status;
 }
 
-export function StudioSearchProvider({ children }: { children: React.ReactNode }) {
-  const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<SearchMode>("search");
-
-  // Cmd+K / Ctrl+K anywhere toggles the modal.
+// Cmd+K / Ctrl+K anywhere toggles the modal.
+function useSearchShortcut(setOpen: React.Dispatch<React.SetStateAction<boolean>>) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() === "k" && (e.metaKey || e.ctrlKey)) {
@@ -191,14 +211,80 @@ export function StudioSearchProvider({ children }: { children: React.ReactNode }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, []);
+  }, [setOpen]);
+}
 
-  const value = useMemo(() => ({ open, setOpen, mode, setMode }), [open, mode]);
+export function StudioSearchProvider({ children }: { children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<SearchMode>("search");
+  useSearchShortcut(setOpen);
+
+  const value = useMemo(() => ({ open, setOpen, mode, setMode, askAi: true }), [open, mode]);
   return (
     <Ctx.Provider value={value}>
       {children}
       <StudioSearchDialog />
     </Ctx.Provider>
+  );
+}
+
+// The platform admin's search (/platform, Mynt admins only): the same field and Cmd+K modal, searching its sections,
+// every workspace and firm (the admin list routes, loaded the first time the modal opens) and the studio's pages.
+// Across Mynt: no workspace is picked, so nothing here reads the studio's workspace. No Ask AI.
+export function PlatformSearchProvider({ children }: { children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<SearchMode>("search");
+  useSearchShortcut(setOpen);
+
+  const value = useMemo(() => ({ open, setOpen, mode, setMode, askAi: false }), [open, mode]);
+  return (
+    <Ctx.Provider value={value}>
+      {children}
+      <PlatformSearchDialog />
+    </Ctx.Provider>
+  );
+}
+
+// Every workspace and firm on Mynt, for the platform admin's search: fetched once, the first time the modal opens.
+function usePlatformSearchSources(open: boolean): PlatformSearchSources {
+  const [sources, setSources] = useState<PlatformSearchSources>({});
+  const started = useRef(false);
+  useEffect(() => {
+    if (!open || started.current) return;
+    started.current = true;
+    const set = (patch: PlatformSearchSources) => setSources((s) => ({ ...s, ...patch }));
+    void pick("/api/admin/workspaces", (b) => (Array.isArray(b.workspaces) ? (b.workspaces as PlatformSearchSources["workspaces"]) : undefined)).then((workspaces) =>
+      set({ workspaces: workspaces ?? [] }),
+    );
+    void pick("/api/admin/firms", (b) => (Array.isArray(b.firms) ? (b.firms as PlatformSearchSources["firms"]) : undefined)).then((firms) => set({ firms: firms ?? [] }));
+  }, [open]);
+  return sources;
+}
+
+function PlatformSearchDialog() {
+  const { open, setOpen } = useStudioSearch();
+  const router = useRouter();
+  const [query, setQuery] = useState("");
+  const sources = usePlatformSearchSources(open);
+  const items = useMemo(() => platformSearchIndex(sources), [sources]);
+  const go = (href: string) => {
+    setOpen(false);
+    setQuery("");
+    router.push(href);
+  };
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent showCloseButton={false} className="gap-0 overflow-hidden p-0 sm:max-w-xl" data-search-mode="search" data-platform-search>
+        <DialogTitle className="sr-only">Search the platform admin</DialogTitle>
+        <DialogDescription className="sr-only">Search the platform admin&apos;s sections, workspaces, firms and the studio&apos;s pages.</DialogDescription>
+        <Command shouldFilter={false} loop className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground">
+          <CommandInput value={query} onValueChange={setQuery} placeholder="Search sections, workspaces, firms…" />
+          <CommandList className="max-h-[min(60vh,26rem)]">
+            <SearchResults items={items} query={query} groups={PLATFORM_SEARCH_GROUPS} search={searchPlatform} empty="Nothing in the platform admin matches that." onSelect={(i) => go(i.href)} />
+          </CommandList>
+        </Command>
+      </DialogContent>
+    </Dialog>
   );
 }
 
