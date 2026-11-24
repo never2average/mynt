@@ -2,7 +2,7 @@
 
 // The platform admin's own layout (app/(platform)/layout.tsx), for Mynt's staff: not the studio's shell. A sidebar laid
 // out as the studio's (shadcn/ui's sidebar-07 block, MIT, collapsible to icons), titled "Mynt platform admin", listing
-// its eight sections, each its own page (/platform, /platform/workspaces, /platform/firms, …, /platform/settings), with
+// its nine sections, each its own page (/platform, /platform/workspaces, /platform/firms, …, /platform/settings), with
 // the labelled Back to Studio link and the signed-in account at its foot (components/nav-user.tsx). No workspace
 // switcher and no app folders: everything here is across all workspaces and firms. Beside it, a sticky header with the
 // section's name, the studio header's search field (scoped to the platform admin), Docs and the theme switcher (Back to
@@ -10,7 +10,7 @@
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useEffect, useState } from "react"
-import { ArrowLeft, Building2, FileCheck2, Gauge, History, Layers, ShieldAlert, ShieldCheck, SlidersHorizontal, Store } from "lucide-react"
+import { ArrowLeft, Building2, FileCheck2, Gauge, History, Layers, ShieldAlert, ShieldCheck, SlidersHorizontal, Sigma, Store } from "lucide-react"
 
 import { InvitePersonButton } from "@/components/admin-members"
 import { DocsButton } from "@/components/connect-agent"
@@ -44,7 +44,8 @@ export const PLATFORM_SECTIONS: { tab: AdminTab; label: string; icon: typeof Gau
   { tab: "licences", label: "Licences", icon: FileCheck2 },
   { tab: "vendors", label: "Vendors", icon: Store },
   { tab: "audit", label: "Audit trails", icon: History },
-  { tab: "risks", label: "Security & risk", icon: ShieldAlert },
+  { tab: "risk-models", label: "Risk models", icon: Sigma },
+  { tab: "risk-register", label: "Risk register", icon: ShieldAlert },
   { tab: "settings", label: "Platform settings", icon: SlidersHorizontal },
 ]
 

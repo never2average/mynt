@@ -88,7 +88,7 @@
       "id": "admin",
       "title": "Admin & governance",
       "summary": "Regions and the regulatory model, categories, take rates, invitations, oversight and operations.",
-      "tools": 45
+      "tools": 51
     }
   ],
   "roles": [
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
-      "tools": 398,
+      "tools": 404,
       "get_started": [
         {
           "tool": "define_region",
@@ -731,7 +731,7 @@
     {
       "name": "add_risk",
       "title": "Add a risk to a register",
-      "description": "Add a risk to an app's or a financial product's risk register (the app's workspace owners and admins, or the product's own firm), or, for Mynt's admins, to the platform's own (subject_type platform, subject_id mynt). Give a title, a category (security, fraud, vendor, conduct, operational, compliance, credit, liquidity, other), how likely it is and how bad it would be (1-5 each; the score is their product: 1-4 low, 5-9 medium, 10-14 high, 15-25 critical), and optionally a description, the mitigation, its owner (a member of the app's workspace or the product's firm, a Mynt admin for the platform's; you by default) and the date it's next reviewed by. It starts open. Audited.",
+      "description": "Add a risk to an app's or a financial product's risk register (the app's workspace owners and admins, or the product's own firm), or, for Mynt's admins, to the platform's own (subject_type platform, subject_id mynt). Give a title, a category (security, fraud, vendor, conduct, operational, compliance, credit, liquidity, other), its risk area (financial, compliance, third_party, operations, business_process, technology, regulated_product: required on the platform's register; otherwise the category's by default: credit and liquidity financial, compliance and conduct compliance, vendor third_party, operational and fraud operations, security technology, other none), how likely it is and how bad it would be (1-5 each; the score is their product: 1-4 low, 5-9 medium, 10-14 high, 15-25 critical), and optionally a description, the mitigation, its owner (a member of the app's workspace or the product's firm, a Mynt admin for the platform's; you by default) and the date it's next reviewed by. It starts open. Audited.",
       "area": "apps",
       "roles": [
         "developer",
@@ -776,6 +776,19 @@
               "other"
             ]
           },
+          "risk_area": {
+            "description": "The platform's risk area; required for subject_type platform",
+            "type": "string",
+            "enum": [
+              "financial",
+              "compliance",
+              "third_party",
+              "operations",
+              "business_process",
+              "technology",
+              "regulated_product"
+            ]
+          },
           "description": {
             "type": "string",
             "maxLength": 4000
@@ -811,6 +824,166 @@
           "category",
           "likelihood",
           "impact"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "add_risk_model",
+      "title": "Add a risk model",
+      "description": "Admin: add one of Mynt's own risk models, in one of the platform's risk areas (financial, compliance, third_party, operations, business_process, technology, regulated_product): its name, purpose, method (the formula or approach, in words), inputs ({ name, description?, source? }), outputs (the scores or measures it produces: { name, description? }) and thresholds ({ name, value, meaning? }), its owner (a Mynt admin; you by default), its status (draft by default, or active) and when its first validation is due. It starts at version 1. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "risk_area": {
+            "type": "string",
+            "enum": [
+              "financial",
+              "compliance",
+              "third_party",
+              "operations",
+              "business_process",
+              "technology",
+              "regulated_product"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 200
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 4000,
+            "description": "What the model is for"
+          },
+          "method": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 8000,
+            "description": "The formula or approach, in words"
+          },
+          "inputs": {
+            "default": [],
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "source": {
+                  "description": "Where it comes from: a table, a feed, a vendor",
+                  "type": "string",
+                  "maxLength": 2000
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "outputs": {
+            "default": [],
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 2000
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "additionalProperties": false
+            },
+            "description": "The scores or measures it produces"
+          },
+          "thresholds": {
+            "default": [],
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  ],
+                  "description": "The level, a number or words"
+                },
+                "meaning": {
+                  "description": "What happens at or beyond it",
+                  "type": "string",
+                  "maxLength": 2000
+                }
+              },
+              "required": [
+                "name",
+                "value"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "owner_user_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "status": {
+            "default": "draft",
+            "type": "string",
+            "enum": [
+              "draft",
+              "active"
+            ]
+          },
+          "next_validation_due": {
+            "description": "When its validation is due (a future date)",
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          }
+        },
+        "required": [
+          "risk_area",
+          "name",
+          "purpose",
+          "method"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -948,9 +1121,37 @@
       }
     },
     {
+      "name": "admin_list_product_risk_models",
+      "title": "Financial products' own risk models",
+      "description": "Admin: the risk models financial products declare in their own definitions (the product definition's risk_models: each with its _id, model_name, purpose such as pd_scorecard or fraud_score, version and description), across every firm, each with its product (id, name, status) and the firm that owns it (none: one of Mynt's reference products). Products without a definition, or whose definition declares none, aren't listed. Read-only.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "description": "Matches the product's name or id, or the firm's name",
+            "type": "string",
+            "maxLength": 200
+          },
+          "limit": {
+            "default": 200,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "admin_list_risks",
       "title": "Open risks across Mynt",
-      "description": "Admin: the risks not yet closed on every register (apps', products' and the platform's own), or one kind (subject_type): counts by level (critical, high, medium, low), how many are overdue for review, the total, and the highest-scored risks (score, then the earliest review date), each with its subject's name.",
+      "description": "Admin: the risks not yet closed on every register (apps', products' and the platform's own), or one kind (subject_type), or one risk area (risk_area; unassigned: those with none): counts by level (critical, high, medium, low), how many are overdue for review, the total, and the highest-scored risks (score, then the earliest review date), each with its subject's name.",
       "area": "apps",
       "roles": [
         "admin"
@@ -972,6 +1173,19 @@
               "app",
               "product",
               "platform"
+            ]
+          },
+          "risk_area": {
+            "type": "string",
+            "enum": [
+              "financial",
+              "compliance",
+              "third_party",
+              "operations",
+              "business_process",
+              "technology",
+              "regulated_product",
+              "unassigned"
             ]
           }
         },
@@ -11063,9 +11277,51 @@
       }
     },
     {
+      "name": "list_risk_models",
+      "title": "Mynt's risk models",
+      "description": "Admin: Mynt's own risk models, each with its risk area, status (draft, active, retired), current version and definition (name, purpose, method, inputs, outputs, thresholds), owner, and validation (the last one: when, by whom, outcome, notes; the next due date, and whether it's overdue), newest first, with counts by status and how many are overdue. Filter by risk_area or status. With model_id: that model with every version (oldest first) and every validation (newest first).",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "risk_area": {
+            "type": "string",
+            "enum": [
+              "financial",
+              "compliance",
+              "third_party",
+              "operations",
+              "business_process",
+              "technology",
+              "regulated_product"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "active",
+              "retired"
+            ]
+          },
+          "model_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "list_risks",
       "title": "A risk register",
-      "description": "An app's or a financial product's risk register: each risk with its category, likelihood × impact score and level, owner, mitigation, status, review-by date and whether that review is overdue, newest first, with counts by status. Any member of the app's workspace reads an app's; the product's own firm, and the licence providers sponsoring it (read-only), read a product's; Mynt's admins read and keep the platform's (subject_type platform, subject_id mynt). can_manage says whether you may add and review risks. Filter by status, category or overdue_only. With risk_id: that one risk and its history (every change, from the audit trail). For an app, signals lists what Mynt measures around it, each a list or not available with why: fraud, vendors (failing conformance, erroring calls, ended subscriptions or contracts), conduct (open findings from marketing and complaints audits of its agreements) and products (sales paused by a covenant, or drifted).",
+      "description": "An app's or a financial product's risk register: each risk with its category, likelihood × impact score and level, owner, mitigation, status, review-by date and whether that review is overdue, newest first, with counts by status. Any member of the app's workspace reads an app's; the product's own firm, and the licence providers sponsoring it (read-only), read a product's; Mynt's admins read and keep the platform's (subject_type platform, subject_id mynt). can_manage says whether you may add and review risks. Filter by status, category, risk_area (one area, or unassigned: none) or overdue_only. With risk_id: that one risk and its history (every change, from the audit trail). For an app, signals lists what Mynt measures around it, each a list or not available with why: fraud, vendors (failing conformance, erroring calls, ended subscriptions or contracts), conduct (open findings from marketing and complaints audits of its agreements) and products (sales paused by a covenant, or drifted).",
       "area": "apps",
       "roles": [
         "developer",
@@ -11112,6 +11368,19 @@
               "credit",
               "liquidity",
               "other"
+            ]
+          },
+          "risk_area": {
+            "type": "string",
+            "enum": [
+              "financial",
+              "compliance",
+              "third_party",
+              "operations",
+              "business_process",
+              "technology",
+              "regulated_product",
+              "unassigned"
             ]
           },
           "overdue_only": {
@@ -11779,7 +12048,7 @@
     {
       "name": "ops_status",
       "title": "What needs attention",
-      "description": "Admin: failures, stuck runs and this month's spend across builds, the product desk and its algorithm explorations, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying), vendors' services (failed conformance runs, subscriptions whose calls mostly fail), production apps left without a signed program agreement with a product's sponsor, and the server's Supabase backups (last run, off-site copy, last restore test). Read-only.",
+      "description": "Admin: failures, stuck runs and this month's spend across builds, the product desk and its algorithm explorations, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying), vendors' services (failed conformance runs, subscriptions whose calls mostly fail), production apps left without a signed program agreement with a product's sponsor, risk reviews and Mynt's risk-model validations that are overdue, and the server's Supabase backups (last run, off-site copy, last restore test). Read-only.",
       "area": "admin",
       "roles": [
         "admin"
@@ -14133,6 +14402,37 @@
         },
         "required": [
           "id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "retire_risk_model",
+      "title": "Retire a risk model",
+      "description": "Admin: retire one of Mynt's risk models, saying why. It stays listed, with its versions and validations, but can't be changed or validated again, and is never overdue. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "model_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "model_id",
+          "reason"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -17641,7 +17941,7 @@
     {
       "name": "update_risk",
       "title": "Review a risk",
-      "description": "Review a risk on a register you keep (see add_risk): change its status (open, mitigating, accepted, closed), mitigation, likelihood and impact, owner, or the date it's next reviewed by. Accepting or closing a risk needs a note saying why. Only what you pass changes; every change is audited with what it was and what it became, and list_risks with risk_id shows that history.",
+      "description": "Review a risk on a register you keep (see add_risk): change its status (open, mitigating, accepted, closed), risk area, mitigation, likelihood and impact, owner, or the date it's next reviewed by. Accepting or closing a risk needs a note saying why. Only what you pass changes; every change is audited with what it was and what it became, and list_risks with risk_id shows that history.",
       "area": "apps",
       "roles": [
         "developer",
@@ -17665,6 +17965,18 @@
               "mitigating",
               "accepted",
               "closed"
+            ]
+          },
+          "risk_area": {
+            "type": "string",
+            "enum": [
+              "financial",
+              "compliance",
+              "third_party",
+              "operations",
+              "business_process",
+              "technology",
+              "regulated_product"
             ]
           },
           "mitigation": {
@@ -17698,6 +18010,156 @@
         },
         "required": [
           "risk_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "update_risk_model",
+      "title": "Edit a risk model",
+      "description": "Admin: change one of Mynt's risk models (not a retired one). A change to what it is (name, purpose, method, inputs, outputs, thresholds) adds a new version with the rest carried over, and the old version stays as it was (list_risk_models with model_id shows them all); its owner (a Mynt admin), status (draft or active) and next validation date change on the model itself. Only what you pass changes; note says why. Audited, with what changed.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "model_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 200
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 4000,
+            "description": "What the model is for"
+          },
+          "method": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 8000,
+            "description": "The formula or approach, in words"
+          },
+          "inputs": {
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "source": {
+                  "description": "Where it comes from: a table, a feed, a vendor",
+                  "type": "string",
+                  "maxLength": 2000
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "outputs": {
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 2000
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "additionalProperties": false
+            },
+            "description": "The scores or measures it produces"
+          },
+          "thresholds": {
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    }
+                  ],
+                  "description": "The level, a number or words"
+                },
+                "meaning": {
+                  "description": "What happens at or beyond it",
+                  "type": "string",
+                  "maxLength": 2000
+                }
+              },
+              "required": [
+                "name",
+                "value"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "owner_user_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "active"
+            ]
+          },
+          "next_validation_due": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "note": {
+            "description": "Why it changed",
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "model_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -18030,6 +18492,51 @@
         },
         "required": [
           "statement"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "validate_risk_model",
+      "title": "Record a risk model's validation",
+      "description": "Admin: record a validation of one of Mynt's risk models (not a retired one), of its current version: the outcome (passed, passed_with_findings, failed), notes (what was checked and found) and when the next validation is due (a future date). It becomes the model's last validation; every one is kept (list_risk_models with model_id). A failed validation doesn't change the model's status: change it with update_risk_model or retire it. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "model_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "passed_with_findings",
+              "failed"
+            ]
+          },
+          "notes": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 4000
+          },
+          "next_validation_due": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          }
+        },
+        "required": [
+          "model_id",
+          "outcome",
+          "notes",
+          "next_validation_due"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
