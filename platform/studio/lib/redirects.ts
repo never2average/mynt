@@ -1,6 +1,6 @@
 // Redirects and rewrites Next applies before the proxy's sign-in check (next.config.ts).
 // Connect your agent is shown at /connect: the docs' page served there, and /docs/connect sends people to it.
-import { ADMIN_DETAIL_TABS, ADMIN_ID, adminHref, adminTabOf, PLATFORM_BASE } from "./admin";
+import { adminHref, adminIdOk, adminTabOf, PLATFORM_BASE } from "./admin";
 
 export const STUDIO_REDIRECTS = [{ source: "/docs/connect", destination: "/connect", permanent: false }] as const;
 export const STUDIO_REWRITES = [{ source: "/connect", destination: "/docs/connect" }] as const;
@@ -14,7 +14,7 @@ export function legacyRedirect(pathname: string, query: URLSearchParams): string
   if (pathname === "/admin" || pathname === "/admin/") {
     const tab = adminTabOf(query.get("tab"));
     const id = query.get("id");
-    return adminHref(tab, id && ADMIN_DETAIL_TABS.includes(tab) && ADMIN_ID.test(id) ? id : undefined);
+    return adminHref(tab, id && adminIdOk(tab, id) ? id : undefined);
   }
   if (pathname === "/settings" && query.get("tab") === "esign") return `${PLATFORM_BASE}/settings`;
   return null;

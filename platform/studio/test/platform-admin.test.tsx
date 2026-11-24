@@ -105,7 +105,7 @@ describe("the platform admin's own layout", () => {
       </TooltipProvider>,
     )
 
-  it("its sidebar is titled Mynt platform admin and lists the eight sections, each its own address", () => {
+  it("its sidebar is titled Mynt platform admin and lists the nine sections, each its own address", () => {
     const html = platformSidebar("/platform")
     expect(html).toContain(admin.PLATFORM_NAME)
     expect(PLATFORM_SECTIONS.map((s) => s.label)).toEqual(admin.ADMIN_TABS.map((t) => admin.ADMIN_TAB_LABELS[t]))
@@ -113,6 +113,7 @@ describe("the platform admin's own layout", () => {
     expect(Object.fromEntries(hrefs)).toEqual({
       overview: "/platform",
       workspaces: "/platform/workspaces",
+      people: "/platform/people",
       apps: "/platform/apps",
       products: "/platform/products",
       firms: "/platform/firms",
