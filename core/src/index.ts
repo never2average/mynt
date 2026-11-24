@@ -42,6 +42,8 @@ import { Keypair } from "./solana/codec.js";
 import { gateConfigFromEnv, MainnetGateService } from "./solana/mainnet-gate.js";
 import { CLUSTERS, type Cluster } from "./solana/rpc.js";
 import { readFileSync } from "node:fs";
+import { adoptVault, bootVault, ConfidentialReleases, confidentialHostFromEnv, rewrapVault } from "./confidential/index.js";
+import type { Db } from "./db.js";
 import { ROLES, Store, type Role } from "./store.js";
 
 const USAGE = `Usage:
@@ -67,6 +69,11 @@ const USAGE = `Usage:
   mynt solana import-key --cluster mainnet --file <keypair.json>   Seal an existing Solana keypair as that cluster's deploy authority
   mynt product-health publisher --program-id <address>      The devnet publisher key's address (created in the vault if new)
   mynt product-health init --program-id <address> --file <upgrade-authority-keypair.json>   Once, after deploying: name the publisher on chain
+  mynt confidential status             Which confidential host this server uses, what it attests, and whether it holds the vault's keys
+  mynt confidential init               Once, on a new confidential service: makes its root key and prints the wrapped form for its VM
+  mynt confidential adopt              Once, after deploying the confidential service: it adopts MYNT_VAULT_KEY (restart after)
+  mynt confidential rewrap [--apply]   Then: count (or, with --apply, re-seal) every value sealed with MYNT_VAULT_KEY under the
+                                       released data key, after which MYNT_VAULT_KEY can be removed from the server
 
 Environment:
   DATABASE_URL              Postgres connection string, e.g. your Supabase database (required)
@@ -94,6 +101,8 @@ Environment:
   PRODUCT_HEALTH_PROGRAM_ID The deployed product-health program (devnet); unset, the worker doesn't run. PRODUCT_HEALTH_INTERVAL_MINUTES (default 60)
   HOSTING_DO_TOKEN          With HOSTING_GATEWAY_ENDPOINT, HOSTING_GATEWAY_PUBLIC_KEY and PUBLIC_URL: a VM per developer for hosted apps
                             (HOSTING_REGION, HOSTING_SIZE, HOSTING_DO_IMAGE, HOSTING_GATEWAY_IP, HOSTING_APPS_DOMAIN)
+  CONFIDENTIAL_HOST         local (default: in-process, keyed by MYNT_VAULT_KEY) or gcp-confidential-space, with
+                            CONFIDENTIAL_HOST_URL and CONFIDENTIAL_HOST_CLIENT_CERT / CONFIDENTIAL_HOST_CLIENT_KEY (file paths)
   ESIGN_PROVIDER=signwell   Overrides for e-signature, which admins set up in Mynt Studio (Settings → E-signature):
                             SIGNWELL_API_KEY, SIGNWELL_WEBHOOK_ID, ESIGN_TEST_MODE=off. Keys and signed copies are
                             sealed with MYNT_VAULT_KEY`;
@@ -123,10 +132,21 @@ const die = (msg: string): never => {
 
 const openDb = () => connectPostgres(process.env.DATABASE_URL ?? die("DATABASE_URL is required (your Supabase Postgres connection string)"));
 const openStore = () => Store.open(openDb());
+// Commands that open the vault: its keys come from the confidential host once they've moved there.
+const bootConfidential = async (db: Db) => {
+  const releases = await ConfidentialReleases.open(db);
+  const host = confidentialHostFromEnv(process.env, releases);
+  await bootVault(db, host);
+  return host;
+};
 
 const openServices = async () => {
   const db = openDb();
   const store = await Store.open(db);
+  // The confidential host first: once the vault's keys live there, nothing else can open the vault until it releases them.
+  const confidentialReleases = await ConfidentialReleases.open(db);
+  const confidential = confidentialHostFromEnv(process.env, confidentialReleases);
+  await bootVault(db, confidential);
   const sandboxes = sandboxesFromEnv();
   const buildConfig = buildConfigFromEnv();
   const github = GitHubApp.fromEnv();
@@ -173,6 +193,8 @@ const openServices = async () => {
     openWithdrawalRequests: (productId, poolId) => openWithdrawalRequests(store, productId, poolId),
     // Each sponsor's ledger: the sandbox until it passes the partner kit's conformance and switches (partner-kit.ts).
     ledgerFor: partnerLedgerFor(store, { signingKeyOf: (entityId) => productHealth.signingKey(entityId) }),
+    // Partners' sealed statements are opened and computed there, never here.
+    confidential,
   });
   // Pays liquidity pools' withdrawal queues, as far as each pool's latest verified health allows.
   const liquidity = new LiquidityWorker(store, productHealth, liquidityConfigFromEnv(process.env, healthConfig.intervalMs));
@@ -184,7 +206,7 @@ const openServices = async () => {
   // environment's ESIGN_PROVIDER, SIGNWELL_API_KEY, SIGNWELL_WEBHOOK_ID and ESIGN_TEST_MODE as overrides. Off until
   // then, and the manual flow stays.
   const esign = await EsignSettings.open(store);
-  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign };
+  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign, confidential, confidentialReleases };
 };
 
 const parseRoles = (): Role[] => {
@@ -230,13 +252,13 @@ const [command = "serve", sub] = positionals;
 if (values.help) {
   console.log(USAGE);
 } else if (command === "serve") {
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases } = await openServices();
   const token = process.env.FINANCIAL_PRODUCTS_TOKEN;
   const user = token ? ((await store.userByToken(token)) ?? die("FINANCIAL_PRODUCTS_TOKEN is not a valid token")) : null;
-  await createServer(store, user, { clerkAdmin: clerkAdmin(), identity: identity(store), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign }).connect(new StdioServerTransport());
+  await createServer(store, user, { clerkAdmin: clerkAdmin(), identity: identity(store), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases }).connect(new StdioServerTransport());
 } else if (command === "serve-http") {
   const port = Number(values.port);
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign, confidential, confidentialReleases } = await openServices();
   // This process runs deploys, so it alone recovers ones a previous run of it left behind.
   solana.recovery = true;
   builds.startWorker();
@@ -268,7 +290,7 @@ if (values.help) {
         .finally(() => setTimeout(tick, wait));
     setTimeout(tick, 60_000);
   }
-  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), identity: identity(store), workspaceSync, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign }).listen(port, values.host, () =>
+  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), identity: identity(store), workspaceSync, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases }).listen(port, values.host, () =>
     console.error(`mynt MCP listening on http://${values.host}:${port}/mcp${clerk ? " (Clerk whitelist auth)" : ""}`),
   );
   // Workspace offboardings with a step still to do (a provider was down), and Mynt invites made by workspace invites
@@ -362,6 +384,7 @@ if (values.help) {
   // Read by the gateway on the platform host to keep WireGuard, its egress proxy and the edge in step.
   const db = openDb();
   const store = await Store.open(db);
+  await bootConfidential(db);
   const hosting = await HostingService.open(db, null, hostingConfigFromEnv());
   if (sub === "wg-peers") console.log(await hosting.wireguardPeers());
   else if (sub === "routes")
@@ -379,6 +402,7 @@ if (values.help) {
   if (!(CLUSTERS as readonly string[]).includes(cluster ?? "") || !values.file) die("Usage: mynt solana import-key --cluster <devnet|mainnet> --file <keypair.json>");
   const db = openDb();
   const store = await Store.open(db);
+  await bootConfidential(db);
   const solana = await SolanaService.open(db, store);
   const address = await solana.importAuthority(cluster, readFileSync(values.file!, "utf8")).catch((e) => die((e as Error).message));
   console.log(`Sealed the ${cluster} deploy authority ${address} in the vault`);
@@ -388,6 +412,7 @@ if (values.help) {
   if (sub === "init" && !values.file) die("Usage: mynt product-health init --program-id <address> --file <upgrade-authority-keypair.json>");
   const db = openDb();
   const store = await Store.open(db);
+  await bootConfidential(db);
   const solana = await SolanaService.open(db, store);
   if (sub === "publisher") {
     // Only the address, ever: the key stays sealed.
@@ -403,6 +428,30 @@ if (values.help) {
     })();
     const signature = await initializeHealthProgram(solana, programId, Keypair.fromSecret(secret)).catch((e) => die((e as Error).message));
     console.log(`Initialised the product-health program ${programId} (transaction ${signature})`);
+  }
+  await store.close();
+} else if (command === "confidential" && ["status", "init", "adopt", "rewrap"].includes(sub ?? "")) {
+  // Counts, digests and host names only: never a key, a sealed value or what it opens to.
+  const db = openDb();
+  const store = await Store.open(db);
+  const host = await bootConfidential(db).catch((e) => die((e as Error).message));
+  if (sub === "init") {
+    // The wrapped root is ciphertext that only the attested image can unwrap: safe to print, and the operator needs it.
+    if (!host.initialise) die("This confidential host has no root to initialise");
+    const { wrapped_root } = await host.initialise!().catch((e) => die((e as Error).message));
+    console.log(`Set this as the confidential VM's KEYHOUSE_WRAPPED_ROOT metadata value, then restart the VM:\n${wrapped_root}`);
+  } else if (sub === "status") {
+    const { rows } = await db.query("SELECT host, created_at FROM financial_products.confidential_keys WHERE name = 'vault-keys'");
+    const measurements = await host.measurements().catch((e) => ({ error: (e as Error).message }));
+    console.log(JSON.stringify({ host: host.kind, measurements, vault_keys_adopted: rows[0] ?? null, legacy_vault_key_set: Boolean(process.env.MYNT_VAULT_KEY) }, null, 2));
+  } else if (sub === "adopt") {
+    if (host.kind === "local") die("Set CONFIDENTIAL_HOST to the deployed confidential service first: adopting into the local host would protect nothing");
+    const r = await adoptVault(db, host).catch((e) => die((e as Error).message));
+    console.log(r.adopted ? `The ${r.host} confidential host adopted the vault's key. Restart Mynt, then run \`mynt confidential rewrap\`.` : `Already adopted by the ${r.host} confidential host.`);
+  } else {
+    const r = await rewrapVault(db, { apply: Boolean(values.apply) }).catch((e) => die((e as Error).message));
+    console.log(JSON.stringify(r, null, 2));
+    if (r.dry_run) console.error("Dry run: nothing changed. Run again with --apply.");
   }
   await store.close();
 } else if (command === "clerk" && sub === "first-party") {

@@ -1,0 +1,17 @@
+{
+  "name": "mynt-keyhouse",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mynt's confidential service: runs as an attested confidential-VM workload, keeps Mynt's root keys and computes product health from partners' sealed statements",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "sync-shared": "node scripts/sync-shared.mjs"
+  },
+  "dependencies": {}
+}

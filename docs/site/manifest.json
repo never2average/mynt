@@ -111,6 +111,7 @@
             { "file": "docs/reference.md", "heading": "Licence providers: sponsoring builders' products", "title": "Licence providers", "skip": ["A sponsored US product, end to end"] },
             { "file": "docs/reference.md", "heading": "Approved money rails", "title": "Money rails" },
             { "file": "docs/reference.md", "heading": "Partner kit: connecting a licence provider's ledger", "title": "Partner kit" },
+            { "file": "docs/reference.md", "heading": "Confidential computing" },
             { "file": "docs/reference.md", "heading": "Covenants: a licence provider's rules on a product it sponsors", "title": "Covenants" }
           ]
         },
