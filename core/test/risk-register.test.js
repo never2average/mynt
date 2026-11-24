@@ -230,3 +230,71 @@ test("conduct: open findings from marketing and complaints oversight audits unde
   assert.deepEqual(rows, [["complaints", "Slow responses", "medium"], ["marketing", "Rate shown without APR", "high"]], "only open marketing and complaints findings");
   assert.equal(signals.conduct.rows[0].since, "2026-11-01T00:00:00.000Z");
 });
+
+async function adminClient(store, name) {
+  const { user } = await store.createUser(name, ["admin"]);
+  const fresh = await store.getUser(user.id);
+  const [c, s] = InMemoryTransport.createLinkedPair();
+  await createServer(store, fresh).connect(s);
+  const client = new Client({ name: "risk-register-admin", version: "0" });
+  await client.connect(c);
+  return {
+    user: fresh,
+    call: async (n, a = {}) => {
+      const res = await client.callTool({ name: n, arguments: a });
+      let data;
+      try {
+        data = JSON.parse(res.content[0].text);
+      } catch {
+        data = { error: res.content[0].text };
+      }
+      return { isError: res.isError ?? false, data };
+    },
+  };
+}
+
+test("the platform's own register: Mynt admins keep and read it, nobody else sees it; admin_list_risks reads every register's open risks", async () => {
+  const w = await setup();
+  const admin = await adminClient(w.store, "Ada");
+  const platform = { subject_type: "platform", subject_id: "mynt", title: "Single admin can approve recoveries", category: "security", likelihood: 3, impact: 5, review_by: "2020-01-01" };
+  const added = ok(await admin.call("add_risk", platform));
+  assert.deepEqual(added.subject, { type: "platform", id: "mynt", name: "Mynt platform" });
+  assert.equal(added.risk.level, "critical");
+  refused(await admin.call("add_risk", { ...platform, subject_id: "other" }), /No risk register 'other'/);
+  refused(await admin.call("add_risk", { ...platform, owner_user_id: w.dev.user.id }), /owner must be a Mynt admin/);
+  ok(await admin.call("update_risk", { risk_id: added.risk.id, status: "mitigating", mitigation: "Second admin" }));
+  const list = ok(await admin.call("list_risks", { subject_type: "platform", subject_id: "mynt" }));
+  assert.equal(list.can_manage, true);
+  assert.equal(list.risks.length, 1);
+  assert.equal(list.signals, undefined);
+
+  // Anyone else: as if it doesn't exist, and no admin_list_risks.
+  for (const who of [w.dev, w.bea, w.lp]) {
+    refused(await who.call("list_risks", { subject_type: "platform", subject_id: "mynt" }), /No risk register 'mynt'/);
+    assert.ok(!(await who.tools()).includes("admin_list_risks"));
+  }
+  refused(await w.dev.call("update_risk", { risk_id: added.risk.id, status: "open" }), /No risk/);
+
+  // An app's and a product's risks too; a closed one is left out.
+  ok(await w.dev.call("add_risk", { subject_type: "app", subject_id: w.app.id, title: "Card fraud", category: "fraud", likelihood: 2, impact: 2 }));
+  const p = ok(await w.bea.call("add_risk", { subject_type: "product", subject_id: w.productId, title: "Rate risk", category: "credit", likelihood: 3, impact: 3 }));
+  ok(await w.bea.call("update_risk", { risk_id: p.risk.id, status: "closed", note: "Hedged" }));
+  ok(await w.bea.call("add_risk", { subject_type: "product", subject_id: w.productId, title: "Liquidity squeeze", category: "liquidity", likelihood: 4, impact: 3 }));
+  const all = ok(await admin.call("admin_list_risks", {}));
+  assert.deepEqual(all.counts, { critical: 1, high: 1, medium: 0, low: 1 });
+  assert.equal(all.total, 3);
+  assert.equal(all.overdue, 1);
+  assert.deepEqual(all.risks.map((r) => [r.subject_type, r.score]), [["platform", 15], ["product", 12], ["app", 4]]);
+  assert.equal(all.risks[0].subject_name, "Mynt platform");
+  assert.equal(all.risks[2].subject_name, "Pay app");
+  assert.equal(typeof all.risks[1].subject_name, "string");
+  assert.equal(all.risks[1].firm_id, w.bea.user.entity_id, "a product's risk says its firm");
+  assert.equal(all.risks[2].workspace_id, w.workspace, "an app's risk says its workspace");
+  const apps = ok(await admin.call("admin_list_risks", { subject_type: "app", limit: 1 }));
+  assert.equal(apps.total, 1);
+  assert.equal(apps.risks.length, 1);
+
+  // The platform's overdue review is in ops_status with the others.
+  const ops = await opsStatus(w.store.db);
+  assert.equal(ops.risks.overdue_reviews, 1);
+});

@@ -68,7 +68,7 @@ import { developerReadiness, emitProductEvent, ensureRelease, registerRuntimeInn
 // SDKs and experiences (developer build layer)
 import { experienceStructure, registerBuildTools } from "./build.js";
 import { registerJourneyTools } from "./journeys-tools.js";
-import { createdWorkspaces, memberApp, personalWorkspace, registerInvitationTools, registerWorkspaceTools, retryOffboards, workspaceRole, type OffboardServices } from "./workspaces.js";
+import { createdWorkspaces, memberApp, personalWorkspace, registerInvitationTools, registerWorkspaceAdminTools, registerWorkspaceTools, retryOffboards, workspaceRole, type OffboardServices } from "./workspaces.js";
 import { registerWorkspaceComplianceTools } from "./workspace-compliance.js";
 import { registerWorkspacePnlTools } from "./workspace-pnl.js";
 import { registerLinkedAccountsTools } from "./linked-accounts.js";
@@ -216,7 +216,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   // Oversight audits a licence provider runs on an app under a program agreement with its firm (agreement-audits.ts).
   if (user && (has("developer") || has("license_provider"))) registerAgreementAuditTools(server, store, user, { app: has("developer"), counterparty: has("license_provider") });
   // A risk register for apps and financial products: kept by the app's workspace or the product's firm, read by its sponsors (risk-register.ts).
-  if (user && (has("developer") || has("license_provider"))) registerRiskRegisterTools(server, store, user, { builder: has("developer"), sponsor: has("license_provider") });
+  // Mynt admins keep the platform's own register and read every register's open risks (admin_list_risks).
+  if (user && (has("developer") || has("license_provider") || has("admin"))) registerRiskRegisterTools(server, store, user, { builder: has("developer"), sponsor: has("license_provider"), admin: has("admin") });
   if (ctx.covenants && user && has("license_provider")) registerCovenantTools(server, store, user, ctx.covenants);
   if (has("developer") && ctx.builds) registerCodingAgentTools(server, store, user!, ctx.builds, ctx.identity ?? null);
   // Starting points for common finance apps, for start_build's kind (app-kinds.ts).
@@ -233,6 +234,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (has("admin")) {
     registerAdminTools(server, store, user!, ctx);
     registerPromotionAdminTools(server, store, user!);
+    // Any workspace's members, by its owners' rules and through its organization (workspaces.ts membershipOps).
+    registerWorkspaceAdminTools(server, store, user!, { clerk: ctx.clerkAdmin ?? null, offboarding: offboardingServices(ctx) });
     server.registerTool(
       "retry_offboard",
       {

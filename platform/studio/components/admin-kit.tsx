@@ -66,6 +66,7 @@ export function AdminList({
   searchLabel,
   facets,
   onClearFilters,
+  dates,
   onExport,
   exportDisabled,
   cta,
@@ -82,6 +83,7 @@ export function AdminList({
   searchLabel: string
   facets?: Facet[]
   onClearFilters?: () => void
+  dates?: React.ReactNode // a date range filter (components/filter-controls.tsx DateRangeFilter), beside Filters
   onExport: () => void
   exportDisabled?: boolean
   cta?: React.ReactNode
@@ -100,6 +102,7 @@ export function AdminList({
           <Input value={search} onChange={(e) => onSearch(e.target.value)} placeholder={searchLabel} aria-label={searchLabel} className="pl-8" />
         </div>
         {facets && facets.length > 0 && <FiltersPopover facets={facets} onClear={() => onClearFilters?.()} />}
+        {dates}
         <Button variant="outline" disabled title={IMPORT_NOTE} aria-description={IMPORT_NOTE} data-import>
           <Upload />
           Import

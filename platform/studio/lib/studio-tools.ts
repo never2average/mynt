@@ -512,13 +512,15 @@ export const ADMIN_TOOLS = {
   register_esign_webhook: z.object({}).strict(),
   remove_esign_api_key: z.object({ confirm: z.literal(true) }).strict(),
   set_esign_test_mode: z.object({ test_mode: z.boolean() }).strict(),
-  // Workspaces, apps and financial products across Mynt (core/src/platform-admin.ts), and removing a test app.
+  // Workspaces and financial products across Mynt (core/src/platform-admin.ts): a workspace's page, and a firm's Products tab.
   list_all_workspaces: z.object({ query, status: z.enum(["active", "archived", "frozen"]).optional(), ...page }).strict(),
   admin_get_workspace: z.object({ workspace_id: uuid }).strict(),
-  list_all_apps: z.object({ query, workspace_id: uuid.optional(), stage: z.enum(["idea", "staging", "production"]).optional(), ...page }).strict(),
-  admin_get_app: z.object({ app_id: uuid }).strict(),
-  remove_app: z.object({ app_id: uuid, confirm: z.boolean(), reason: z.string().trim().max(500).optional() }).strict(),
   list_all_products: z.object({ query, status: z.enum(["draft", "published", "unpublished"]).optional(), include_archived: z.boolean().optional(), ...page }).strict(),
+  // A workspace's Members tab: the same rules (and identity-provider organization) as its owners' own tools.
+  admin_invite_workspace_member: z.object({ workspace_id: uuid, email, role: z.enum(["owner", "admin", "member"]) }).strict(),
+  admin_change_workspace_member_role: z.object({ workspace_id: uuid, user_id: uuid, role: z.enum(["owner", "admin", "member"]) }).strict(),
+  admin_remove_workspace_member: z.object({ workspace_id: uuid, user_id: uuid }).strict(),
+  admin_revoke_workspace_invite: z.object({ invite_id: uuid }).strict(),
   // Firms: registered by hand, their members (an email allowed to sign in with roles, then added to the firm) and status.
   list_entities: z.object({}).strict(),
   register_firm: z
@@ -537,9 +539,28 @@ export const ADMIN_TOOLS = {
   list_whitelist: z.object({}).strict(),
   invite_user: z.object({ email, roles: z.array(z.enum(MYNT_ROLES)).min(1).max(MYNT_ROLES.length) }).strict(),
   add_entity_member: z.object({ email, entity_id: uuid }).strict(),
-  // People: stop an email from using Mynt (what they created stays), and the audit log their Activity tab reads.
-  revoke_user: z.object({ email }).strict(),
+  remove_entity_member: z.object({ email, entity_id: uuid }).strict(),
+  // Audit trails, and Security & risk's security events: Mynt's audit log, newest first, each entry with its class.
   audit_log: z.object({ limit: z.number().int().min(1).max(500).optional() }).strict(),
+  // Security & risk: Mynt's own risk register (the platform subject, Mynt admins only), and the open risks across
+  // every app and product.
+  list_risks: z.object({ subject_type: z.literal("platform"), subject_id: z.literal("mynt"), risk_id: uuid.optional() }).strict(),
+  add_risk: z
+    .object({
+      subject_type: z.literal("platform"),
+      subject_id: z.literal("mynt"),
+      title: z.string().trim().min(3).max(200),
+      category: STUDIO_TOOLS.add_risk.shape.category,
+      likelihood: STUDIO_TOOLS.add_risk.shape.likelihood,
+      impact: STUDIO_TOOLS.add_risk.shape.impact,
+      description: z.string().trim().max(4000).optional(),
+      mitigation: z.string().trim().max(4000).optional(),
+      owner_user_id: uuid.optional(),
+      review_by: STUDIO_TOOLS.add_risk.shape.review_by,
+    })
+    .strict(),
+  update_risk: STUDIO_TOOLS.update_risk,
+  admin_list_risks: z.object({ limit: z.number().int().min(1).max(100).optional(), subject_type: z.enum(["app", "product", "platform"]).optional() }).strict(),
   set_entity_status: z.object({ entity_id: uuid, status: z.enum(ENTITY_STATUSES), note: z.string().trim().max(2000).optional() }).strict(),
   // Licences: firms' registered licences by review status, and the decision on one.
   list_license_reviews: z.object({ status: z.enum(["pending", "verified", "rejected", "suspended"]).optional() }).strict(),

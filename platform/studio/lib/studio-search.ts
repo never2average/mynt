@@ -102,13 +102,12 @@ export type SearchSources = {
 // The platform admin's sections, as search lists them for Mynt admins (lib/admin.ts has their addresses).
 export const PLATFORM_SEARCH_PAGES: readonly StudioPage[] = [
   { href: "/platform", label: "Platform admin: Overview", keywords: "mynt platform admin attention operations status" },
-  { href: "/platform/workspaces", label: "Platform admin: Workspaces", keywords: "all workspaces teams" },
-  { href: "/platform/people", label: "Platform admin: People", keywords: "people users invite person roles access revoke sign in whitelist admins" },
-  { href: "/platform/apps", label: "Platform admin: Apps", keywords: "all apps builds hosting remove" },
-  { href: "/platform/products", label: "Platform admin: Products", keywords: "all financial products" },
-  { href: "/platform/firms", label: "Platform admin: Firms", keywords: "firms licence providers vendors liquidity providers register members" },
+  { href: "/platform/workspaces", label: "Platform admin: Workspaces", keywords: "all workspaces teams members people invite roles" },
+  { href: "/platform/firms", label: "Platform admin: Firms", keywords: "firms licence providers vendors liquidity providers register members people invite roles products" },
   { href: "/platform/licences", label: "Platform admin: Licences", keywords: "licences licenses review verify approve reject" },
   { href: "/platform/vendors", label: "Platform admin: Vendors", keywords: "vendors service types offerings suspend" },
+  { href: "/platform/audit", label: "Platform admin: Audit trails", keywords: "audit log trail history who changed what actions security financial obligations" },
+  { href: "/platform/risks", label: "Platform admin: Security & risk", keywords: "security risk register platform risks signals attention backups conformance" },
   { href: "/platform/settings", label: "Platform admin: Platform settings", keywords: "platform settings esign e-signature pricing budget audit" },
 ];
 

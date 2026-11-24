@@ -12,7 +12,8 @@ const ADMIN_TOOLS = [
   "define_judgment", "define_legal_instrument", "define_legislation", "define_regulated_product_type", "define_regulator", "invite_user", "list_all_campaigns",
   "list_whitelist", "remove_judgment", "remove_legal_instrument", "remove_legislation",
   "remove_regulated_product_type", "remove_regulator", "revoke_user", "define_take_rate", "list_take_rates", "recompute_product_derived",
-  "decide_promotion_signoff", "list_promotion_signoffs",
+  "decide_promotion_signoff", "list_promotion_signoffs", "remove_entity_member", "admin_list_risks",
+  "admin_invite_workspace_member", "admin_change_workspace_member_role", "admin_remove_workspace_member", "admin_revoke_workspace_invite",
 ];
 
 async function setup() {
@@ -119,6 +120,38 @@ test("admins manage the whitelist in Mynt, synced to Clerk, and can't remove the
   const log = (await call(admin, "audit_log")).data;
   assert.equal(log[0].action, "revoke_user");
   assert.equal(log[0].actor_id, adminUser.id);
+  assert.equal(log[0].class, "security"); // each entry's class, from src/audit-classes.ts
+});
+
+test("remove_entity_member takes someone out of a firm, tells the firm, keeps their roles; never someone who isn't in it", async () => {
+  const { store, as, connect, call } = await setup();
+  const admin = await connect(await as("Ada", ["admin"]));
+  const firm = await store.createEntity(null, { name: "Ledger Co", registration_numbers: {}, regions: ["US"] });
+  const other = await store.createEntity(null, { name: "Other Co", registration_numbers: {}, regions: ["US"] });
+  const vic = await as("Vic", ["vendor"]);
+  const stays = await as("Sam", ["vendor"]);
+  await store.setUserEntity(vic.id, firm.id);
+  await store.setUserEntity(stays.id, firm.id);
+  const vicEmail = "vic@ledger.example.com";
+  await store.db.query("UPDATE financial_products.users SET email = $2 WHERE id = $1", [vic.id, vicEmail]);
+
+  const refused = await call(admin, "remove_entity_member", { entity_id: other.id, email: vicEmail });
+  assert.equal(refused.isError, true);
+  assert.match(refused.data.error, /isn't a member of Other Co/);
+  assert.equal((await call(admin, "remove_entity_member", { entity_id: firm.id, email: "nobody@example.com" })).isError, true);
+
+  const out = await call(admin, "remove_entity_member", { entity_id: firm.id, email: vicEmail });
+  assert.equal(out.isError, false, JSON.stringify(out.data));
+  assert.equal(out.data.removed, vicEmail);
+  const after = await store.getUser(vic.id);
+  assert.equal(after.entity_id ?? null, null);
+  assert.deepEqual(after.roles, (await store.getUser(vic.id)).roles);
+  assert.ok(after.roles.includes("vendor"), "their roles are untouched");
+  const told = (await store.db.query("SELECT user_id::text AS u FROM financial_products.firm_notices WHERE entity_id = $1 AND type = 'firm.member_removed'", [firm.id])).rows.map((r) => r.u);
+  assert.deepEqual(told, [stays.id], "the firm's remaining members are told");
+  const log = (await call(admin, "audit_log")).data;
+  assert.deepEqual([log[0].action, log[0].target, log[0].details.email], ["remove_entity_member", firm.id, vicEmail]);
+  assert.equal(log[0].class, "workspace");
 });
 
 test("admins oversee campaigns and products", async () => {

@@ -41,10 +41,7 @@ const overview = await import("@/app/api/admin/overview/route");
 const settings = await import("@/app/api/admin/settings/route");
 const workspaces = await import("@/app/api/admin/workspaces/route");
 const workspace = await import("@/app/api/admin/workspaces/[workspaceId]/route");
-const apps = await import("@/app/api/admin/apps/route");
-const app = await import("@/app/api/admin/apps/[appId]/route");
-const remove = await import("@/app/api/admin/apps/[appId]/remove/route");
-const products = await import("@/app/api/admin/products/route");
+const wsMembers = await import("@/app/api/admin/workspaces/[workspaceId]/members/route");
 const firms = await import("@/app/api/admin/firms/route");
 const firm = await import("@/app/api/admin/firms/[firmId]/route");
 const members = await import("@/app/api/admin/firms/[firmId]/members/route");
@@ -61,7 +58,8 @@ const platformLayout = await import("@/app/(platform)/layout");
 const settingsPage = await import("@/app/(studio)/settings/page");
 
 const WS = "11111111-1111-4111-8111-111111111111";
-const APP = "22222222-2222-4222-8222-222222222222";
+const USER = "22222222-2222-4222-8222-222222222222";
+const INV = "66666666-6666-4666-8666-666666666666";
 const FIRM = "33333333-3333-4333-8333-333333333333";
 const LIC = "44444444-4444-4444-8444-444444444444";
 const OFF = "55555555-5555-4555-8555-555555555555";
@@ -94,33 +92,33 @@ beforeEach(() => {
     ops_status: { attention: ["builds: 1 failed in the last 24h"], window_hours: 24, agents: { builds: { failures: [{}], stuck: [], spend_this_month_usd: 6.75 } }, hosting: {}, backups: { status: "no status file" } },
     get_platform_settings: { settings: [{ key: "BUILD_CAP_USD", value: "10", default: "10", source: "default", description: "Spend cap" }] },
     list_all_workspaces: { workspaces: [{ id: WS, name: "Team", status: "frozen", members: 2, apps: 1, owner: { id: "u", email: "ana@example.com" } }], total: 1 },
-    admin_get_workspace: { workspace: { id: WS, name: "Team", status: "active" }, members: [], apps: [], invitations: [], activity: [] },
-    list_all_apps: { apps: [{ id: APP, name: "Saver", status: "draft", stage: "idea", product_ids: ["p1"], workspace: { id: WS, name: "Team" } }], total: 1 },
-    admin_get_app: { app: { id: APP, name: "Saver", status: "draft", stage: "idea", products: [{ id: "p1", name: "Fixed deposit" }] }, builds: [], hosting: null },
+    admin_get_workspace: { workspace: { id: WS, name: "Team", status: "active" }, members: [{ user_id: USER, name: "Ana", email: "ana@example.com", role: "owner" }], apps: [], invitations: [{ id: INV, email: "new@example.com", role: "member", status: "open" }], activity: [] },
+    admin_invite_workspace_member: { id: INV, workspace_id: WS, email: "new@example.com", role: "member", mynt_role: "developer", note: "new@example.com can now sign in to Mynt as a user and accept the invite" },
     list_all_products: { products: [{ id: "p1", name: "Fixed deposit", status: "published", stage: "production", firm: { id: FIRM, name: "Acme Trust" }, sponsors: [] }], total: 1 },
     list_entities: [ENTITY],
-    list_whitelist: { whitelist: [{ email: "boss@example.com", roles: ["admin"] }], users: [] },
+    list_whitelist: { whitelist: [{ email: "boss@example.com", roles: ["admin"] }, { email: "lee@example.com", roles: ["license_provider", "consumer"] }], users: [] },
     register_firm: { id: FIRM, name: "Acme Trust" },
     list_license_reviews: [],
     list_service_types: [{ region: "US", key: "kyc_basic", name: "KYC", category: "kyc", consent_purpose: "kyc", moves_money: false }],
     list_vendor_offerings: [{ offering_id: OFF, name: "Fast KYC", vendor: "Acme Trust", vendor_entity_id: FIRM, region: "US", service_type: { key: "kyc_basic", name: "KYC", category: "kyc" }, status: "listed", conformance: { passed: true, at: "2026-11-01T00:00:00.000Z" } }],
     get_vendor_onboarding: { firms: [{ entity_id: FIRM, name: "Acme Trust", status: "active", vendor_members: 1, services: 1, listed: 1, progress: { done: 5, total: 6, next: { key: "terms", title: "Set your standard terms", status: "next" }, complete: false } }] },
-    remove_app: { removed: false, dry_run: true, would_remove: { app: { id: APP }, rows: { api_keys: 2 }, builds: [{ id: "b" }], programs: [] } },
   };
 });
 
 describe("who gets in", () => {
   it("a non-admin gets 404 from every route and the page, and nothing reaches Mynt's admin tools", async () => {
     fake.session = session(["developer", "license_provider", "vendor"]);
-    const gets = [overview.GET(req("/api/admin/overview")), settings.GET(), workspaces.GET(), workspace.GET(req("/x"), p({ workspaceId: WS })), apps.GET(), app.GET(req("/x"), p({ appId: APP })), products.GET(), firms.GET(), firm.GET(req("/x"), p({ firmId: FIRM })), licences.GET(), vendors.GET()];
+    const gets = [overview.GET(req("/api/admin/overview")), settings.GET(), workspaces.GET(), workspace.GET(req("/x"), p({ workspaceId: WS })), firms.GET(), firm.GET(req("/x"), p({ firmId: FIRM })), licences.GET(), vendors.GET()];
     for (const res of await Promise.all(gets)) expect(res.status).toBe(404);
     const posts = [
       firms.POST(req("/api/admin/firms", { name: "X" })),
-      members.POST(req("/x", { email: "a@example.com", roles: ["vendor"] }), p({ firmId: FIRM })),
+      members.POST(req("/x", { action: "invite", email: "a@example.com", roles: ["vendor"] }), p({ firmId: FIRM })),
+      members.POST(req("/x", { action: "remove", email: "lee@example.com", confirm_email: "lee@example.com" }), p({ firmId: FIRM })),
+      wsMembers.POST(req("/x", { action: "invite", email: "a@example.com", role: "member" }), p({ workspaceId: WS })),
+      wsMembers.POST(req("/x", { action: "remove", user_id: USER, confirm: true }), p({ workspaceId: WS })),
       firmStatus.POST(req("/x", { status: "suspended", note: "registry says so" }), p({ firmId: FIRM })),
       licence.POST(req("/x", { decision: "verified" }), p({ licenceId: LIC })),
       offering.POST(req("/x", { suspended: true, note: "broken" }), p({ offeringId: OFF })),
-      remove.POST(req("/x", { confirm: false }), p({ appId: APP })),
     ];
     for (const res of await Promise.all(posts)) expect(res.status).toBe(404);
     expect(fake.calls).toEqual([]);
@@ -139,11 +137,11 @@ describe("who gets in", () => {
   it("an admin gets each section at its own address, and each detail at /platform/<section>/<id>", async () => {
     type El = { props: { tab: string; id: string | null } };
     expect(((await overviewPage.default()) as El).props).toMatchObject({ tab: "overview", id: null });
-    for (const section of ["workspaces", "apps", "products", "firms", "licences", "vendors", "settings"]) {
+    for (const section of ["workspaces", "firms", "licences", "vendors", "audit", "risks", "settings"]) {
       const el = (await sectionPage.default({ params: Promise.resolve({ section }) })) as El;
       expect(el.props).toMatchObject({ tab: section, id: null });
     }
-    for (const section of ["workspaces", "apps", "firms"]) {
+    for (const section of ["workspaces", "firms", "audit"]) {
       const el = (await detailPage.default({ params: Promise.resolve({ section, id: FIRM }) })) as El;
       expect(el.props).toMatchObject({ tab: section, id: FIRM });
     }
@@ -152,8 +150,11 @@ describe("who gets in", () => {
     expect(await detailPage.generateMetadata({ params: Promise.resolve({ section: "firms", id: FIRM }) })).toEqual({ title: "Firms" });
     expect(platformLayout.metadata.title).toEqual({ default: "Mynt platform admin", template: "%s · Mynt platform admin" });
     // Anything else is a 404: an unknown section, Overview by name, an id where a section has no details, an id that isn't one.
-    for (const section of ["nope", "overview", "admin"]) await expect(sectionPage.default({ params: Promise.resolve({ section }) })).rejects.toThrow("NEXT_NOT_FOUND");
-    const bad: [string, string][] = [["products", FIRM], ["licences", LIC], ["vendors", OFF], ["settings", "x"], ["overview", FIRM], ["firms", "../x"], ["apps", "a b"], ["firms", "x".repeat(101)]];
+    expect(await sectionPage.generateMetadata({ params: Promise.resolve({ section: "audit" }) })).toEqual({ title: "Audit trails" });
+    expect(await sectionPage.generateMetadata({ params: Promise.resolve({ section: "risks" }) })).toEqual({ title: "Security & risk" });
+    // Apps, People and Products are no longer sections: their pages and details are 404s.
+    for (const section of ["nope", "overview", "admin", "apps", "people", "products"]) await expect(sectionPage.default({ params: Promise.resolve({ section }) })).rejects.toThrow("NEXT_NOT_FOUND");
+    const bad: [string, string][] = [["products", FIRM], ["licences", LIC], ["vendors", OFF], ["settings", "x"], ["overview", FIRM], ["firms", "../x"], ["apps", FIRM], ["people", FIRM], ["products", FIRM], ["risks", FIRM], ["firms", "x".repeat(101)]];
     for (const [section, id] of bad) await expect(detailPage.default({ params: Promise.resolve({ section, id }) })).rejects.toThrow("NEXT_NOT_FOUND");
     // The layout is the platform admin's own, not the studio's shell.
     const layout = (await platformLayout.default({ children: "page" })) as { type: { name: string }; props: { children: unknown } };
@@ -170,19 +171,30 @@ describe("who gets in", () => {
     expect((await firms.POST(req("/api/admin/firms", { name: "X" }))).status).toBe(403);
     fake.sameOrigin = true;
     expect((await firms.POST(req("/api/admin/firms", { name: "X", owner: "me" }))).status).toBe(400);
-    expect((await members.POST(req("/x", { email: "a@example.com", roles: ["root"] }), p({ firmId: FIRM }))).status).toBe(400);
-    expect((await members.POST(req("/x", { email: "a@example.com", roles: ["admin"] }), p({ firmId: FIRM }))).status).toBe(400); // never Mynt's admin role from a firm
-    expect((await members.POST(req("/x", { email: "a@example.com", roles: ["vendor"] }), p({ firmId: "../x" }))).status).toBe(400);
+    expect((await members.POST(req("/x", { action: "invite", email: "a@example.com", roles: ["root"] }), p({ firmId: FIRM }))).status).toBe(400);
+    expect((await members.POST(req("/x", { action: "invite", email: "a@example.com", roles: ["admin"] }), p({ firmId: FIRM }))).status).toBe(400); // never Mynt's admin role from a firm
+    expect((await members.POST(req("/x", { action: "change_role", email: "a@example.com", roles: ["admin"] }), p({ firmId: FIRM }))).status).toBe(400);
+    expect((await members.POST(req("/x", { email: "a@example.com", roles: ["vendor"] }), p({ firmId: FIRM }))).status).toBe(400); // an action is named
+    expect((await members.POST(req("/x", { action: "invite", email: "a@example.com", roles: ["vendor"] }), p({ firmId: "../x" }))).status).toBe(400);
+    expect((await members.POST(req("/x", { action: "remove", email: "lee@example.com", confirm_email: "someone@example.com" }), p({ firmId: FIRM }))).status).toBe(400);
+    expect((await wsMembers.POST(req("/x", { action: "remove", user_id: USER }), p({ workspaceId: WS }))).status).toBe(400); // confirmed
+    expect((await wsMembers.POST(req("/x", { action: "change_role", user_id: USER, role: "root" }), p({ workspaceId: WS }))).status).toBe(400);
+    expect((await wsMembers.POST(req("/x", { action: "invite", email: "a@example.com", role: "member", mynt_role: "admin" }), p({ workspaceId: WS }))).status).toBe(400);
+    expect((await wsMembers.POST(req("/x", { action: "invite", email: "a@example.com", role: "member" }), p({ workspaceId: "x" }))).status).toBe(400);
     expect((await licence.POST(req("/x", { decision: "rejected" }), p({ licenceId: LIC }))).status).toBe(400); // a rejection says why
-    expect((await remove.POST(req("/x", { confirm: true }), p({ appId: APP }))).status).toBe(400); // a removal says why
-    expect((await remove.POST(req("/x", { confirm: false, proceed_without_closing: true }), p({ appId: APP }))).status).toBe(400);
     expect(fake.calls).toEqual([]);
   });
 });
 
 describe("the allow-list", () => {
   it("admin tools are their own list: never callable through the studio's, and strict", () => {
-    for (const t of Object.keys(ADMIN_TOOLS)) if (!["list_vendor_offerings", "list_service_types", "get_vendor_onboarding"].includes(t)) expect(Object.keys(STUDIO_TOOLS)).not.toContain(t);
+    for (const t of Object.keys(ADMIN_TOOLS)) if (!["list_vendor_offerings", "list_service_types", "get_vendor_onboarding", "list_risks", "add_risk", "update_risk"].includes(t)) expect(Object.keys(STUDIO_TOOLS)).not.toContain(t);
+    // The risk tools are on both lists: the studio's take an app's or a product's register, the admin area's only Mynt's own.
+    expect(parseStudioCall("list_risks", { subject_type: "platform", subject_id: "mynt" })).toHaveProperty("error");
+    expect(parseAdminCall("list_risks", { subject_type: "platform", subject_id: "mynt" })).toHaveProperty("tool");
+    expect(parseAdminCall("list_risks", { subject_type: "app", subject_id: FIRM })).toHaveProperty("error");
+    // The apps' tools and People's revoke_user are no longer the Studio's (they stay Mynt's MCP admin tools).
+    for (const t of ["list_all_apps", "admin_get_app", "remove_app", "revoke_user"]) expect(Object.keys(ADMIN_TOOLS)).not.toContain(t);
     // get_vendor_onboarding is on both lists: a service provider reads its own firm's through the studio's, which never
     // takes an admin's arguments (another firm, or every firm).
     expect(parseStudioCall("get_vendor_onboarding", { all_firms: true })).toHaveProperty("error");
@@ -190,8 +202,6 @@ describe("the allow-list", () => {
     expect(parseAdminCall("get_vendor_onboarding", { all_firms: true })).toHaveProperty("tool");
     expect(parseAdminCall("get_vendor_onboarding", { entity_id: FIRM })).toHaveProperty("error");
     for (const t of ["get_esign_settings", "remove_app", "register_firm", "review_license", "invite_user"]) expect(parseStudioCall(t, {})).toHaveProperty("error");
-    expect(parseAdminCall("remove_app", { app_id: APP, confirm: false })).toHaveProperty("tool");
-    expect(parseAdminCall("remove_app", { app_id: APP, confirm: true, proceed_without_closing: true })).toHaveProperty("error");
     expect(parseAdminCall("invite_user", { email: "a@example.com", roles: ["vendor"] })).toHaveProperty("tool");
     expect(parseAdminCall("invite_user", { email: "a@example.com", roles: [] })).toHaveProperty("error");
     expect(parseAdminCall("list_vendor_offerings", { include_unlisted: false })).toHaveProperty("error");
@@ -212,9 +222,6 @@ describe("each tab's read", () => {
     expect((await (await workspaces.GET()).json()).workspaces[0]).toMatchObject({ id: WS, status: "frozen", owner: { email: "ana@example.com" } });
     expect(called("list_all_workspaces")).toEqual([{ limit: 500 }]);
     expect((await (await workspace.GET(req("/x"), p({ workspaceId: WS }))).json()).detail.workspace.name).toBe("Team");
-    expect((await (await apps.GET()).json()).apps[0].workspace.name).toBe("Team");
-    expect((await (await app.GET(req("/x"), p({ appId: APP }))).json()).detail.products).toEqual([{ id: "p1", name: "Fixed deposit" }]);
-    expect((await (await products.GET()).json()).products[0].firm.name).toBe("Acme Trust");
     const f = await (await firms.GET()).json();
     expect(f.firms[0]).toMatchObject({ name: "Acme Trust", types: ["license_provider"] });
     const one = await (await firm.GET(req("/x"), p({ firmId: FIRM }))).json();
@@ -231,7 +238,7 @@ describe("each tab's read", () => {
     expect(fake.calls.every((c) => !("workspace_id" in c.args) || c.name === "admin_get_workspace")).toBe(true);
 
     fake.tools = [];
-    for (const res of [await overview.GET(req("/api/admin/overview")), await workspaces.GET(), await apps.GET(), await products.GET(), await settings.GET(), await firms.GET(), await licences.GET(), await vendors.GET()])
+    for (const res of [await overview.GET(req("/api/admin/overview")), await workspaces.GET(), await settings.GET(), await firms.GET(), await licences.GET(), await vendors.GET()])
       expect(await res.json()).toEqual({ supported: false });
   });
 });
@@ -244,18 +251,60 @@ describe("each action", () => {
     expect(called("register_firm")).toEqual([body]);
   });
 
-  it("Invite member → invite_user then add_entity_member; someone not signed in yet is invited only", async () => {
-    const res = await members.POST(req("/x", { email: "New@Example.com", roles: ["license_provider"] }), p({ firmId: FIRM }));
+  it("a firm's Invite member → invite_user then add_entity_member; someone not signed in yet is invited only", async () => {
+    const res = await members.POST(req("/x", { action: "invite", email: "New@Example.com", roles: ["license_provider"] }), p({ firmId: FIRM }));
     expect((await res.json()).added).toBe(true);
     expect(called("invite_user")).toEqual([{ email: "new@example.com", roles: ["license_provider"] }]);
     expect(called("add_entity_member")).toEqual([{ email: "new@example.com", entity_id: FIRM }]);
     fake.refuse.add_entity_member = JSON.stringify({ error: "new@example.com hasn't signed in to Mynt yet" });
-    const later = await (await members.POST(req("/x", { email: "new@example.com", roles: ["vendor"] }), p({ firmId: FIRM }))).json();
+    const later = await (await members.POST(req("/x", { action: "invite", email: "new@example.com", roles: ["vendor"] }), p({ firmId: FIRM }))).json();
     expect(later).toMatchObject({ ok: true, added: false });
     expect(later.message).toContain("Once they have");
     // Someone already allowed in keeps their roles: an admin added to a firm stays an admin.
-    await members.POST(req("/x", { email: "boss@example.com", roles: ["vendor"] }), p({ firmId: FIRM }));
+    await members.POST(req("/x", { action: "invite", email: "boss@example.com", roles: ["vendor"] }), p({ firmId: FIRM }));
     expect(called("invite_user").at(-1)).toEqual({ email: "boss@example.com", roles: ["admin", "vendor"] });
+  });
+
+  it("a firm's Change role → invite_user with the firm's roles replaced and every other role kept; nothing sent when nothing changes", async () => {
+    const res = await (await members.POST(req("/x", { action: "change_role", email: "lee@example.com", roles: ["vendor"] }), p({ firmId: FIRM }))).json();
+    expect(called("invite_user")).toEqual([{ email: "lee@example.com", roles: ["consumer", "vendor"] }]);
+    expect(res.message).toContain("removing: Licence provider");
+    await members.POST(req("/x", { action: "change_role", email: "boss@example.com", roles: ["license_provider"] }), p({ firmId: FIRM }));
+    expect(called("invite_user").at(-1)).toEqual({ email: "boss@example.com", roles: ["admin", "license_provider"] }); // Mynt admin stays
+    fake.calls = [];
+    await members.POST(req("/x", { action: "change_role", email: "lee@example.com", roles: ["license_provider"] }), p({ firmId: FIRM }));
+    expect(called("invite_user")).toEqual([]);
+  });
+
+  it("a firm's Remove → remove_entity_member, once the email is typed again; an older Mynt says not yet", async () => {
+    expect((await members.POST(req("/x", { action: "remove", email: "lee@example.com", confirm_email: "lee@example.com" }), p({ firmId: FIRM }))).status).toBe(200);
+    expect(called("remove_entity_member")).toEqual([{ entity_id: FIRM, email: "lee@example.com" }]);
+    expect(called("invite_user")).toEqual([]); // their sign-in and roles are untouched
+    fake.tools = fake.tools.filter((t) => t.name !== "remove_entity_member");
+    expect(await (await members.POST(req("/x", { action: "remove", email: "lee@example.com", confirm_email: "lee@example.com" }), p({ firmId: FIRM }))).json()).toEqual({ supported: false });
+  });
+
+  it("a workspace's Invite member, Change role, Remove and withdrawing an invitation → the admin workspace tools", async () => {
+    const inv = await (await wsMembers.POST(req("/x", { action: "invite", email: "New@Example.com", role: "admin" }), p({ workspaceId: WS }))).json();
+    expect(inv.message).toContain("can now sign in");
+    await wsMembers.POST(req("/x", { action: "change_role", user_id: USER, role: "member" }), p({ workspaceId: WS }));
+    await wsMembers.POST(req("/x", { action: "remove", user_id: USER, confirm: true }), p({ workspaceId: WS }));
+    await wsMembers.POST(req("/x", { action: "revoke_invite", invite_id: INV }), p({ workspaceId: WS }));
+    expect(called("admin_invite_workspace_member")).toEqual([{ workspace_id: WS, email: "new@example.com", role: "admin" }]);
+    expect(called("admin_change_workspace_member_role")).toEqual([{ workspace_id: WS, user_id: USER, role: "member" }]);
+    expect(called("admin_remove_workspace_member")).toEqual([{ workspace_id: WS, user_id: USER }]);
+    expect(called("admin_revoke_workspace_invite")).toEqual([{ invite_id: INV }]);
+    // An invitation that isn't this workspace's isn't withdrawn.
+    const other = await wsMembers.POST(req("/x", { action: "revoke_invite", invite_id: LIC }), p({ workspaceId: WS }));
+    expect(other.status).toBe(404);
+    expect(called("admin_revoke_workspace_invite")).toHaveLength(1);
+    // Mynt's refusal (the last owner) in its words.
+    fake.refuse.admin_remove_workspace_member = JSON.stringify({ error: "A workspace needs an owner: it can't lose its last one" });
+    const refused = await wsMembers.POST(req("/x", { action: "remove", user_id: USER, confirm: true }), p({ workspaceId: WS }));
+    expect(refused.status).toBe(422);
+    expect((await refused.json()).message).toBe("A workspace needs an owner: it can't lose its last one");
+    fake.tools = [];
+    expect(await (await wsMembers.POST(req("/x", { action: "invite", email: "a@example.com", role: "member" }), p({ workspaceId: WS }))).json()).toEqual({ supported: false });
   });
 
   it("Set firm status → set_entity_status", async () => {
@@ -290,17 +339,5 @@ describe("each action", () => {
       { offering_id: OFF, suspended: true, note: "Conformance keeps failing" },
       { offering_id: OFF, suspended: false, note: "Fixed by the vendor" },
     ]);
-  });
-
-  it("Remove test app → remove_app: a dry run first, then the removal with its reason; a refusal's reasons as Mynt gave them", async () => {
-    const plan = await (await remove.POST(req("/x", { confirm: false }), p({ appId: APP }))).json();
-    expect(plan.removal).toEqual({ kind: "plan", rows: [["api_keys", 2]], builds: 1, programs: 0 });
-    fake.reply.remove_app = { removed: true, app: { id: APP }, deleted: {} };
-    expect((await (await remove.POST(req("/x", { confirm: true, reason: "Test app" }), p({ appId: APP }))).json()).removal).toEqual({ kind: "removed" });
-    expect(called("remove_app")).toEqual([{ app_id: APP, confirm: false }, { app_id: APP, confirm: true, reason: "Test app" }]);
-    fake.refuse.remove_app = JSON.stringify({ removed: false, refused: ["The app is hosted: undeploy it first"] });
-    const refused = await remove.POST(req("/x", { confirm: false }), p({ appId: APP }));
-    expect(refused.status).toBe(422);
-    expect((await refused.json()).removal).toEqual({ kind: "refused", reasons: ["The app is hosted: undeploy it first"] });
   });
 });

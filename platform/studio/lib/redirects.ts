@@ -8,7 +8,8 @@ export const STUDIO_REWRITES = [{ source: "/connect", destination: "/docs/connec
 // Old addresses whose new one comes from their query, which proxy.ts sends on (a temporary redirect, before the
 // sign-in check). Not in STUDIO_REDIRECTS: Next's config redirects carry the old query onto the new address, so
 // /admin?tab=firms&id=… would land on /platform/firms/…?tab=firms&id=….
-// - The platform admin was /admin?tab=<section>&id=<id> inside the studio; it's /platform/<section>/<id> now.
+// - The platform admin was /admin?tab=<section>&id=<id> inside the studio; it's /platform/<section>/<id> now. A section it
+//   no longer has (apps, people, products) goes to /platform.
 // - Workspace Settings' old E-signature tab (/settings?tab=esign) is the platform admin's Platform settings.
 export function legacyRedirect(pathname: string, query: URLSearchParams): string | null {
   if (pathname === "/admin" || pathname === "/admin/") {

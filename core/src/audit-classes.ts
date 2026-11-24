@@ -330,6 +330,7 @@ const WORKSPACE = [
   "invite_via_public_signup",
   "set_public_signup",
   "add_entity_member",
+  "remove_entity_member",
   "accept_firm_member",
   "decline_firm_member",
   "create_entity",

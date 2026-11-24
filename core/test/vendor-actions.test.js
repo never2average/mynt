@@ -209,6 +209,7 @@ test("client actions served by the bound vendor: the device gets a status, the i
     "firm.member_added",
     "firm.member_pending",
     "firm.member_standing_lost",
+    "firm.member_removed",
     "firm.recovery_pending",
     "app_agreement.proposed",
     "app_agreement.signed",
