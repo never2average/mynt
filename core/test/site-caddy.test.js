@@ -43,6 +43,7 @@ const MYNT_PATHS = [
   "/webhooks/clerk",
   "/esign/webhook",
   "/esign/frame-origins",
+  "/confidential/attestation",
 ];
 const STUDIO_PATHS = ["/", "/2b0c6a52-app", "/2b0c6a52-app/9f1e-build", "/api/chat", "/api/auth/login", "/api/auth/callback", "/api/session", "/_next/static/chunks/main.js", "/favicon.ico"];
 

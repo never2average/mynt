@@ -161,8 +161,11 @@ if ! grep -qs '^MYNT_PSEUDONYM_SECRET=' "$ENV_DIR/env"; then
   umask 077
   printf 'MYNT_PSEUDONYM_SECRET=%s\n' "$(openssl rand -hex 32)" >>"$ENV_DIR/env"
 fi
-# Encrypts the customer vault at rest; generated once and kept across runs (losing it loses the vault).
-if ! grep -qs '^MYNT_VAULT_KEY=' "$ENV_DIR/env"; then
+# Encrypts the customer vault at rest; generated once and kept across runs (losing it loses the vault). Not once the
+# vault's keys have moved to the confidential host (CONFIDENTIAL_HOST set to anything but local; docs/reference.md,
+# Confidential computing): its removal is the point of that migration.
+CONFIDENTIAL_HOST_KIND=$(grep -s '^CONFIDENTIAL_HOST=' "$ENV_DIR/env" | cut -d= -f2- || true)
+if ! grep -qs '^MYNT_VAULT_KEY=' "$ENV_DIR/env" && { [ -z "$CONFIDENTIAL_HOST_KIND" ] || [ "$CONFIDENTIAL_HOST_KIND" = local ]; }; then
   umask 077
   printf 'MYNT_VAULT_KEY=%s\n' "$(openssl rand -base64 32)" >>"$ENV_DIR/env"
 fi
@@ -181,8 +184,8 @@ unset PGPASSWORD
   echo "PORT=$APP_PORT"
   echo "DATABASE_URL=postgres://financial_products_app:$DB_PASSWORD@127.0.0.1:$DB_PORT/postgres"
   echo "PUBLIC_URL=https://$DOMAIN"
-  # Clerk, boat.dev, model (Anthropic or Vertex AI), GitHub App and hosting (Freestyle) settings are placed in this file separately and kept across runs.
-  grep -E '^(MYNT_PSEUDONYM_SECRET|MYNT_VAULT_KEY|MYNT_BACKUP_[A-Z_]+|CLERK_SECRET_KEY|CLERK_PUBLISHABLE_KEY|CLERK_WEBHOOK_SECRET|CLERK_ACCOUNT_PORTAL_URL|STUDIO_URL|MCP_REQUIRE_AUDIENCE|BOAT_API_KEY|ANTHROPIC_API_KEY|GOOGLE_APPLICATION_CREDENTIALS|VERTEX_[A-Z_]+|BD_[A-Z_]+|DESK_[A-Z_]+|REVIEW_[A-Z_]+|BUILD_[A-Z_]+|GITHUB_APP_[A-Z_]+|HOSTING_[A-Z_]+|FREESTYLE_[A-Z_]+|SANDBOX_[A-Z_]+)=' "$ENV_DIR/env" || true
+  # Clerk, boat.dev, model (Anthropic or Vertex AI), GitHub App, hosting (Freestyle) and confidential host settings are placed in this file separately and kept across runs.
+  grep -E '^(MYNT_PSEUDONYM_SECRET|MYNT_VAULT_KEY|MYNT_BACKUP_[A-Z_]+|CLERK_SECRET_KEY|CLERK_PUBLISHABLE_KEY|CLERK_WEBHOOK_SECRET|CLERK_ACCOUNT_PORTAL_URL|STUDIO_URL|MCP_REQUIRE_AUDIENCE|BOAT_API_KEY|ANTHROPIC_API_KEY|GOOGLE_APPLICATION_CREDENTIALS|VERTEX_[A-Z_]+|BD_[A-Z_]+|DESK_[A-Z_]+|REVIEW_[A-Z_]+|BUILD_[A-Z_]+|GITHUB_APP_[A-Z_]+|HOSTING_[A-Z_]+|FREESTYLE_[A-Z_]+|SANDBOX_[A-Z_]+|CONFIDENTIAL_HOST[A-Z_]*)=' "$ENV_DIR/env" || true
 } >"$ENV_DIR/env.new"
 install -m 640 -o root -g mynt "$ENV_DIR/env.new" "$ENV_DIR/env"
 rm -f "$ENV_DIR/env.new"

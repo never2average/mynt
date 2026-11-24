@@ -70,7 +70,7 @@
       "id": "licences",
       "title": "Licences & partners",
       "summary": "Firms and licences, sponsorship, money rails, the partner kit and covenants.",
-      "tools": 41
+      "tools": 42
     },
     {
       "id": "vendors",
@@ -88,7 +88,7 @@
       "id": "admin",
       "title": "Admin & governance",
       "summary": "Regions and the regulatory model, categories, take rates, invitations, oversight and operations.",
-      "tools": 43
+      "tools": 45
     }
   ],
   "roles": [
@@ -203,7 +203,7 @@
     {
       "role": "license_provider",
       "summary": "a firm, added by an admin, holding licences (verified by admins) that sponsor builders' products: it approves, declines or revokes sponsorship of a product's component under a held licence, in the jurisdictions it covers. A peer of builders.",
-      "tools": 93,
+      "tools": 94,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -230,7 +230,7 @@
     {
       "role": "liquidity_provider",
       "summary": "a firm or fund, added by an admin, that puts capital into products' pools and takes it out, watching each product's health to decide where capital goes. Mynt never holds its funds. A peer of builders.",
-      "tools": 42,
+      "tools": 43,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
-      "tools": 395,
+      "tools": 398,
       "get_started": [
         {
           "tool": "define_region",
@@ -1357,6 +1357,45 @@
         },
         "required": [
           "product_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "announce_enclave_release",
+      "title": "Announce a confidential service release",
+      "description": "Admin: announce a build of the confidential service by its image digest (the one CI's confidential-image job printed for that commit). It takes effect 48 hours later (the first ever at once); until then Mynt's server won't talk to a service running it. Audited, and told to every licence-provider firm (a notice to each member and confidential.release_announced on its webhooks). The cloud key policy must name the same digest before the service can use its keys: the operator changes that, and docs/reference.md says how.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "image_digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "description": "sha256:<64 hex>, as CI printed it"
+          },
+          "release": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "The commit or release tag it was built from"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "What changed, for partners"
+          }
+        },
+        "required": [
+          "image_digest",
+          "release",
+          "reason"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -3489,6 +3528,7 @@
                 "partner_ledger.key_changed",
                 "partner_ledger.approval_requested",
                 "partner_ledger.conformance_expiring",
+                "confidential.release_announced",
                 "firm.member_added",
                 "firm.member_pending",
                 "firm.member_standing_lost",
@@ -9679,6 +9719,24 @@
       "roles": [
         "developer",
         "innovator",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "list_enclave_releases",
+      "title": "Confidential service releases",
+      "description": "Licence providers, liquidity providers and admins: the builds of Mynt's confidential service (the enclave that computes product health from partners' sealed statements and keeps Mynt's keys): each image digest, its release, why it was announced, when it takes effect (48 hours after it's announced, except the first) and whether it's in effect. Compare an attestation's image digest with these and with the digest CI published for that release (verify-mynt-enclave does both).",
+      "area": "licences",
+      "roles": [
+        "license_provider",
+        "liquidity_provider",
         "admin"
       ],
       "access": "read",
@@ -18015,6 +18073,37 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "withdraw_enclave_release",
+      "title": "Withdraw a confidential service release",
+      "description": "Admin: withdraw an announced build of the confidential service, so Mynt's server stops talking to it. Audited and told to every licence-provider firm.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "release_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "release_id",
+          "reason"
+        ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
     }

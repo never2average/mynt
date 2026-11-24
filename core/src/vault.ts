@@ -1,55 +1,119 @@
-import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHmac, hkdfSync, randomBytes } from "node:crypto";
 import { DATA_DICTIONARY, type CaptureMethod } from "./data-dictionary.js";
 
 // The customer vault: data a customer gave (or let Mynt fetch) once, kept per app and customer reference,
 // encrypted at rest (AES-256-GCM) so it can prefill the next journey instead of being asked for again.
-// Live data uses MYNT_VAULT_KEY (32 bytes, base64); sandbox data uses a key that exists only in this
-// process, so test data never outlives a restart. Values are never returned to devices: only which
-// fields are held, masked.
+// Live data uses the vault key; sandbox data uses a key that exists only in this process, so test data never
+// outlives a restart. Values are never returned to devices: only which fields are held, masked.
+//
+// The vault key is MYNT_VAULT_KEY (32 bytes, base64) until the operator moves it into the confidential host
+// (confidential/index.ts, docs/reference.md "Confidential computing"). After that, the host releases two keys into this
+// process at boot, and MYNT_VAULT_KEY can be removed from the server:
+//   - a data key: new values are sealed with it (format v2), and the migration re-wraps every v1 value to it;
+//   - HKDF-Extract of MYNT_VAULT_KEY: every key derived from it (derivedKey, the durable sandbox key) is HKDF-Expand of
+//     that, so they stay exactly what they were (MACs still check, on-chain subject hashes don't move), while the root
+//     itself, which opens every v1 value, stays inside the host.
 
 let ephemeral: Buffer | null = null;
-function keyFor(sandbox: boolean): Buffer | null {
-  if (sandbox) return (ephemeral ??= randomBytes(32));
+let released: { data: Buffer; prk: Buffer } | null = null;
+
+export function legacyVaultRoot(): Buffer | null {
   const raw = process.env.MYNT_VAULT_KEY;
   if (!raw) return null;
   const key = Buffer.from(raw, "base64");
   return key.length === 32 ? key : null;
 }
 
-export const vaultAvailable = (sandbox: boolean) => keyFor(sandbox) !== null;
+// Called once at boot by bootVault (confidential/index.ts) with what the confidential host released.
+export function installReleasedVaultKeys(dataKey: Buffer, derivationPrk: Buffer) {
+  if (dataKey.length !== 32 || derivationPrk.length !== 32) throw new Error("released vault keys are 32 bytes each");
+  released = { data: Buffer.from(dataKey), prk: Buffer.from(derivationPrk) };
+}
+export const vaultKeysReleased = () => released !== null;
+
+// The key new live values are sealed with, and which format that makes.
+function sealingKey(sandbox: boolean): { key: Buffer; v: "v1" | "v2" } | null {
+  if (sandbox) return { key: (ephemeral ??= randomBytes(32)), v: "v1" };
+  if (released) return { key: released.data, v: "v2" };
+  const legacy = legacyVaultRoot();
+  return legacy ? { key: legacy, v: "v1" } : null;
+}
+
+export const vaultAvailable = (sandbox: boolean) => sealingKey(sandbox) !== null;
+
+// HKDF-SHA256 with an empty salt, from MYNT_VAULT_KEY or, once released, from its extract: the same key either way.
+function derive(info: string): Buffer | null {
+  if (released) return createHmac("sha256", released.prk).update(Buffer.concat([Buffer.from(info, "utf8"), Buffer.from([1])])).digest();
+  const legacy = legacyVaultRoot();
+  return legacy ? Buffer.from(hkdfSync("sha256", legacy, Buffer.alloc(0), info, 32)) : null;
+}
 
 // Sandbox data that must outlive a restart (vendors' results queued for an innovator's webhook): a key derived
-// from MYNT_VAULT_KEY under its own label, so it never opens live data and live data never opens with it.
-function durableSandboxKey(): Buffer | null {
-  const live = keyFor(false);
-  return live ? Buffer.from(hkdfSync("sha256", live, Buffer.alloc(0), "mynt-sandbox-durable-v1", 32)) : null;
-}
+// from the vault key under its own label, so it never opens live data and live data never opens with it.
+const durableSandboxKey = (): Buffer | null => derive("mynt-sandbox-durable-v1");
 
-// A key for one purpose (e.g. signing the Mynt Ramp's own quotes), derived from MYNT_VAULT_KEY under its own label.
-export function derivedKey(label: string): Buffer | null {
-  const live = keyFor(false);
-  return live ? Buffer.from(hkdfSync("sha256", live, Buffer.alloc(0), `mynt-derived-v1:${label}`, 32)) : null;
-}
+// A key for one purpose (e.g. signing the Mynt Ramp's own quotes), derived from the vault key under its own label.
+export const derivedKey = (label: string): Buffer | null => derive(`mynt-derived-v1:${label}`);
 
-// `durable` matters for sandbox only: sealed with the derived key (marked v1s) when MYNT_VAULT_KEY is set.
-export function seal(value: string, sandbox: boolean, durable = false): string {
-  const derived = sandbox && durable ? durableSandboxKey() : null;
-  const key = derived ?? keyFor(sandbox);
-  if (!key) throw new Error("vault key not configured");
+function sealWith(key: Buffer, v: string, value: string): string {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   const ct = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
-  return [derived ? "v1s" : "v1", iv.toString("base64"), cipher.getAuthTag().toString("base64"), ct.toString("base64")].join(":");
+  return [v, iv.toString("base64"), cipher.getAuthTag().toString("base64"), ct.toString("base64")].join(":");
+}
+function openWith(key: Buffer, iv: string, tag: string, ct: string): string {
+  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64"));
+  decipher.setAuthTag(Buffer.from(tag, "base64"));
+  return Buffer.concat([decipher.update(Buffer.from(ct, "base64")), decipher.final()]).toString("utf8");
+}
+
+// `durable` matters for sandbox only: sealed with the derived key (marked v1s) when the vault key is there.
+export function seal(value: string, sandbox: boolean, durable = false): string {
+  const derived = sandbox && durable ? durableSandboxKey() : null;
+  if (derived) return sealWith(derived, "v1s", value);
+  const k = sealingKey(sandbox);
+  if (!k) throw new Error("vault key not configured");
+  return sealWith(k.key, k.v, value);
 }
 
 export function open(sealed: string, sandbox: boolean): string {
   const [v, iv, tag, ct] = sealed.split(":");
-  if (v !== "v1" && !(v === "v1s" && sandbox)) throw new Error("unknown vault format");
-  const key = v === "v1s" ? durableSandboxKey() : keyFor(sandbox);
-  if (!key) throw new Error("vault key not configured");
-  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64"));
-  decipher.setAuthTag(Buffer.from(tag, "base64"));
-  return Buffer.concat([decipher.update(Buffer.from(ct, "base64")), decipher.final()]).toString("utf8");
+  if (v === "v1s" && sandbox) {
+    const key = durableSandboxKey();
+    if (!key) throw new Error("vault key not configured");
+    return openWith(key, iv, tag, ct);
+  }
+  if (v === "v2" && !sandbox) {
+    if (!released) throw new Error("vault key not configured: this value was sealed with the confidential host's data key");
+    return openWith(released.data, iv, tag, ct);
+  }
+  if (v !== "v1") throw new Error("unknown vault format");
+  const key = sandbox ? (ephemeral ??= randomBytes(32)) : legacyVaultRoot();
+  if (!key) throw new Error(released ? "This value is still sealed with MYNT_VAULT_KEY: run `mynt confidential rewrap --apply` with it set" : "vault key not configured");
+  return openWith(key, iv, tag, ct);
+}
+
+// ---- the migration (confidential/index.ts: rewrapVault) ----
+
+// A live value sealed with MYNT_VAULT_KEY, with hosting's ":live"/":sandbox" suffix allowed.
+export const LEGACY_SEALED = /^v1:[A-Za-z0-9+/=]{16}:[A-Za-z0-9+/=]{24}:[A-Za-z0-9+/=]*(:live|:sandbox)?$/;
+
+// The same value sealed with the released data key, or null when it doesn't open with MYNT_VAULT_KEY (a sandbox value
+// sealed by an earlier process's own key, say). `check`: only whether it would open.
+export function rewrapLegacyValue(value: string, check = false): string | null {
+  const legacy = legacyVaultRoot();
+  if (!LEGACY_SEALED.test(value) || !legacy) return null;
+  const suffix = value.endsWith(":live") ? ":live" : value.endsWith(":sandbox") ? ":sandbox" : "";
+  const [, iv, tag, ct] = (suffix ? value.slice(0, -suffix.length) : value).split(":");
+  let plain: string;
+  try {
+    plain = openWith(legacy, iv, tag, ct);
+  } catch {
+    return null;
+  }
+  if (check) return value;
+  if (!released) throw new Error("The confidential host hasn't released the vault's data key: run `mynt confidential adopt` and restart first");
+  return sealWith(released.data, "v2", plain) + suffix;
 }
 
 // What a device may see of a held value: public values as they are, others masked to their last 4.

@@ -83,14 +83,14 @@ class FakeChain {
 
 const SNAPSHOTS = "financial_products.product_health_snapshots";
 
-async function setup({ ledger, flows, config = {}, liquidityProvidersOf } = {}) {
+async function setup({ ledger, flows, config = {}, liquidityProvidersOf, confidential } = {}) {
   const pg = new PGlite();
   const db = { query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
   let clock = T0 + 5 * 60_000;
   const chain = new FakeChain();
   const fullConfig = { intervalMs: HOUR, cosignWindowMs: 10 * 60_000, pollMs: 60_000, programId: PROGRAM_ID, ...config };
-  const make = (c) => ProductHealthService.open(db, store, c, { chain, flowsFor: flows ?? null, ledgerFor: ledger ? () => ledger : undefined, now: () => new Date(clock), liquidityProvidersOf });
+  const make = (c) => ProductHealthService.open(db, store, c, { chain, flowsFor: flows ?? null, ledgerFor: ledger ? () => ledger : undefined, now: () => new Date(clock), liquidityProvidersOf, confidential });
   const health = await make(fullConfig);
   const [productPublished] = await store.publishedProducts();
   const productId = productPublished.id;
@@ -805,6 +805,57 @@ test("a sandbox snapshot of a published product never reads as live or verified,
   assert.equal(view.verified, false);
   assert.match(view.notes.join(" "), /Sandbox/);
   assert.equal(chain.log[0].source, chainLib.SOURCE_FLAG.sandbox);
+});
+
+// A live ledger whose statement the partner sealed to the confidential host: Mynt's server only carries it.
+const sealedLedger = (host, partner, { signer = partner, requestId = "req-1" } = {}) => ({
+  id: "fake-sealed",
+  name: "A fake live ledger that seals its statements",
+  kind: "live",
+  read: async (c) => {
+    const { sealStatement } = await import("../dist/confidential/shared/envelope.js");
+    const { statementMessage } = await import("../dist/confidential/shared/health.js");
+    const statement = {
+      schema: "mynt.partner_ledger.v1",
+      provider_entity_id: c.provider_entity_id,
+      environment: "live",
+      request_id: requestId,
+      as_of: c.period_end,
+      products: [{ product_id: c.product_id, reserves_held_cents: 150_00, customer_obligations_cents: 100_00, reason: null }],
+    };
+    statement.signature = { public_key: signer.address, value: edSign(null, statementMessage(statement), signer.privateKey).toString("hex") };
+    const envelope = sealStatement(statement, await host.ingestPublicKey(), { provider_entity_id: c.provider_entity_id, environment: "live", request_id: requestId });
+    return { sealed: { envelope, expect: { entity_id: c.provider_entity_id, environment: "live", request_id: requestId, public_key: partner.address, other_key: null, max_age_ms: 86_400_000 } } };
+  },
+});
+
+test("a statement sealed to the confidential host is computed there: the figures come back signed by it, and a forged one gives none", async () => {
+  const { LocalConfidentialHost } = await import("../dist/confidential/local.js");
+  const host = new LocalConfidentialHost();
+  const partner = edKeyPair();
+  const { health, productId, provider, tickAt } = await setup({ ledger: sealedLedger(host, partner), confidential: host });
+  await tickAt(T0 + 5 * 60_000);
+  const latest = (await health.get(provider.user, productId, null, 1)).latest;
+  assert.equal(latest.report.source, "partner_ledger");
+  assert.equal(latest.report.figures.reserves_cents.value, 150_00);
+  assert.equal(latest.report.figures.coverage_bps.value, 150_00);
+  assert.match(latest.report.notes.join(" "), /confidential service \(local\)/);
+  const snap = await firstSnapshot(health, provider.user, productId);
+  assert.deepEqual(snap.enclave, { public_key: await host.publicKey("health-attester"), signature_ok: true });
+
+  // Signed by someone other than the firm's registered key: the host gives no figures, and says why.
+  const forged = await setup({ ledger: sealedLedger(host, partner, { signer: edKeyPair() }), confidential: host });
+  await forged.tickAt(T0 + 5 * 60_000);
+  const bad = (await forged.health.get(forged.provider.user, forged.productId, null, 1)).latest.report;
+  assert.equal(bad.source, "unavailable");
+  assert.equal(bad.figures.reserves_cents.value, null);
+
+  // No confidential host: a sealed statement can't be read, and that's said, never zero.
+  const none = await setup({ ledger: sealedLedger(host, partner) });
+  await none.tickAt(T0 + 5 * 60_000);
+  const unread = (await none.health.get(none.provider.user, none.productId, null, 1)).latest.report;
+  assert.equal(unread.source, "unavailable");
+  assert.match(unread.figures.reserves_cents.reason, /no_confidential_host/);
 });
 
 test("partner_ledger means a ledger that says it's live; anything else counts as sandbox", async () => {

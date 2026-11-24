@@ -12,6 +12,7 @@ import { RAMP_SANDBOX_PATH, rampSandbox } from "./ramp-sandbox.js";
 import { createRuntimeApi, type RuntimeApiOptions } from "./runtime-api.js";
 import { createServer } from "./server.js";
 import { llmsFullCache, llmsTxt } from "./llms-txt.js";
+import { validNonce } from "./confidential/shared/binding.js";
 import type { Store, User } from "./store.js";
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
@@ -127,6 +128,8 @@ async function handle(store: Store, clerk: ClerkAuth | null, ctx: AdminContext, 
     const live = currentEsign(ctx.esign);
     return sendJson(res, 200, { origins: live ? [...live.provider.signingOrigins] : [] }, { "Cache-Control": "public, max-age=300" });
   }
+  // The confidential service's attestation, for partners to check before sealing their books to it (verify-mynt-enclave).
+  if (readOnly && url.pathname === "/confidential/attestation") return confidentialAttestation(ctx, req, res, url);
   // A ramp partner's webhooks, for an offering Mynt runs through an adapter: verified with the partner's own scheme.
   if (url.pathname.startsWith(RAMP_ADAPTER_WEBHOOK_PATH)) return rampAdapterWebhook(store, req, res, url);
   // The runtime API for developers' apps authenticates with app keys, not Clerk.
@@ -202,6 +205,28 @@ export function createMcpHttpServer(
       res.end(JSON.stringify({ error: "Internal server error" }));
     }),
   );
+}
+
+// GET /confidential/attestation?nonce=<16-64 URL-safe characters>: the confidential host's attestation, as it gave it
+// (Mynt's server only relays it, so it can't change what partners check), with the releases in effect. Public: it names
+// no secret. One a second across all callers, because each one asks the cloud's attestation service for a token.
+export const CONFIDENTIAL_ATTESTATION_PATH = "/confidential/attestation";
+let lastAttestation = 0;
+async function confidentialAttestation(ctx: AdminContext, req: IncomingMessage, res: ServerResponse, url: URL) {
+  const host = ctx.confidential ?? null;
+  if (!host) return sendJson(res, 404, { error: "not_configured", message: "This Mynt has no confidential host" });
+  const nonce = url.searchParams.get("nonce");
+  if (!validNonce(nonce)) return sendJson(res, 400, { error: "bad_nonce", message: "nonce: 16 to 64 characters of A-Z, a-z, 0-9, - and _" });
+  if (Date.now() - lastAttestation < 1000) return sendJson(res, 429, { error: "rate_limited", message: "One attestation a second: try again shortly" }, { "Retry-After": "1" });
+  lastAttestation = Date.now();
+  try {
+    const attestation = await host.attest(nonce);
+    const releases = ctx.confidentialReleases ? (await ctx.confidentialReleases.list()).filter((r) => r.valid && !r.withdrawn_at).map((r) => ({ image_digest: r.image_digest, release: r.release, effective_at: r.effective_at, in_effect: r.in_effect })) : [];
+    return sendJson(res, 200, { ...attestation, releases }, { "Cache-Control": "no-store" });
+  } catch (e) {
+    console.error(`confidential attestation: ${(e as Error).message}`);
+    return sendJson(res, 502, { error: "unavailable", message: "The confidential host couldn't attest just now" });
+  }
 }
 
 // POST /webhooks/clerk: the identity provider's organization, membership and invitation events, signed with

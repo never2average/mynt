@@ -36,6 +36,9 @@ const SECURITY = [
   "remove_esign_api_key",
   "set_esign_test_mode",
   "rotate_partner_ledger_secret",
+  // which builds of the confidential service Mynt trusts (confidential/governance.ts)
+  "confidential_release_announced",
+  "confidential_release_withdrawn",
   "reveal_subscription_secret",
   "rotate_subscription_secret",
   "admin_reveal_subscription_secret",

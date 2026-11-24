@@ -206,6 +206,7 @@ test("client actions served by the bound vendor: the device gets a status, the i
     "partner_ledger.key_changed",
     "partner_ledger.approval_requested",
     "partner_ledger.conformance_expiring",
+    "confidential.release_announced",
     "firm.member_added",
     "firm.member_pending",
     "firm.member_standing_lost",

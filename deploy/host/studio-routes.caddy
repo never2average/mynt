@@ -13,7 +13,8 @@
 		}
 		reverse_proxy 127.0.0.1:@PORT@
 	}
-	@mynt path /v1 /llms.txt /llms-full.txt /.well-known/* /ramp-sandbox/*
+	# The confidential service's attestation, for partners (GET /confidential/attestation) is Mynt's too.
+	@mynt path /v1 /llms.txt /llms-full.txt /.well-known/* /ramp-sandbox/* /confidential/*
 	handle @mynt {
 		request_body {
 			max_size 64KB

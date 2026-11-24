@@ -94,6 +94,8 @@ export const AREA_OF_REGISTRAR: Record<string, ToolAreaId> = {
   registerPartnerKitTools: "licences",
   registerCovenantTools: "licences",
   registerFirmNoticeTools: "licences",
+  registerConfidentialTools: "licences",
+  registerConfidentialAdminTools: "admin",
   registerMoneyRailTools: "licences",
   registerVendorTools: "vendors",
   registerVendorInnovatorTools: "vendors",

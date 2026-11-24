@@ -14,6 +14,7 @@ const ADMIN_TOOLS = [
   "remove_regulated_product_type", "remove_regulator", "revoke_user", "define_take_rate", "list_take_rates", "recompute_product_derived",
   "decide_promotion_signoff", "list_promotion_signoffs", "remove_entity_member", "admin_list_risks",
   "admin_invite_workspace_member", "admin_change_workspace_member_role", "admin_remove_workspace_member", "admin_revoke_workspace_invite",
+  "announce_enclave_release", "withdraw_enclave_release",
 ];
 
 async function setup() {
