@@ -243,6 +243,11 @@ export async function getOffering(db: Db, id: string): Promise<Offering | undefi
   const { rows } = await db.query(`SELECT * FROM ${T}.vendor_offerings WHERE id = $1`, [id]);
   return rows[0] ? toOffering(rows[0]) : undefined;
 }
+/** A firm's offerings, oldest first. */
+export async function offeringsOf(db: Db, entityId: string): Promise<Offering[]> {
+  const { rows } = await db.query(`SELECT * FROM ${T}.vendor_offerings WHERE entity_id = $1 ORDER BY created_at, id`, [entityId]);
+  return rows.map(toOffering);
+}
 export async function getSubscription(db: Db, id: string): Promise<Subscription | undefined> {
   if (!uuidLike(id)) return undefined;
   const { rows } = await db.query(`SELECT * FROM ${T}.vendor_subscriptions WHERE id = $1`, [id]);
@@ -817,7 +822,7 @@ export const MYNT_RAMP_SETTING = "mynt_ramp";
 export async function myntRampEntity(store: Store): Promise<string | null> {
   return (await store.getSetting<{ entity_id: string }>(MYNT_RAMP_SETTING))?.entity_id ?? null;
 }
-async function rampRefusal(store: Store, t: ServiceType, entityId: string): Promise<string | null> {
+export async function rampRefusal(store: Store, t: ServiceType, entityId: string): Promise<string | null> {
   if (t.category !== "ramp") return null;
   const ramp = await myntRampEntity(store);
   if (!ramp) return "No firm operates the Mynt Ramp yet: an admin designates it with set_mynt_ramp";

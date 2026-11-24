@@ -32,6 +32,8 @@ const MOVED: readonly StudioPage[] = [
 // address and redirects there): fixed pages, never an app's id, and not offered in search.
 const RESTRICTED: readonly StudioPage[] = [
   { href: "/platform", label: "Mynt platform admin" },
+  // A service provider's own services (Mynt's vendor role), in its sidebar only.
+  { href: "/vendor", label: "My services" },
   { href: "/admin", label: "Mynt platform admin" },
 ];
 
