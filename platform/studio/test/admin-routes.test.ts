@@ -104,6 +104,7 @@ beforeEach(() => {
     list_license_reviews: [],
     list_service_types: [{ region: "US", key: "kyc_basic", name: "KYC", category: "kyc", consent_purpose: "kyc", moves_money: false }],
     list_vendor_offerings: [{ offering_id: OFF, name: "Fast KYC", vendor: "Acme Trust", vendor_entity_id: FIRM, region: "US", service_type: { key: "kyc_basic", name: "KYC", category: "kyc" }, status: "listed", conformance: { passed: true, at: "2026-11-01T00:00:00.000Z" } }],
+    get_vendor_onboarding: { firms: [{ entity_id: FIRM, name: "Acme Trust", status: "active", vendor_members: 1, services: 1, listed: 1, progress: { done: 5, total: 6, next: { key: "terms", title: "Set your standard terms", status: "next" }, complete: false } }] },
     remove_app: { removed: false, dry_run: true, would_remove: { app: { id: APP }, rows: { api_keys: 2 }, builds: [{ id: "b" }], programs: [] } },
   };
 });
@@ -181,7 +182,13 @@ describe("who gets in", () => {
 
 describe("the allow-list", () => {
   it("admin tools are their own list: never callable through the studio's, and strict", () => {
-    for (const t of Object.keys(ADMIN_TOOLS)) if (!["list_vendor_offerings", "list_service_types"].includes(t)) expect(Object.keys(STUDIO_TOOLS)).not.toContain(t);
+    for (const t of Object.keys(ADMIN_TOOLS)) if (!["list_vendor_offerings", "list_service_types", "get_vendor_onboarding"].includes(t)) expect(Object.keys(STUDIO_TOOLS)).not.toContain(t);
+    // get_vendor_onboarding is on both lists: a service provider reads its own firm's through the studio's, which never
+    // takes an admin's arguments (another firm, or every firm).
+    expect(parseStudioCall("get_vendor_onboarding", { all_firms: true })).toHaveProperty("error");
+    expect(parseStudioCall("get_vendor_onboarding", { entity_id: FIRM })).toHaveProperty("error");
+    expect(parseAdminCall("get_vendor_onboarding", { all_firms: true })).toHaveProperty("tool");
+    expect(parseAdminCall("get_vendor_onboarding", { entity_id: FIRM })).toHaveProperty("error");
     for (const t of ["get_esign_settings", "remove_app", "register_firm", "review_license", "invite_user"]) expect(parseStudioCall(t, {})).toHaveProperty("error");
     expect(parseAdminCall("remove_app", { app_id: APP, confirm: false })).toHaveProperty("tool");
     expect(parseAdminCall("remove_app", { app_id: APP, confirm: true, proceed_without_closing: true })).toHaveProperty("error");
@@ -219,6 +226,8 @@ describe("each tab's read", () => {
     const v = await (await vendors.GET()).json();
     expect(v.serviceTypes[0].key).toBe("kyc_basic");
     expect(v.offerings[0].conformance.passed).toBe(true);
+    expect(v.firms[0]).toMatchObject({ entityId: FIRM, done: 5, total: 6, next: { title: "Set your standard terms", waitingOnMynt: false } });
+    expect(called("get_vendor_onboarding")).toEqual([{ all_firms: true }]);
     expect(fake.calls.every((c) => !("workspace_id" in c.args) || c.name === "admin_get_workspace")).toBe(true);
 
     fake.tools = [];

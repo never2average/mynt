@@ -119,8 +119,9 @@ export function AdminList({
   )
 }
 
-/** A plain table: its head, its rows (cells), and what it says when there are none. */
-export function AdminTable({ head, rows, empty, rowKeys }: { head: string[]; rows: React.ReactNode[][]; empty: string; rowKeys?: string[] }) {
+/** A plain table: its head, its rows (cells), and what it says when there are none. With onRow, a row also opens on a
+ * click anywhere in it (its labelled Open button stays, for the keyboard). */
+export function AdminTable({ head, rows, empty, rowKeys, onRow }: { head: string[]; rows: React.ReactNode[][]; empty: string; rowKeys?: string[]; onRow?: (i: number) => void }) {
   return (
     <Table>
       <TableHeader className="sticky top-0 bg-card">
@@ -133,7 +134,7 @@ export function AdminTable({ head, rows, empty, rowKeys }: { head: string[]; row
       <TableBody>
         {rows.length ? (
           rows.map((cells, i) => (
-            <TableRow key={rowKeys?.[i] ?? i} data-row={rowKeys?.[i]}>
+            <TableRow key={rowKeys?.[i] ?? i} data-row={rowKeys?.[i]} className={onRow ? "cursor-pointer" : undefined} onClick={onRow ? () => onRow(i) : undefined}>
               {cells.map((c, j) => (
                 <TableCell key={j} className={j === 0 ? "font-medium" : undefined}>
                   {c}

@@ -3,7 +3,8 @@
 // Admin → Vendors: the standard service types admins define per region (list_service_types), with Add service type
 // (define_service_type: its input and output contracts as JSON Schemas, the consent it needs, whether it moves
 // money), and every vendor's offering of them whatever its status (list_vendor_offerings), with its last conformance
-// result and Suspend offering / Reinstate offering (suspend_vendor_offering). Changing an existing service type, and
+// result and Suspend offering / Reinstate offering (suspend_vendor_offering), and each vendor firm's onboarding progress
+// (Vendor firms: get_vendor_onboarding's all_firms, read only). Changing an existing service type, and
 // its advanced fields (fixtures, what a device is told, params, quotes), stay with the MCP tool. Server-renderable.
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { Ban, Plus, RotateCcw } from "lucide-react"
@@ -15,12 +16,14 @@ import { StatusDot } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Tab, TabList } from "@/components/ui/tabs"
-import { conformanceWords, csvOf, dateOf, words, type AdminOffering, type ServiceTypeRow } from "@/lib/admin"
+import { NotAvailableYet } from "@/components/not-available"
+import { conformanceWords, csvOf, dateOf, onboardingWords, words, type AdminOffering, type ServiceTypeRow, type VendorFirmRow } from "@/lib/admin"
 import { categoryLabel } from "@/lib/marketplace"
 import { SERVICE_CATEGORIES } from "@/lib/studio-tools"
 
-type View = "types" | "offerings"
-export type VendorsData = { serviceTypes: ServiceTypeRow[]; offerings: AdminOffering[] }
+type View = "types" | "offerings" | "firms"
+// firms: each vendor firm's onboarding progress; null on a Mynt without get_vendor_onboarding.
+export type VendorsData = { serviceTypes: ServiceTypeRow[]; offerings: AdminOffering[]; firms?: VendorFirmRow[] | null }
 const list = (s: string) => s.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean)
 const EMPTY_SCHEMA = '{\n  "type": "object",\n  "properties": {}\n}'
 
@@ -206,14 +209,18 @@ export function VendorsView({ data, initialView = "types", onChanged = () => und
   )
   const typesPaged = usePaged(types)
   const offeringsPaged = usePaged(offerings)
-  const paged = view === "types" ? typesPaged : offeringsPaged
+  const firms = useMemo(() => (data.firms ?? []).filter((f) => matches(query, f.name, f.next?.title, f.status)), [data.firms, query])
+  const firmsPaged = usePaged(firms)
+  const paged = view === "types" ? typesPaged : view === "offerings" ? offeringsPaged : firmsPaged
   const facets = [
     { id: "region", label: "Region", options: regions.map((r) => ({ value: r, label: r })), selected: region, onChange: (v: string[]) => setRegion(v) },
     { id: "category", label: "Category", options: SERVICE_CATEGORIES.map((c) => ({ value: c, label: categoryLabel(c) })), selected: category, onChange: (v: string[]) => setCategory(v) },
     ...(view === "offerings" ? [{ id: "status", label: "Status", options: ["draft", "listed", "suspended"].map((s) => ({ value: s, label: words(s) })), selected: status, onChange: (v: string[]) => setStatus(v) }] : []),
   ]
   const exportCsv = () =>
-    view === "types"
+    view === "firms"
+      ? downloadCsv("vendor-firms.csv", csvOf(["Firm", "Status", "Vendor people", "Services", "Listed", "Onboarding", "Next step"], firms.map((f) => [f.name, f.status, numberWords(f.vendorMembers), numberWords(f.services), numberWords(f.listed), onboardingWords(f), nextWords(f)])))
+      : view === "types"
       ? downloadCsv("service-types.csv", csvOf(["Region", "Key", "Name", "Category", "Consent purpose", "Moves money", "Fills", "Updated"], types.map((t) => [t.region, t.key, t.name, t.category, t.consentPurpose, t.movesMoney ? "yes" : "no", t.fills.join(" "), dateOf(t.updatedAt)])))
       : downloadCsv("offerings.csv", csvOf(["Offering", "Vendor", "Region", "Service", "Status", "Conformance", "Live"], offerings.map((o) => [o.name, o.vendor, o.region, o.serviceKey, o.status, conformanceWords(o.conformance), o.liveAvailable ? "yes" : "no"])))
   return (
@@ -225,16 +232,22 @@ export function VendorsView({ data, initialView = "types", onChanged = () => und
         <Tab selected={view === "offerings"} onClick={() => setView("offerings")} data-vendors-view="offerings">
           Offerings
         </Tab>
+        <Tab selected={view === "firms"} onClick={() => setView("firms")} data-vendors-view="firms">
+          Vendor firms
+        </Tab>
       </TabList>
+      {view === "firms" && data.firms === null ? (
+        <NotAvailableYet what="Vendor firms' onboarding" />
+      ) : (
       <AdminList
-        id={view === "types" ? "service-types" : "offerings"}
+        id={view === "types" ? "service-types" : view === "offerings" ? "offerings" : "vendor-firms"}
         search={query}
         onSearch={setQuery}
-        searchLabel={view === "types" ? "Search service types by name, key or consent" : "Search offerings by name, vendor or service"}
-        facets={facets}
+        searchLabel={view === "types" ? "Search service types by name, key or consent" : view === "offerings" ? "Search offerings by name, vendor or service" : "Search vendor firms by name or next step"}
+        facets={view === "firms" ? [] : facets}
         onClearFilters={() => (setRegion([]), setCategory([]), setStatus([]))}
         onExport={exportCsv}
-        exportDisabled={view === "types" ? !types.length : !offerings.length}
+        exportDisabled={view === "types" ? !types.length : view === "offerings" ? !offerings.length : !firms.length}
         cta={
           view === "types" ? (
             <Button onClick={() => setAdding(true)} data-add-service-type>
@@ -245,7 +258,7 @@ export function VendorsView({ data, initialView = "types", onChanged = () => und
         }
         page={paged.page}
         pages={paged.pages}
-        total={view === "types" ? types.length : offerings.length}
+        total={view === "types" ? types.length : view === "offerings" ? offerings.length : firms.length}
         onPage={paged.setPage}
       >
         {view === "types" ? (
@@ -264,6 +277,23 @@ export function VendorsView({ data, initialView = "types", onChanged = () => und
               dateOf(t.updatedAt),
             ])}
             empty={data.serviceTypes.length ? "No service types match these filters." : "No service types yet. Add the first one."}
+          />
+        ) : view === "firms" ? (
+          <AdminTable
+            head={["Firm", "Status", "Vendor people", "Services", "Listed", "Onboarding", "Next step"]}
+            rowKeys={firmsPaged.shown.map((f) => f.entityId)}
+            rows={firmsPaged.shown.map((f) => [
+              f.name,
+              words(f.status),
+              numberWords(f.vendorMembers),
+              numberWords(f.services),
+              numberWords(f.listed),
+              <span key="o" data-onboarding={f.complete ? "complete" : "in-progress"}>
+                {onboardingWords(f)}
+              </span>,
+              nextWords(f),
+            ])}
+            empty={(data.firms ?? []).length ? "No vendor firms match this search." : "No vendor firms yet. Register one and invite its people with the vendor role."}
           />
         ) : (
           <AdminTable
@@ -287,14 +317,23 @@ export function VendorsView({ data, initialView = "types", onChanged = () => und
           />
         )}
       </AdminList>
+      )}
       <AddServiceTypeSheet open={adding} onClose={closeSheet} onDone={() => setDirty(true)} />
       <SuspendOfferingSheet offering={acting} onClose={closeSheet} onDone={() => setDirty(true)} />
     </div>
   )
 }
 
+const numberWords = (n: number | null) => (n === null ? "Not known" : String(n))
+// The next step, and whether it waits on Mynt (an admin) rather than on the vendor.
+const nextWords = (f: VendorFirmRow) => (f.next ? `${f.next.title}${f.next.waitingOnMynt ? " (waiting for Mynt)" : ""}` : f.complete ? "Nothing: listed" : "—")
+
 export function VendorsTab() {
-  const pick = useCallback((b: Record<string, unknown>) => (Array.isArray(b.serviceTypes) && Array.isArray(b.offerings) ? ({ serviceTypes: b.serviceTypes, offerings: b.offerings } as VendorsData) : undefined), [])
+  const pick = useCallback(
+    (b: Record<string, unknown>) =>
+      Array.isArray(b.serviceTypes) && Array.isArray(b.offerings) ? ({ serviceTypes: b.serviceTypes, offerings: b.offerings, firms: Array.isArray(b.firms) ? b.firms : null } as VendorsData) : undefined,
+    [],
+  )
   const { state, reload } = useAdminData("/api/admin/vendors", pick)
   return state.kind === "ready" ? <VendorsView data={state.data} onChanged={reload} /> : <AdminNotReady state={state} what="Vendors" />
 }

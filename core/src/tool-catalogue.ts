@@ -102,6 +102,7 @@ export const AREA_OF_REGISTRAR: Record<string, ToolAreaId> = {
   registerServiceTypeCatalog: "vendors",
   registerFirmWebhookTools: "vendors",
   registerRampAdapterTools: "vendors",
+  registerVendorOnboardingTools: "vendors",
   registerWorkspaceComplianceTools: "compliance",
   registerFirmCheckAdminTools: "compliance",
   registerReviewTools: "compliance",

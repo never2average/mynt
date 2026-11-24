@@ -47,6 +47,32 @@ const riskStatus = z.enum(RISK_STATUSES);
 const riskScore = z.number().int().min(1).max(5);
 // An app kind's id, as Mynt's kind files name them (core/schemas/app-kind.schema.json).
 export const appKindId = z.string().regex(/^[a-z][a-z0-9-]{1,39}$/);
+// A service provider's service (My services): its endpoints (https only), price per call, notes, the firm's licences it
+// relies on, and its standard terms (an https link with the document's SHA-256, a summary and the pricing in words).
+const httpsUrl = z.string().trim().url().max(2000).refine((u) => u.startsWith("https://"), "an https link");
+const vendorOfferingEdits = {
+  name: z.string().trim().min(1).max(200).optional(),
+  test_base_url: httpsUrl.optional(),
+  live_base_url: httpsUrl.optional(),
+  price: z.object({ amount: z.number().min(0).max(1_000_000), currency: z.string().regex(/^[A-Z]{3}$/) }).strict().optional(),
+  sla_notes: z.string().trim().max(2000).optional(),
+  licence_ids: z.array(z.string().uuid()).max(10).optional(),
+  requires_credential: z.boolean().optional(),
+};
+const vendorOfferingFields = {
+  ...vendorOfferingEdits,
+  name: z.string().trim().min(1).max(200),
+  test_base_url: httpsUrl,
+  price: z.object({ amount: z.number().min(0).max(1_000_000), currency: z.string().regex(/^[A-Z]{3}$/) }).strict(),
+};
+export const standardTerms = z
+  .object({
+    document_url: httpsUrl,
+    document_sha256: z.string().regex(/^[a-f0-9]{64}$/, "64 lowercase hex characters"),
+    summary: z.string().trim().min(10).max(2000),
+    pricing_summary: z.string().trim().min(3).max(1000),
+  })
+  .strict();
 
 export const STUDIO_TOOLS = {
   // apps and catalogue
@@ -222,6 +248,32 @@ export const STUDIO_TOOLS = {
     })
     .strict(),
   unsubscribe_vendor_service: z.object({ subscription_id: uuid, reason: z.string().trim().min(3).max(2000).optional() }).strict(),
+  // My services (/vendor), for service providers (Mynt's vendor role): their onboarding checklist and their firm's own
+  // services, with Create service, Edit service, Set standard terms, Run conformance and List / Unlist service. Each
+  // route checks the offering is the caller's firm's own (list_my_offerings) before it writes; Mynt checks again. A test
+  // credential for a conformance run goes to Mynt only and isn't kept. Revealing or rotating subscribers' signing
+  // secrets, and live endpoints' credentials, stay with the MCP tools.
+  get_vendor_onboarding: z.object({ offering_id: uuid.optional() }).strict(),
+  list_my_offerings: z.object({}).strict(),
+  list_my_subscribers: z.object({ offering_id: uuid.optional(), days: z.number().int().min(1).max(90).optional() }).strict(),
+  list_service_types: z.object({ region: z.string().regex(/^[A-Z]{2}$/).optional() }).strict(),
+  get_my_entity: z.object({}).strict(),
+  create_vendor_offering: z
+    .object({
+      region: z.string().regex(/^[A-Z]{2}$/),
+      service_type: z.string().regex(/^[a-z][a-z0-9_]{0,59}$/),
+      ...vendorOfferingFields,
+    })
+    .strict(),
+  update_vendor_offering: z
+    .object({
+      offering_id: uuid,
+      ...vendorOfferingEdits,
+      listed: z.boolean().optional(),
+      standard_terms: standardTerms.optional(),
+    })
+    .strict(),
+  run_conformance: z.object({ offering_id: uuid, test_credential: z.string().min(1).max(2000).optional() }).strict(),
   get_app_customers: z.object({ app_id: id }).strict(),
   set_app_target_segments: z.object({ app_id: id, segments: z.array(z.object({ product_id: id, segment_id: id }).strict()).max(100) }).strict(),
   // Risk registers: an app's (its Security & risk tab) and a financial product's (its Risk tab). Add risk and
@@ -485,6 +537,9 @@ export const ADMIN_TOOLS = {
   list_whitelist: z.object({}).strict(),
   invite_user: z.object({ email, roles: z.array(z.enum(MYNT_ROLES)).min(1).max(MYNT_ROLES.length) }).strict(),
   add_entity_member: z.object({ email, entity_id: uuid }).strict(),
+  // People: stop an email from using Mynt (what they created stays), and the audit log their Activity tab reads.
+  revoke_user: z.object({ email }).strict(),
+  audit_log: z.object({ limit: z.number().int().min(1).max(500).optional() }).strict(),
   set_entity_status: z.object({ entity_id: uuid, status: z.enum(ENTITY_STATUSES), note: z.string().trim().max(2000).optional() }).strict(),
   // Licences: firms' registered licences by review status, and the decision on one.
   list_license_reviews: z.object({ status: z.enum(["pending", "verified", "rejected", "suspended"]).optional() }).strict(),
@@ -513,6 +568,8 @@ export const ADMIN_TOOLS = {
     .strict(),
   list_vendor_offerings: z.object({ include_unlisted: z.literal(true) }).strict(),
   suspend_vendor_offering: z.object({ offering_id: uuid, suspended: z.boolean(), note: z.string().trim().max(500).optional() }).strict(),
+  // Vendor firms: each firm's onboarding progress (the Vendors section's Vendor firms tab), reading only.
+  get_vendor_onboarding: z.object({ all_firms: z.literal(true) }).strict(),
 } as const;
 
 export type AdminTool = keyof typeof ADMIN_TOOLS;

@@ -88,6 +88,22 @@ const INNOVATOR_TOOLS = [
   "create_pool", "list_pools", "list_withdrawals",
 ];
 
+// A vendor (a peer of builders): the public catalogue, its firm, its own offerings and their onboarding, its
+// agreements with apps, and the ramp adapter tools.
+const VENDOR_TOOLS = [
+  ...INVITATION_TOOLS, ...CHAT_SESSION_TOOLS, "block_firm_recovery", "list_firm_notices",
+  // its firm and licences
+  "get_my_entity", "register_license",
+  // its standard services, and where its onboarding stands
+  "create_vendor_offering", "get_vendor_onboarding", "list_my_offerings", "list_my_subscribers", "list_service_types",
+  "reveal_subscription_secret", "rotate_subscription_secret", "run_conformance", "update_vendor_offering",
+  // the Mynt Ramp's adapter
+  "link_ramp_partner_customer", "set_ramp_adapter",
+  // apps' agreements with its firm
+  "download_agreement_document", "get_agreement_signing_link", "list_agreement_templates", "list_app_agreements",
+  "respond_to_app_agreement", "retire_agreement_template", "sign_app_agreement", "terminate_app_agreement", "upload_agreement_template",
+];
+
 async function connect(store, user = null) {
   const [clientT, serverT] = InMemoryTransport.createLinkedPair();
   await createServer(store, user).connect(serverT);
@@ -146,6 +162,14 @@ test("roles nest: innovator and developer are one builder role, builders are con
   assert.deepEqual(await toolNames(await connect(store, multi)), all);
   const me = (await (await connect(store, developer)).callTool({ name: "whoami", arguments: {} })).content[0].text;
   assert.deepEqual(JSON.parse(me).effective_roles, ["consumer", "developer", "innovator"]);
+});
+
+test("a vendor gets the public catalogue, its firm and its own tools, with its onboarding; admins read any vendor's", async () => {
+  const { store, as, innovator } = await setup();
+  const vendor = await as("Vera", ["vendor"]);
+  assert.deepEqual(await toolNames(await connect(store, vendor)), [...CATALOG_TOOLS, ...VENDOR_TOOLS].sort());
+  assert.ok((await toolNames(await connect(store, await as("Root", ["admin"])))).includes("get_vendor_onboarding"));
+  assert.ok(!(await toolNames(await connect(store, innovator))).includes("get_vendor_onboarding"));
 });
 
 test("a developer can enroll and an innovator can build apps", async () => {

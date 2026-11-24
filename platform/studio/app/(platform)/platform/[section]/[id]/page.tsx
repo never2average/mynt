@@ -18,8 +18,8 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   return route ? { title: ADMIN_TAB_LABELS[route.tab] } : {};
 }
 
-// One workspace, app or firm, opened from its section's list (/platform/workspaces/<id>, /apps/<id>, /firms/<id>).
-// Mynt admins only, else 404; so is any other section with an id, or an id that isn't letters, digits and dashes.
+// One workspace, person, app or firm, opened from its section's list (/platform/workspaces/<id>, /people/<id>, /apps/<id>, /firms/<id>).
+// Mynt admins only, else 404; so is any other section with an id, or an id that isn't one of its kind (lib/admin.ts adminIdOk).
 export default async function Page({ params }: Props) {
   await requireAdminPage();
   const route = await routeOf(params);

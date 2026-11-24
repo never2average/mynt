@@ -201,6 +201,29 @@ describe("each tab", () => {
     expect(schemaOf("{nope")).toEqual({ ok: false, error: "That isn't valid JSON." })
   })
 
+  it("Vendors: a Vendor firms tab with each firm's onboarding progress and next step, in words", () => {
+    const firms = admin.vendorFirmsFrom({
+      firms: [
+        { entity_id: FIRM, name: "Acme Trust", status: "active", vendor_members: 2, services: 1, listed: 1, progress: { done: 8, total: 8, next: null, complete: true } },
+        { entity_id: LIC, name: "B Bureau", status: "active", vendor_members: 1, services: 1, listed: 0, progress: { done: 4, total: 7, next: { key: "licence", title: "Licence verified by Mynt", status: "blocked" }, complete: false } },
+        { entity_id: OFF, name: "C Checks", status: "active", vendor_members: null, services: 0, listed: 0, progress: { done: 2, total: 3, next: { key: "first_service", title: "Create your first service", status: "next" }, complete: false } },
+      ],
+    })!
+    expect(admin.vendorFirmsFrom({})).toBeNull()
+    const data = { serviceTypes: [], offerings: [], firms }
+    const html = renderToStaticMarkup(<VendorsView data={data} initialView="firms" />)
+    expect(html).toContain("Vendor firms")
+    for (const h of ["Firm", "Vendor people", "Services", "Listed", "Onboarding", "Next step"]) expect(html).toContain(`>${h}<`)
+    expect(html).toContain("All 8 steps done")
+    expect(html).toContain("4 of 7 steps done")
+    expect(html).toContain("Licence verified by Mynt (waiting for Mynt)")
+    expect(html).toContain("Create your first service")
+    expect(html).toContain("Not known") // C Checks' vendor people: not given, never 0
+    expect(html).toContain('data-onboarding="complete"')
+    // A Mynt without the checklist says so, never an empty table.
+    expect(renderToStaticMarkup(<VendorsView data={{ ...data, firms: null }} initialView="firms" />)).toContain("data-empty=\"not-available\"")
+  })
+
   it("a tab this Mynt can't answer yet says so; an error is shown as Mynt said it", () => {
     expect(renderToStaticMarkup(<AdminNotReady state={{ kind: "unsupported" }} what="Workspaces" />)).toContain("Workspaces isn&#x27;t available yet")
     expect(renderToStaticMarkup(<AdminNotReady state={{ kind: "error", message: "Couldn't reach Mynt." }} what="Firms" />)).toContain("Couldn&#x27;t reach Mynt.")

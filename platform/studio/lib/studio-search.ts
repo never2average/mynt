@@ -32,6 +32,8 @@ const MOVED: readonly StudioPage[] = [
 // address and redirects there): fixed pages, never an app's id, and not offered in search.
 const RESTRICTED: readonly StudioPage[] = [
   { href: "/platform", label: "Mynt platform admin" },
+  // A service provider's own services (Mynt's vendor role), in its sidebar only.
+  { href: "/vendor", label: "My services" },
   { href: "/admin", label: "Mynt platform admin" },
 ];
 
@@ -101,6 +103,7 @@ export type SearchSources = {
 export const PLATFORM_SEARCH_PAGES: readonly StudioPage[] = [
   { href: "/platform", label: "Platform admin: Overview", keywords: "mynt platform admin attention operations status" },
   { href: "/platform/workspaces", label: "Platform admin: Workspaces", keywords: "all workspaces teams" },
+  { href: "/platform/people", label: "Platform admin: People", keywords: "people users invite person roles access revoke sign in whitelist admins" },
   { href: "/platform/apps", label: "Platform admin: Apps", keywords: "all apps builds hosting remove" },
   { href: "/platform/products", label: "Platform admin: Products", keywords: "all financial products" },
   { href: "/platform/firms", label: "Platform admin: Firms", keywords: "firms licence providers vendors liquidity providers register members" },

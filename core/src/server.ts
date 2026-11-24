@@ -59,6 +59,7 @@ import { registerTreasuryTools } from "./treasury-tools.js";
 import { driftFor, registerCovenantTools } from "./covenants.js";
 import { registerRampAdapterTools } from "./ramp-adapters/index.js";
 import { registerFirmWebhookTools, registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools } from "./vendors.js";
+import { registerVendorOnboardingTools } from "./vendor-onboarding.js";
 import { registerProductRequestInnovatorTools, registerProductRequestTools, requestOffersFor } from "./product-requests.js";
 import { registerVersioningTools } from "./versions.js";
 import { productStage } from "./store.js";
@@ -177,6 +178,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerVendorTools(server, store, user!, { ...ctx.vendors, admin: has("admin") });
     registerRampAdapterTools(server, store, user!, { admin: has("admin"), vendors: ctx.vendors });
   }
+  // Where a vendor's onboarding stands: its own firm's, or (admins) any vendor firm's (vendor-onboarding.ts).
+  if (user && (has("vendor") || has("admin"))) registerVendorOnboardingTools(server, store, user, { admin: has("admin") });
   if (user && hasLiquidityRole(rolesFrom(user))) {
     registerLiquidityTools(server, store, user, rolesFrom(user), ctx.productHealth ?? null, { treasury: ctx.treasury ?? null, identity: ctx.identity ?? null });
     // On-chain treasuries (devnet): Mynt prepares unsigned transactions; the person's own wallet signs them.

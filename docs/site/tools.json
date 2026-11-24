@@ -76,7 +76,7 @@
       "id": "vendors",
       "title": "Vendors",
       "summary": "Standard services per region, vendors' offerings, conformance and subscriptions.",
-      "tools": 23
+      "tools": 24
     },
     {
       "id": "compliance",
@@ -176,11 +176,15 @@
     {
       "role": "vendor",
       "summary": "a firm offering standard services per region (identity, KYC, account data, bureau, e-sign, e-mandate, the ramp) that builders plug into products. A peer of builders.",
-      "tools": 47,
+      "tools": 48,
       "get_started": [
         {
           "tool": "get_my_entity",
           "why": "your firm, as an admin registered it"
+        },
+        {
+          "tool": "get_vendor_onboarding",
+          "why": "where your onboarding stands, step by step, and what to do next"
         },
         {
           "tool": "list_service_types",
@@ -193,10 +197,6 @@
         {
           "tool": "run_conformance",
           "why": "let Mynt test your endpoint against the contract"
-        },
-        {
-          "tool": "list_my_subscribers",
-          "why": "innovators subscribed to your offerings"
         }
       ]
     },
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
-      "tools": 391,
+      "tools": 392,
       "get_started": [
         {
           "tool": "define_region",
@@ -8444,6 +8444,41 @@
         "required": [
           "signature"
         ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "get_vendor_onboarding",
+      "title": "Where a vendor's onboarding stands",
+      "description": "Vendor (your own firm) or admin (any firm, with entity_id; every vendor firm's progress, with all_firms): the ordered onboarding checklist, firm-wide and per offering, each step done, next, not_started or blocked (waiting on Mynt or an earlier step), in plain words with the tool that does it: the firm registered and active, people with the vendor role, a first service, the licence the service type needs (registered and verified by Mynt), the offering (service type, region), Mynt's conformance test (latest run, when, failures), standard terms (version), listed, and the first subscriber (informational, never counted). offering_id narrows it to one offering and adds its history: conformance runs and terms versions. It only reads; a figure Mynt doesn't measure is null.",
+      "area": "vendors",
+      "roles": [
+        "vendor",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "entity_id": {
+            "description": "Admins: the vendor's firm. Vendors may omit it (their own firm).",
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "offering_id": {
+            "description": "One offering, with its conformance runs and terms versions",
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "all_firms": {
+            "description": "Admins: every vendor firm's progress",
+            "type": "boolean",
+            "const": true
+          }
+        },
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
     },
