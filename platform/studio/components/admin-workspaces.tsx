@@ -1,11 +1,14 @@
 "use client"
 
 // Admin → Workspaces: every workspace on Mynt (list_all_workspaces), whichever one the sidebar has picked. A row's
-// Open shows the workspace (admin_get_workspace): its metadata card, then Members, Apps, Invitations and Activity, each
-// a table. There are no actions here: renaming, archiving and relinking a workspace are its owners' (the switcher's
-// menu), and Mynt gives admins no tool for them. Server-renderable.
+// Open shows the workspace (admin_get_workspace): its metadata card with Invite member, then Members (its members and
+// open invitations, each with Change role and Remove: components/admin-members.tsx, the same rules and identity-provider
+// organization its owners' changes go through), Apps (read-only: the platform admin has no app pages) and Activity,
+// each a table. Renaming, archiving and relinking a workspace stay its owners'. Server-renderable.
 import { useCallback, useMemo, useState } from "react"
+import { UserPlus } from "lucide-react"
 
+import { InviteWorkspaceMemberSheet, WorkspaceMembersTable } from "@/components/admin-members"
 import { AdminDetail, AdminList, AdminNotReady, AdminTable, useAdminData } from "@/components/admin-kit"
 import { downloadCsv } from "@/components/licences-view"
 import { matches, usePaged } from "@/components/list-layout"
@@ -91,18 +94,20 @@ export function WorkspacesListView({ workspaces, total, onOpen }: { workspaces: 
   )
 }
 
-type DetailTab = "members" | "apps" | "invitations" | "activity"
+type DetailTab = "members" | "apps" | "activity"
 const DETAIL_TABS: { id: DetailTab; label: string }[] = [
   { id: "members", label: "Members" },
   { id: "apps", label: "Apps" },
-  { id: "invitations", label: "Invitations" },
   { id: "activity", label: "Activity" },
 ]
 
-export function WorkspaceDetailView({ detail, onBack, onOpenApp, initialTab = "members" }: { detail: WorkspaceDetail; onBack: () => void; onOpenApp: (id: string) => void; initialTab?: DetailTab }) {
+export function WorkspaceDetailView({ detail, onBack, onChanged = () => undefined, initialTab = "members", sheetOpen = false }: { detail: WorkspaceDetail; onBack: () => void; onChanged?: () => void; initialTab?: DetailTab; sheetOpen?: boolean }) {
   const [tab, setTab] = useState<DetailTab>(initialTab)
+  const [inviting, setInviting] = useState(sheetOpen)
+  const [dirty, setDirty] = useState(false)
   const w = detail.workspace
   return (
+    <>
     <AdminDetail
       backLabel="Back to workspaces"
       onBack={onBack}
@@ -116,49 +121,55 @@ export function WorkspaceDetailView({ detail, onBack, onOpenApp, initialTab = "m
         ["Created", dateOf(w.createdAt)],
         ["Id", <code key="i" className="text-xs">{w.id}</code>],
       ]}
+      actions={
+        <Button size="sm" onClick={() => setInviting(true)} data-invite-workspace-member>
+          <UserPlus />
+          Invite member
+        </Button>
+      }
       tabs={DETAIL_TABS}
       tab={tab}
       onTab={setTab}
     >
-      {tab === "members" && (
-        <AdminTable head={["Name", "Email", "Role", "Joined"]} rowKeys={detail.members.map((m) => m.userId)} rows={detail.members.map((m) => [m.name ?? "—", m.email ?? "—", words(m.role), dateOf(m.joinedAt)])} empty="No members." />
-      )}
+      {tab === "members" && <WorkspaceMembersTable detail={detail} onChanged={onChanged} />}
       {tab === "apps" && (
         <AdminTable
-          head={["App", "Stage", "Status", "Latest build", ""]}
+          head={["App", "Stage", "Status", "Latest build"]}
           rowKeys={detail.apps.map((a) => a.id)}
           rows={detail.apps.map((a) => [
             a.name,
             <StageMark key="s" stage={a.stage as Stage} />,
             words(a.status),
             a.latestBuild ? `${words(a.latestBuild.status)} · ${dateOf(a.latestBuild.createdAt)}` : "No builds",
-            <Button key="o" size="sm" variant="outline" onClick={() => onOpenApp(a.id)} data-open-app={a.id}>
-              Open app
-            </Button>,
           ])}
           empty="No apps in this workspace."
-        />
-      )}
-      {tab === "invitations" && (
-        <AdminTable
-          head={["Email", "Role", "Mynt role", "Status", "Invited by", "Sent"]}
-          rowKeys={detail.invitations.map((i) => i.id)}
-          rows={detail.invitations.map((i) => [i.email, words(i.role), i.myntRole === "consumer" ? "User" : words(i.myntRole), words(i.status), i.invitedBy ?? "—", dateOf(i.createdAt)])}
-          empty="No invitations."
         />
       )}
       {tab === "activity" && (
         <AdminTable head={["When", "Action", "By", "About"]} rowKeys={detail.activity.map((e) => e.id)} rows={detail.activity.map((e) => [whenOf(e.createdAt), words(e.action), e.actor ?? "Mynt", <code key="t" className="text-xs">{e.target}</code>])} empty="No activity yet." />
       )}
     </AdminDetail>
+      <InviteWorkspaceMemberSheet
+        workspace={w}
+        open={inviting}
+        onClose={() => {
+          setInviting(false)
+          if (dirty) {
+            setDirty(false)
+            onChanged()
+          }
+        }}
+        onDone={() => setDirty(true)}
+      />
+    </>
   )
 }
 
-export function WorkspacesTab({ id, onOpen, onBack, onOpenApp }: { id: string | null; onOpen: (id: string) => void; onBack: () => void; onOpenApp: (id: string) => void }) {
+export function WorkspacesTab({ id, onOpen, onBack }: { id: string | null; onOpen: (id: string) => void; onBack: () => void }) {
   const pickList = useCallback((b: Record<string, unknown>) => (Array.isArray(b.workspaces) ? { rows: b.workspaces as AdminWorkspace[], total: Number(b.total ?? b.workspaces.length) } : undefined), [])
   const pickOne = useCallback((b: Record<string, unknown>) => (b.detail as WorkspaceDetail | undefined) ?? undefined, [])
   const list = useAdminData(id ? null : "/api/admin/workspaces", pickList)
   const one = useAdminData(id ? `/api/admin/workspaces/${encodeURIComponent(id)}` : null, pickOne)
-  if (id) return one.state.kind === "ready" ? <WorkspaceDetailView detail={one.state.data} onBack={onBack} onOpenApp={onOpenApp} /> : <AdminNotReady state={one.state} what="This workspace" />
+  if (id) return one.state.kind === "ready" ? <WorkspaceDetailView detail={one.state.data} onBack={onBack} onChanged={one.reload} /> : <AdminNotReady state={one.state} what="This workspace" />
   return list.state.kind === "ready" ? <WorkspacesListView workspaces={list.state.data.rows} total={list.state.data.total} onOpen={onOpen} /> : <AdminNotReady state={list.state} what="Workspaces" />
 }

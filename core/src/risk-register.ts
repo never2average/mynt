@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { memberFirms } from "./app-agreements.js";
 import type { Db } from "./db.js";
-import { RISK_CATEGORIES, RISK_STATUSES, RISK_SUBJECTS } from "./risk-register-schema.js";
+import { PLATFORM_SUBJECT_ID, RISK_CATEGORIES, RISK_STATUSES, RISK_SUBJECTS } from "./risk-register-schema.js";
 import { effectiveRoles, type App, type ProductRecord, type Store, type User } from "./store.js";
 import { appRole, memberApp } from "./workspaces.js";
 
@@ -13,7 +13,8 @@ import { appRole, memberApp } from "./workspaces.js";
 //
 // Who keeps it: for an app, its workspace's owners and admins (any member reads it); for a product, its own firm (the
 // product's owner, or a builder at the firm it belongs to). A licence provider sponsoring the product (an approved
-// sponsorship) reads the product's register and never writes it. Every change is audited with the app's or product's
+// sponsorship) reads the product's register and never writes it. Mynt's own register (subject_type platform,
+// subject_id "mynt") is kept and read by Mynt's admins only: to anyone else it doesn't exist. Every change is audited with the app's or product's
 // id, and the audit trail is the risk's history (list_risks with risk_id). A review date that has passed on a risk
 // that isn't closed is overdue, and ops_status says so.
 //
@@ -223,7 +224,9 @@ export async function overdueRiskReviews(db: Db): Promise<{ count: number; risks
 
 type Access = { subject: { type: Subject; id: string; name: string }; manage: boolean; app?: App; product?: ProductRecord; audit: Record<string, unknown> };
 
-export function registerRiskRegisterTools(server: McpServer, store: Store, user: User, sides: { builder: boolean; sponsor: boolean }) {
+export const PLATFORM_SUBJECT_NAME = "Mynt platform";
+
+export function registerRiskRegisterTools(server: McpServer, store: Store, user: User, sides: { builder: boolean; sponsor: boolean; admin?: boolean }) {
   // The caller as Mynt knows them now (roles with standing, firm).
   const me = async () => {
     const u = await store.getUser(user.id);
@@ -231,6 +234,11 @@ export function registerRiskRegisterTools(server: McpServer, store: Store, user:
   };
   // What the caller may do with this subject's register: read and manage, read only, or nothing (undefined).
   const access = async (type: Subject, id: string): Promise<Access | undefined> => {
+    if (type === "platform") {
+      // Mynt admins only, read again from the store (a role taken away ends it at once).
+      if (!sides.admin || id !== PLATFORM_SUBJECT_ID || !(await me())?.roles.includes("admin")) return undefined;
+      return { subject: { type, id: PLATFORM_SUBJECT_ID, name: PLATFORM_SUBJECT_NAME }, manage: true, audit: { platform: true } };
+    }
     if (type === "app") {
       if (!sides.builder) return undefined;
       const app = await memberApp(store, user, id);
@@ -249,26 +257,29 @@ export function registerRiskRegisterTools(server: McpServer, store: Store, user:
     }
     return undefined;
   };
-  const noSubject = (type: Subject, id: string) => fail(type === "app" ? `No app '${id}' of yours` : `No product '${id}' whose risk register you can read`);
+  const noSubject = (type: Subject, id: string) =>
+    fail(type === "app" ? `No app '${id}' of yours` : type === "product" ? `No product '${id}' whose risk register you can read` : `No risk register '${id}' you can read`);
+  const ownerSide = (type: Subject) => (type === "app" ? "a member of the app's workspace" : type === "product" ? "a member of the product's firm" : "a Mynt admin");
   // A risk's owner must be someone on the subject's side: a member of the app's workspace, or of the product's firm.
   const ownerOk = async (a: Access, ownerId: string) => {
     if (ownerId === user.id) return true;
     const owner = await store.getUser(ownerId);
     if (!owner) return false;
+    if (a.subject.type === "platform") return owner.roles.includes("admin");
     if (a.app) return Boolean(await memberApp(store, owner, a.app.id));
     return Boolean(a.product && (a.product.owner_id === ownerId || (a.product.entity_id && owner.entity_id === a.product.entity_id)));
   };
 
-  if (sides.builder) {
+  if (sides.builder || sides.admin) {
     server.registerTool(
       "add_risk",
       {
         title: "Add a risk to a register",
         description:
-          "Add a risk to an app's or a financial product's risk register: the app's workspace owners and admins, or the product's own firm. Give a title, a category (security, fraud, vendor, conduct, operational, compliance, credit, liquidity, other), how likely it is and how bad it would be (1-5 each; the score is their product: 1-4 low, 5-9 medium, 10-14 high, 15-25 critical), and optionally a description, the mitigation, its owner (a member of the app's workspace or the product's firm; you by default) and the date it's next reviewed by. It starts open. Audited.",
+          "Add a risk to an app's or a financial product's risk register (the app's workspace owners and admins, or the product's own firm), or, for Mynt's admins, to the platform's own (subject_type platform, subject_id mynt). Give a title, a category (security, fraud, vendor, conduct, operational, compliance, credit, liquidity, other), how likely it is and how bad it would be (1-5 each; the score is their product: 1-4 low, 5-9 medium, 10-14 high, 15-25 critical), and optionally a description, the mitigation, its owner (a member of the app's workspace or the product's firm, a Mynt admin for the platform's; you by default) and the date it's next reviewed by. It starts open. Audited.",
         inputSchema: {
           subject_type: z.enum(RISK_SUBJECTS),
-          subject_id: z.string().min(1).max(200).describe("The app's id, or the product's id"),
+          subject_id: z.string().min(1).max(200).describe("The app's id, the product's id, or mynt for the platform's register"),
           title: z.string().trim().min(3).max(200),
           category: z.enum(RISK_CATEGORIES),
           description: z.string().trim().max(4000).optional(),
@@ -284,7 +295,7 @@ export function registerRiskRegisterTools(server: McpServer, store: Store, user:
         if (!a) return noSubject(subject_type, subject_id);
         if (!a.manage) return fail(subject_type === "app" ? "Only the workspace's owners and admins keep its apps' risk registers" : "Only the product's own firm keeps its risk register; its sponsors read it");
         const owner = owner_user_id ?? user.id;
-        if (!(await ownerOk(a, owner))) return fail(`The risk's owner must be a member of ${subject_type === "app" ? "the app's workspace" : "the product's firm"}`);
+        if (!(await ownerOk(a, owner))) return fail(`The risk's owner must be ${ownerSide(subject_type)}`);
         const id = randomUUID();
         await store.db.query(
           `INSERT INTO ${T}.risk_register (id, subject_type, subject_id, title, category, description, likelihood, impact, owner_user_id, mitigation, review_by, created_by)
@@ -320,7 +331,7 @@ export function registerRiskRegisterTools(server: McpServer, store: Store, user:
         if (!before || !a) return fail(`No risk '${risk_id}' on a register you keep`);
         if (!a.manage) return fail(before.subject_type === "app" ? "Only the workspace's owners and admins keep its apps' risk registers" : "Only the product's own firm keeps its risk register; its sponsors read it");
         if ((status === "accepted" || status === "closed") && status !== before.status && !note) return fail(`Say why the risk is ${status} (note)`);
-        if (owner_user_id && !(await ownerOk(a, owner_user_id))) return fail(`The risk's owner must be a member of ${before.subject_type === "app" ? "the app's workspace" : "the product's firm"}`);
+        if (owner_user_id && !(await ownerOk(a, owner_user_id))) return fail(`The risk's owner must be ${ownerSide(before.subject_type)}`);
         const next: Record<string, unknown> = { status, mitigation, likelihood, impact, owner_user_id, review_by };
         const was: Record<string, unknown> = { status: before.status, mitigation: before.mitigation, likelihood: before.likelihood, impact: before.impact, owner_user_id: before.owner?.user_id ?? null, review_by: before.review_by };
         const changes = Object.fromEntries(Object.entries(next).filter(([k, v]) => v !== undefined && v !== was[k]).map(([k, v]) => [k, { from: was[k], to: v }]));
@@ -339,7 +350,7 @@ export function registerRiskRegisterTools(server: McpServer, store: Store, user:
     {
       title: "A risk register",
       description:
-        "An app's or a financial product's risk register: each risk with its category, likelihood × impact score and level, owner, mitigation, status, review-by date and whether that review is overdue, newest first, with counts by status. Any member of the app's workspace reads an app's; the product's own firm, and the licence providers sponsoring it (read-only), read a product's. can_manage says whether you may add and review risks. Filter by status, category or overdue_only. With risk_id: that one risk and its history (every change, from the audit trail). For an app, signals lists what Mynt measures around it, each a list or not available with why: fraud, vendors (failing conformance, erroring calls, ended subscriptions or contracts), conduct (open findings from marketing and complaints audits of its agreements) and products (sales paused by a covenant, or drifted).",
+        "An app's or a financial product's risk register: each risk with its category, likelihood × impact score and level, owner, mitigation, status, review-by date and whether that review is overdue, newest first, with counts by status. Any member of the app's workspace reads an app's; the product's own firm, and the licence providers sponsoring it (read-only), read a product's; Mynt's admins read and keep the platform's (subject_type platform, subject_id mynt). can_manage says whether you may add and review risks. Filter by status, category or overdue_only. With risk_id: that one risk and its history (every change, from the audit trail). For an app, signals lists what Mynt measures around it, each a list or not available with why: fraud, vendors (failing conformance, erroring calls, ended subscriptions or contracts), conduct (open findings from marketing and complaints audits of its agreements) and products (sales paused by a covenant, or drifted).",
       inputSchema: {
         subject_type: z.enum(RISK_SUBJECTS),
         subject_id: z.string().min(1).max(200),
@@ -379,4 +390,43 @@ export function registerRiskRegisterTools(server: McpServer, store: Store, user:
       return json({ subject: a.subject, can_manage: a.manage, risks, counts, ...(a.app ? { signals: await appRiskSignals(store, a.app) } : {}) });
     },
   );
+
+  if (sides.admin) {
+    server.registerTool(
+      "admin_list_risks",
+      {
+        title: "Open risks across Mynt",
+        description:
+          "Admin: the risks not yet closed on every register (apps', products' and the platform's own), or one kind (subject_type): counts by level (critical, high, medium, low), how many are overdue for review, the total, and the highest-scored risks (score, then the earliest review date), each with its subject's name.",
+        inputSchema: { limit: z.number().int().min(1).max(100).default(20), subject_type: z.enum(RISK_SUBJECTS).optional() },
+        annotations: { readOnlyHint: true },
+      },
+      async ({ limit, subject_type }) => {
+        if (!(await me())?.roles.includes("admin")) return fail("Only Mynt's admins read every risk register");
+        const open = `r.status <> 'closed' AND ($1::text IS NULL OR r.subject_type = $1)`;
+        const all = (await store.db.query(`SELECT r.likelihood, r.impact, r.review_by FROM ${T}.risk_register r WHERE ${open}`, [subject_type ?? null])).rows;
+        const counts = { critical: 0, high: 0, medium: 0, low: 0 };
+        for (const x of all) counts[riskLevel(Number(x.likelihood) * Number(x.impact))] += 1;
+        const overdue = all.filter((x) => x.review_by && day(x.review_by)! < today()).length;
+        const { rows } = await store.db.query(
+          `${SELECT} WHERE ${open} ORDER BY r.likelihood * r.impact DESC, r.review_by ASC NULLS LAST, r.created_at DESC LIMIT $2`,
+          [subject_type ?? null, limit],
+        );
+        const risks = [];
+        for (const row of rows) {
+          const risk = toRisk(row);
+          // Where it lives, so a reader can link to it: an app's workspace, a product's own firm (null for a reference product).
+          if (risk.subject_type === "platform") risks.push({ ...risk, subject_name: PLATFORM_SUBJECT_NAME });
+          else if (risk.subject_type === "app") {
+            const a = (await store.db.query(`SELECT name, workspace_id::text AS workspace_id FROM ${T}.apps WHERE id::text = $1`, [risk.subject_id])).rows[0];
+            risks.push({ ...risk, subject_name: (a?.name as string | undefined) ?? null, workspace_id: (a?.workspace_id as string | null | undefined) ?? null });
+          } else {
+            const p = await store.getProduct(risk.subject_id);
+            risks.push({ ...risk, subject_name: p?.product.name ?? null, firm_id: p?.entity_id ?? null });
+          }
+        }
+        return json({ counts, overdue, total: all.length, risks });
+      },
+    );
+  }
 }

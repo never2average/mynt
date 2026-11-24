@@ -20,9 +20,8 @@ const { PlatformSidebarView, PLATFORM_SECTIONS } = await import("@/components/pl
 const { OverviewView } = await import("@/components/admin-overview");
 const { OperationalSettingsView } = await import("@/components/admin-settings");
 const { WorkspacesListView, WorkspaceDetailView } = await import("@/components/admin-workspaces");
-const { AppsListView, AppDetailView, RemoveAppSheet } = await import("@/components/admin-apps");
-const { ProductsListView } = await import("@/components/admin-products");
-const { FirmsListView, FirmDetailView, RegisterFirmSheet, InviteMemberSheet, FirmStatusSheet } = await import("@/components/admin-firms");
+const { FirmsListView, FirmDetailView, RegisterFirmSheet, FirmStatusSheet } = await import("@/components/admin-firms");
+const { InviteFirmMemberSheet } = await import("@/components/admin-members");
 const { LicencesAdminView, ReviewLicenceSheet, decisionsFor } = await import("@/components/admin-licences");
 const { VendorsView, AddServiceTypeSheet, SuspendOfferingSheet, schemaOf } = await import("@/components/admin-vendors");
 const { AdminNotReady } = await import("@/components/admin-kit");
@@ -41,7 +40,6 @@ beforeAll(() => {
 afterEach(() => cleanup());
 
 const WS = "11111111-1111-4111-8111-111111111111";
-const APP = "22222222-2222-4222-8222-222222222222";
 const FIRM = "33333333-3333-4333-8333-333333333333";
 const LIC = "44444444-4444-4444-8444-444444444444";
 const OFF = "55555555-5555-4555-8555-555555555555";
@@ -88,7 +86,6 @@ const FIRM_ROW: import("@/lib/admin").Firm = {
   types: ["license_provider"],
   createdAt: "2026-10-01T00:00:00.000Z",
 }
-const APP_ROW: import("@/lib/admin").AdminApp = { id: APP, name: "Saver", status: "draft", stage: "idea", workspace: { id: WS, name: "Team" }, owner: { id: "u", name: "Ana", email: "ana@example.com" }, productIds: ["p1"], latestBuild: null, builds: 0, hosting: null, createdAt: null }
 const LICENCE: import("@/lib/admin").AdminLicence = { id: LIC, entityId: FIRM, firm: "Acme Trust", region: "US", regulator: "occ", licenceType: "trust_charter", jurisdiction: null, number: "T-1", validFrom: null, validTo: "2027-01-01", status: "pending", reviewNote: null, createdAt: null }
 
 describe("the sidebar and header", () => {
@@ -117,7 +114,7 @@ describe("the sidebar and header", () => {
 describe("each tab", () => {
   it("the platform sidebar names every section; an unknown section opens Overview", () => {
     const html = renderToStaticMarkup(<TooltipProvider><SidebarProvider><PlatformSidebarView pathname="/platform/licences" account={{ name: null, email: null }} /></SidebarProvider></TooltipProvider>)
-    for (const t of admin.ADMIN_TABS) expect(html).toContain(admin.ADMIN_TAB_LABELS[t])
+    for (const t of admin.ADMIN_TABS) expect(html).toContain(admin.ADMIN_TAB_LABELS[t].replace("&", "&amp;"))
     expect(PLATFORM_SECTIONS.map((x) => x.tab)).toEqual([...admin.ADMIN_TABS])
     expect(admin.adminTabOf("nope")).toBe("overview")
     expect(admin.adminHref("firms", FIRM)).toBe(`/platform/firms/${FIRM}`)
@@ -147,26 +144,15 @@ describe("each tab", () => {
     expect(html).not.toContain("<input")
   })
 
-  it("Workspaces: list and detail (metadata card, Members, Apps, Invitations, Activity)", () => {
+  it("Workspaces: list and detail (metadata card with Invite member, Members, Apps, Activity)", () => {
     const rows = admin.workspacesFrom({ workspaces: [{ id: WS, name: "Team", status: "frozen", members: 2, apps: 1, owner: { id: "u", email: "ana@example.com" } }], total: 3 })!
     const list = renderToStaticMarkup(<WorkspacesListView workspaces={rows.rows} total={rows.total} onOpen={() => undefined} />)
     for (const s of ["Team", "ana@example.com", "Frozen", "Import", "Export CSV", "The newest 1 of 3", `data-open-workspace="${WS}"`]) expect(list).toContain(s)
     const detail = admin.workspaceDetailFrom({ workspace: { id: WS, name: "Team", status: "active" }, members: [{ user_id: "u", email: "ana@example.com", role: "owner" }], apps: [], invitations: [], activity: [] })!
-    const html = renderToStaticMarkup(<WorkspaceDetailView detail={detail} onBack={() => undefined} onOpenApp={() => undefined} />)
-    for (const s of ["data-metadata-card", "Back to workspaces", "Members", "Apps", "Invitations", "Activity", "ana@example.com"]) expect(html).toContain(s)
-  })
-
-  it("Apps: list with stage and hosting; detail with Builds, Hosting, Products and Remove test app", () => {
-    const list = renderToStaticMarkup(<AppsListView apps={[APP_ROW]} total={1} onOpen={() => undefined} />)
-    for (const s of ["Saver", "Team", "Not hosted", "No builds"]) expect(list).toContain(s)
-    const html = renderToStaticMarkup(<AppDetailView detail={{ app: APP_ROW, products: [{ id: "p1", name: "Fixed deposit" }], builds: null, hosting: null }} onBack={() => undefined} onRemoved={() => undefined} />)
-    for (const s of ["data-metadata-card", "Remove test app", "Builds", "Hosting", "Products", "runs no coding agents"]) expect(html).toContain(s)
-  })
-
-  it("Products: every product with its firm and sponsors; a reference product is Mynt's", () => {
-    const page = admin.productsFrom({ products: [{ id: "p1", name: "Fixed deposit", status: "published", stage: "production", firm: null, sponsors: [{ entity_id: FIRM, name: "Acme Trust", status: "pending" }] }], total: 1 })!
-    const html = renderToStaticMarkup(<ProductsListView products={page.rows} total={page.total} />)
-    for (const s of ["Fixed deposit", "Mynt reference", "Acme Trust (pending)"]) expect(html).toContain(s)
+    const html = renderToStaticMarkup(<WorkspaceDetailView detail={detail} onBack={() => undefined} />)
+    for (const s of ["data-metadata-card", "Back to workspaces", "Invite member", "Members", "Apps", "Activity", "ana@example.com"]) expect(html).toContain(s)
+    // No app pages in the platform admin: a workspace's apps are read-only rows.
+    expect(html).not.toContain("data-open-app")
   })
 
   it("Firms: type from members' roles, Register firm; detail with Invite member and Set firm status, and its tables", () => {
@@ -174,7 +160,11 @@ describe("each tab", () => {
     const list = renderToStaticMarkup(<FirmsListView firms={[FIRM_ROW]} onOpen={() => undefined} />)
     for (const s of ["Acme Trust", "Licence provider", "Register firm"]) expect(list).toContain(s)
     const html = renderToStaticMarkup(<FirmDetailView detail={{ firm: FIRM_ROW, offerings: null, products: [] }} onBack={() => undefined} />)
-    for (const s of ["data-metadata-card", "Invite member", "Set firm status", "Members", "Licences", "Offerings", "Products", "lee@example.com"]) expect(html).toContain(s)
+    for (const s of ["data-metadata-card", "Invite member", "Set firm status", "Members", "Licences", "Offerings", "Products", "lee@example.com", "Change role", "Remove", "Signed in"]) expect(html).toContain(s)
+    // Products: the firm's own, read-only (the platform admin has no products section).
+    const products = admin.productsFrom({ products: [{ id: "p1", name: "Fixed deposit", product_line: "deposits", region: "US", status: "published", stage: "production", archived: true, firm: { id: FIRM, name: "Acme Trust" }, sponsors: [{ entity_id: "x", name: "Beta Bank", status: "pending" }] }], total: 1 })!
+    const tab = renderToStaticMarkup(<FirmDetailView detail={{ firm: FIRM_ROW, offerings: null, products: products.rows }} onBack={() => undefined} initialTab="products" />)
+    for (const s of ["Fixed deposit", "Owns it", "Deposits", "US", "Archived", "Beta Bank (pending)", 'data-product="p1"']) expect(tab).toContain(s)
   })
 
   it("Licences: opens on the ones waiting for review, with Verify licence and Reject licence", () => {
@@ -241,13 +231,13 @@ describe("each action sheet posts to its route", () => {
     expect(document.querySelector("[data-sheet-result]")?.textContent).toBe("Done by Mynt.")
   })
 
-  it("Invite member, with the roles picked", async () => {
+  it("Invite member, with the firm's role picked (only what the firm is)", async () => {
     const { f, calls } = fetcher()
-    render(<InviteMemberSheet firm={FIRM_ROW} open onClose={() => undefined} onDone={() => undefined} fetcher={f} />)
+    render(<InviteFirmMemberSheet firm={FIRM_ROW} open onClose={() => undefined} onDone={() => undefined} fetcher={f} />)
+    expect(document.querySelector('[data-role="vendor"]')).toBeNull()
     type("[data-member-email]", "new@example.com")
-    fireEvent.click(document.querySelector('[data-role="vendor"]')!)
     await act(async () => void fireEvent.submit(document.querySelector("[data-invite-member-form]")!))
-    expect(calls).toEqual([{ url: `/api/admin/firms/${FIRM}/members`, body: { email: "new@example.com", roles: ["license_provider", "vendor"] } }])
+    expect(calls).toEqual([{ url: `/api/admin/firms/${FIRM}/members`, body: { action: "invite", email: "new@example.com", roles: ["license_provider"] } }])
   })
 
   it("Set firm status", async () => {
@@ -296,23 +286,5 @@ describe("each action sheet posts to its route", () => {
     type("[data-suspend-note]", "Conformance keeps failing")
     await act(async () => void fireEvent.submit(document.querySelector("[data-suspend-offering-form]")!))
     expect(calls).toEqual([{ url: `/api/admin/vendors/offerings/${OFF}`, body: { suspended: true, note: "Conformance keeps failing" } }])
-  })
-
-  it("Remove test app: Check what would go, then Remove app with a reason", async () => {
-    const calls: unknown[] = []
-    const replies = [{ removal: { kind: "plan", rows: [["api_keys", 2]], builds: 1, programs: 0 } }, { removal: { kind: "removed" } }]
-    const f = vi.fn(async (_url: string, init?: RequestInit) => {
-      calls.push(JSON.parse(String(init?.body)))
-      return new Response(JSON.stringify(replies.shift()), { status: 200 })
-    }) as unknown as typeof fetch
-    const removed = vi.fn()
-    render(<RemoveAppSheet app={APP_ROW} open onClose={() => undefined} onRemoved={removed} fetcher={f} />)
-    await click("[data-remove-check]")
-    expect(document.querySelector("[data-remove-plan]")?.textContent).toContain("api_keys")
-    type("[data-remove-reason]", "Test app from the demo")
-    await act(async () => void fireEvent.submit(document.querySelector("[data-remove-plan]")!))
-    expect(calls).toEqual([{ confirm: false }, { confirm: true, reason: "Test app from the demo" }])
-    expect(removed).toHaveBeenCalled()
-    expect(document.querySelector("[data-sheet-result]")?.textContent).toContain("is removed")
   })
 })

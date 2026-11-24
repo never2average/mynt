@@ -1,11 +1,8 @@
-// The platform admin's People section (/platform/people): everyone who may sign in to Mynt (its invites) and everyone
-// who has, from Mynt's list_whitelist, with their firm from list_entities. Sign-in is invite-only, so inviting someone
-// is what lets them in. Pure, for the route, the views and the tests.
-//
-// invite_user sets an email's roles outright, so every change here starts from the roles the person already has:
-// inviting someone already on the list adds the roles picked (never drops one), and only Change roles with
-// "Replace" chosen explicitly sets them to exactly what was picked. Mynt's admin role is never one of the role
-// checkboxes: it's a separate "Make Mynt admin" box, off by default.
+// Who may sign in to Mynt (its invites) and who has, from Mynt's list_whitelist, with their firm from list_entities,
+// for the platform admin's Members tabs and Security & risk's owner choices (lib/admin-members.ts, lib/admin-risks.ts).
+// Sign-in is invite-only. invite_user sets an email's roles outright, so every change starts from the roles the
+// person already has and says what it adds and removes; Mynt's admin role is never given from the Members tabs.
+// Pure, for the routes, the views and the tests.
 
 type Obj = Record<string, unknown>
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v)
@@ -23,17 +20,6 @@ export const ROLE_LABELS: Record<string, string> = {
   liquidity_provider: "Liquidity provider",
   admin: "Mynt admin",
 }
-// The role checkboxes: every role but Mynt's admin role (and innovator, the builder role's other name).
-export const PERSON_ROLES = ["developer", "vendor", "license_provider", "liquidity_provider", "consumer"] as const
-export type PersonRole = (typeof PERSON_ROLES)[number]
-export const PERSON_ROLE_OPTIONS: { value: PersonRole; label: string }[] = [
-  { value: "developer", label: "Innovator (builds products and apps)" },
-  { value: "vendor", label: "Vendor (offers standard services)" },
-  { value: "license_provider", label: "Licence provider (sponsors products)" },
-  { value: "liquidity_provider", label: "Liquidity provider (puts capital into pools)" },
-  { value: "consumer", label: "Consumer (uses apps built on Mynt)" },
-]
-export const ADMIN_WARNING = "A Mynt admin can change every workspace, firm, product and setting on Mynt, and let anyone else in."
 export const SIGN_IN_PREVIEW = "They can sign in with this email straight away."
 
 const roleLabel = (r: string) => ROLE_LABELS[r] ?? r.replace(/_/g, " ")
@@ -41,11 +27,7 @@ const roleLabel = (r: string) => ROLE_LABELS[r] ?? r.replace(/_/g, " ")
 export const rolesWords = (roles: string[]) => [...new Set(roles.map(roleLabel))].join(", ")
 
 export type PersonStatus = "signed_in" | "invited" | "no_access"
-export const PERSON_STATUS_LABELS: Record<PersonStatus, string> = { signed_in: "Signed in", invited: "Invited", no_access: "No access" }
-// The Status filter's words, longer than the column's.
-export const PERSON_STATUS_FILTERS: Record<PersonStatus, string> = { signed_in: "Signed in", invited: "Invited, not yet signed in", no_access: "No access (removed from the list)" }
-
-export type PersonFirm = { id: string; name: string }
+type PersonFirm = { id: string; name: string }
 export type Person = {
   id: string // "e" and the email's hex, or the account's id when it has no email: stable from invite to sign-in
   email: string | null
@@ -59,10 +41,7 @@ export type Person = {
 }
 
 const hex = (s: string) => Array.from(new TextEncoder().encode(s), (b) => b.toString(16).padStart(2, "0")).join("")
-export const personIdOf = (email: string | null, userId: string | null) => (email ? `e${hex(email.toLowerCase())}` : (userId ?? ""))
-// A person's id in the address: an account's uuid, or "e" and an email's hex (an email is at most 320 characters).
-export const PERSON_ID = /^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|e(?:[0-9a-f]{2}){3,320})$/
-
+const personIdOf = (email: string | null, userId: string | null) => (email ? `e${hex(email.toLowerCase())}` : (userId ?? ""))
 export type Whitelist = { publicSignup: boolean | null; people: Person[] }
 
 /** list_whitelist's answer (and list_entities', when this Mynt has it) as one row per person. */
@@ -115,40 +94,9 @@ export function peopleFrom(whitelist: unknown, entities: unknown = null): Whitel
 
 export type RoleChange = { roles: string[]; already: string[]; adding: string[]; removing: string[] }
 
-/** Adding roles to what someone has: nothing they had is dropped. */
-export function addRoles(had: string[], picked: string[]): RoleChange {
-  const roles = [...new Set([...had, ...picked])]
-  const known = (r: string) => had.includes(r) || (r === "developer" && had.includes("innovator")) || (r === "innovator" && had.includes("developer"))
-  return { roles, already: had, adding: [...new Set(picked)].filter((r) => !known(r)), removing: [] }
-}
-
-/** Setting someone's roles to exactly what was picked (chosen explicitly): says what goes. */
-export function replaceRoles(had: string[], picked: string[]): RoleChange {
-  const roles = [...new Set(picked)]
-  const same = (a: string, b: string) => a === b || (["developer", "innovator"].includes(a) && ["developer", "innovator"].includes(b))
-  return { roles, already: had, adding: roles.filter((r) => !had.some((h) => same(h, r))), removing: had.filter((h) => !roles.some((r) => same(h, r))) }
-}
-
 /** "Already has: …; adding: …." in words. */
 export function changeWords(c: RoleChange): string {
   const parts = [c.already.length ? `Already has: ${rolesWords(c.already)}` : null, c.adding.length ? `adding: ${rolesWords(c.adding)}` : "nothing new to add", c.removing.length ? `removing: ${rolesWords(c.removing)}` : null]
   const line = parts.filter(Boolean).join("; ")
   return `${line.charAt(0).toUpperCase()}${line.slice(1)}.`
-}
-
-export type PersonActivity = { id: string; action: string; target: string; actor: string | null; createdAt: string | null }
-
-/** audit_log's entries about a person (its target, or the email in its details) or by them. */
-export function personActivityFrom(log: unknown, person: Pick<Person, "email" | "userId">): PersonActivity[] | null {
-  if (!Array.isArray(log)) return null
-  const email = person.email?.toLowerCase() ?? null
-  return log
-    .filter(isObj)
-    .filter((e) => {
-      const d = isObj(e.details) ? e.details : {}
-      const about = (email && (String(e.target ?? "").toLowerCase() === email || String(d.email ?? "").toLowerCase() === email)) || (person.userId && e.target === person.userId)
-      const by = (email && String(e.actor_email ?? "").toLowerCase() === email) || (person.userId && e.actor_id === person.userId)
-      return Boolean(about || by)
-    })
-    .map((e) => ({ id: String(e.id ?? ""), action: String(e.action ?? ""), target: String(e.target ?? ""), actor: str(e.actor_email), createdAt: str(e.created_at) }))
 }

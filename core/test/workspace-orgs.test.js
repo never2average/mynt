@@ -508,6 +508,54 @@ test("Mynt's changes go to the provider: accepting in Mynt, roles (an owner is i
   assert.deepEqual(list.join_requests.map((r) => r.email), ["newbie@example.com"]);
 });
 
+test("a Mynt admin manages any workspace's members by its owners' rules and through its organization, without being in it", async () => {
+  const w = await setup();
+  const ana = await w.person("Ana");
+  const ben = await w.person("Ben");
+  const ada = await w.person("Ada", ["admin"], { signedIn: false });
+  const made = await ana.call("create_workspace", { name: "Team" });
+  const orgId = await w.orgOf(made.id);
+  assert.equal(await w.role(made.id, ada.user.id), null, "the admin isn't in it");
+  // Only admins have the tools.
+  assert.match((await ana.call("admin_invite_workspace_member", { workspace_id: made.id, email: ben.email })).error, /not found|Unknown tool|isn't/i);
+
+  // Invite: the organization's invitation, sent without an inviter (the admin has no account in the provider).
+  const inv = await ada.call("admin_invite_workspace_member", { workspace_id: made.id, email: ben.email, role: "admin" });
+  assert.equal(inv.role, "admin");
+  const sent = w.dir.invitations.at(-1);
+  assert.deepEqual([sent.org, sent.email, sent.role, sent.inviter], [orgId, ben.email, "admin", null]);
+  assert.equal((await w.audits("invite_to_workspace")).at(-1).details.by_admin, true);
+  // Accepting it applies the owners' rules: the admin's invite stands as an owner's.
+  const [mine] = (await ben.call("list_my_invitations")).invitations;
+  assert.equal((await ben.call("accept_workspace_invite", { invite_id: mine.id })).role, "admin");
+  assert.equal(await w.role(made.id, ben.user.id), "admin");
+  assert.ok(w.dir.called("addMember", orgId, ben.subject, "admin"));
+
+  // Change a role: the organization agrees first; the last owner is kept.
+  await ada.call("admin_change_workspace_member_role", { workspace_id: made.id, user_id: ben.user.id, role: "owner" });
+  assert.equal(w.member(orgId, ben.subject), "admin");
+  assert.equal(await w.role(made.id, ben.user.id), "owner");
+  await ada.call("admin_change_workspace_member_role", { workspace_id: made.id, user_id: ben.user.id, role: "member" });
+  assert.equal(w.member(orgId, ben.subject), "member");
+  assert.match((await ada.call("admin_change_workspace_member_role", { workspace_id: made.id, user_id: ana.user.id, role: "member" })).error, /needs an owner/);
+  assert.match((await ada.call("admin_remove_workspace_member", { workspace_id: made.id, user_id: ana.user.id })).error, /can't lose its last one/);
+  assert.equal(await w.role(made.id, ana.user.id), "owner");
+
+  // Remove: out of the organization too, and offboarded.
+  const out = await ada.call("admin_remove_workspace_member", { workspace_id: made.id, user_id: ben.user.id });
+  assert.equal(out.removed, true);
+  assert.equal(w.member(orgId, ben.subject), null);
+  assert.equal(await w.role(made.id, ben.user.id), null);
+  assert.equal((await w.audits("remove_workspace_member")).at(-1).details.by_admin, true);
+
+  // Withdraw an invite: the organization's invitation goes too.
+  const cara = await ada.call("admin_invite_workspace_member", { workspace_id: made.id, email: "cara@example.com" });
+  assert.equal((await ada.call("admin_revoke_workspace_invite", { invite_id: cara.id })).revoked, true);
+  assert.equal(w.dir.invitations.at(-1).status, "revoked");
+  // Any workspace, but one that exists.
+  assert.match((await ada.call("admin_invite_workspace_member", { workspace_id: randomUUID(), email: "x@example.com" })).error, /No workspace with id/);
+});
+
 // ---- reconciling ----
 
 test("reconciling fixes drift, each removal confirmed; someone in Mynt only is added to the provider, never taken out; new organizations are adopted at sign-in", async () => {

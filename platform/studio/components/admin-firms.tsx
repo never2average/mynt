@@ -4,11 +4,14 @@
 // provider or an innovator by its members' roles. Firms are added by hand by Mynt's admins: Register firm
 // (register_firm) adds one with no members. A row's Open shows the firm: its metadata card with Invite member (an
 // email allowed to sign in with the roles picked, invite_user, then added to the firm, add_entity_member) and Set firm
-// status (set_entity_status), then Members, Licences, Offerings and Products, each a table. What a firm keeps to
+// status (set_entity_status), then Members (each with Change role and Remove: components/admin-members.tsx), Licences,
+// Offerings and Products (the firm's products, owned or sponsored: the platform admin has no products list of its own;
+// /platform/firms/<id>?tab=products opens it), each a table. What a firm keeps to
 // itself (its encrypted health books, its signatures) isn't here: admins can't read or co-sign them. Server-renderable.
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { Building2, ShieldAlert, UserPlus } from "lucide-react"
 
+import { FirmMembersTable, InviteFirmMemberSheet } from "@/components/admin-members"
 import { AdminDetail, AdminList, AdminNotReady, AdminSheet, AdminTable, Field, fieldClass, useAdminAction, useAdminData } from "@/components/admin-kit"
 import { downloadCsv } from "@/components/licences-view"
 import { matches, usePaged } from "@/components/list-layout"
@@ -20,14 +23,6 @@ import type { Stage } from "@/lib/workspaces"
 
 const typesOf = (f: Firm) => f.types.map((t) => FIRM_TYPE_LABELS[t]).join(", ") || "No members yet"
 export const LEGAL_FORMS = ["company_private", "company_public", "llp", "partnership", "sole_proprietorship", "trust", "cooperative", "society", "nonprofit_company", "statutory_corporation", "government_entity", "foreign_branch"] as const
-// The roles a firm's people are invited with (Mynt's admin role is never given from here).
-export const MEMBER_ROLES = [
-  { value: "developer", label: "Innovator (builds products and apps)" },
-  { value: "vendor", label: "Vendor (offers standard services)" },
-  { value: "license_provider", label: "Licence provider (sponsors products)" },
-  { value: "liquidity_provider", label: "Liquidity provider (puts capital into pools)" },
-] as const
-
 export function FirmStatus({ status }: { status: string }) {
   return <StatusDot tone={status === "active" ? "green" : status === "suspended" ? "amber" : "red"} label={words(status)} data-firm-status={status} />
 }
@@ -86,48 +81,6 @@ export function RegisterFirmSheet({ open, onClose, onDone, fetcher }: { open: bo
         <div>
           <Button type="submit" disabled={busy || !name.trim()} data-register-firm-submit>
             {busy ? "Registering…" : "Register firm"}
-          </Button>
-        </div>
-      </form>
-    </AdminSheet>
-  )
-}
-
-/** Invite member: an email allowed to sign in with the roles picked, then added to the firm. */
-export function InviteMemberSheet({ firm, open, onClose, onDone, fetcher }: { firm: Firm; open: boolean; onClose: () => void; onDone: () => void; fetcher?: typeof fetch }) {
-  const { busy, error, result, run, reset } = useAdminAction(fetcher)
-  const [email, setEmail] = useState("")
-  const [roles, setRoles] = useState<string[]>(() => (firm.types.length ? firm.types.map((t) => (t === "builder" ? "developer" : t)) : ["developer"]))
-  useEffect(() => {
-    if (open) reset()
-  }, [open, reset])
-  const toggle = (r: string) => setRoles((rs) => (rs.includes(r) ? rs.filter((x) => x !== r) : [...rs, r]))
-  return (
-    <AdminSheet id="invite-member" open={open} onClose={onClose} title="Invite member" description={`Lets someone sign in to Mynt with the roles you pick, and makes them a member of ${firm.name}. Its members are told.`} error={error} result={result}>
-      <form
-        className="flex flex-col gap-3"
-        data-invite-member-form
-        onSubmit={async (e) => {
-          e.preventDefault()
-          const r = await run(`/api/admin/firms/${encodeURIComponent(firm.id)}/members`, { email: email.trim(), roles })
-          if (r?.ok) onDone()
-        }}
-      >
-        <Field label="Email">
-          <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} maxLength={320} required data-member-email />
-        </Field>
-        <fieldset className="flex flex-col gap-2 text-sm" data-member-roles>
-          <legend className="mb-1">Roles</legend>
-          {MEMBER_ROLES.map((r) => (
-            <label key={r.value} className="flex items-center gap-2">
-              <input type="checkbox" checked={roles.includes(r.value)} onChange={() => toggle(r.value)} data-role={r.value} />
-              {r.label}
-            </label>
-          ))}
-        </fieldset>
-        <div>
-          <Button type="submit" disabled={busy || !email.trim() || !roles.length} data-invite-member-submit>
-            {busy ? "Inviting…" : "Invite member"}
           </Button>
         </div>
       </form>
@@ -253,7 +206,9 @@ export function FirmsListView({ firms, onOpen, onChanged = () => undefined, shee
   )
 }
 
-type DetailTab = "members" | "licences" | "offerings" | "products"
+export type FirmDetailTab = "members" | "licences" | "offerings" | "products"
+type DetailTab = FirmDetailTab
+export const FIRM_DETAIL_TABS: readonly FirmDetailTab[] = ["members", "licences", "offerings", "products"]
 const DETAIL_TABS: { id: DetailTab; label: string }[] = [
   { id: "members", label: "Members" },
   { id: "licences", label: "Licences" },
@@ -305,7 +260,7 @@ export function FirmDetailView({ detail, onBack, onChanged = () => undefined, in
         onTab={setTab}
       >
         {tab === "members" && (
-          <AdminTable head={["Name", "Email", "Roles"]} rowKeys={f.members.map((m) => m.id)} rows={f.members.map((m) => [m.name ?? "—", m.email ?? "—", m.roles.map(words).join(", ") || "—"])} empty="No members yet. Invite its people." />
+          <FirmMembersTable firm={f} onChanged={onChanged} />
         )}
         {tab === "licences" && (
           <AdminTable
@@ -331,27 +286,38 @@ export function FirmDetailView({ detail, onBack, onChanged = () => undefined, in
             <p className="p-4 text-sm text-muted-foreground">The products across firms aren&apos;t available on this Mynt yet.</p>
           ) : (
             <AdminTable
-              head={["Product", "This firm", "Stage", "Status"]}
+              head={["Product", "This firm", "Line", "Region", "Stage", "Status", "Archived", "Sponsors"]}
               rowKeys={detail.products.map((p) => p.id)}
               rows={detail.products.map((p) => {
                 const s = p.sponsors.find((x) => x.entityId === f.id)
-                return [p.name, p.firm?.id === f.id ? "Owns it" : `Sponsors it${s?.status === "pending" ? " (pending)" : ""}`, <StageMark key="s" stage={p.stage as Stage} />, words(p.status)]
+                return [
+                  <span key="n" id={`product-${p.id}`} data-product={p.id}>
+                    {p.name}
+                  </span>,
+                  p.firm?.id === f.id ? "Owns it" : `Sponsors it${s?.status === "pending" ? " (pending)" : ""}`,
+                  words(p.productLine),
+                  p.region ?? "—",
+                  <StageMark key="s" stage={p.stage as Stage} />,
+                  words(p.status),
+                  p.archived ? "Archived" : "No",
+                  p.sponsors.map((x) => (x.status === "pending" ? `${x.name} (pending)` : x.name)).join(", ") || "None",
+                ]
               })}
               empty="This firm owns and sponsors no products."
             />
           ))}
       </AdminDetail>
-      <InviteMemberSheet firm={f} open={open === "invite"} onClose={close} onDone={() => setDirty(true)} />
+      <InviteFirmMemberSheet firm={f} open={open === "invite"} onClose={close} onDone={() => setDirty(true)} />
       <FirmStatusSheet firm={f} open={open === "status"} onClose={close} onDone={() => setDirty(true)} />
     </>
   )
 }
 
-export function FirmsTab({ id, onOpen, onBack }: { id: string | null; onOpen: (id: string) => void; onBack: () => void }) {
+export function FirmsTab({ id, onOpen, onBack, initialTab }: { id: string | null; onOpen: (id: string) => void; onBack: () => void; initialTab?: FirmDetailTab }) {
   const pickList = useCallback((b: Record<string, unknown>) => (Array.isArray(b.firms) ? (b.firms as Firm[]) : undefined), [])
   const pickOne = useCallback((b: Record<string, unknown>) => (b.firm ? ({ firm: b.firm, offerings: b.offerings ?? null, products: b.products ?? null } as FirmDetail) : undefined), [])
   const list = useAdminData(id ? null : "/api/admin/firms", pickList)
   const one = useAdminData(id ? `/api/admin/firms/${encodeURIComponent(id)}` : null, pickOne)
-  if (id) return one.state.kind === "ready" ? <FirmDetailView detail={one.state.data} onBack={onBack} onChanged={one.reload} /> : <AdminNotReady state={one.state} what="This firm" />
+  if (id) return one.state.kind === "ready" ? <FirmDetailView detail={one.state.data} onBack={onBack} onChanged={one.reload} initialTab={initialTab} /> : <AdminNotReady state={one.state} what="This firm" />
   return list.state.kind === "ready" ? <FirmsListView firms={list.state.data} onOpen={onOpen} onChanged={list.reload} /> : <AdminNotReady state={list.state} what="Firms" />
 }

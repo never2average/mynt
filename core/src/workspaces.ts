@@ -797,23 +797,24 @@ class Refused extends Error {}
 
 type ClerkAllowlist = { allow(email: string): Promise<string | null>; disallow?(email: string): Promise<unknown> };
 
-export function registerWorkspaceTools(
-  server: McpServer,
-  store: Store,
-  user: User,
-  ctx: { clerk?: ClerkAllowlist | null; offboarding?: OffboardServices } = {},
-) {
+type WorkspaceCtx = { clerk?: ClerkAllowlist | null; offboarding?: OffboardServices };
+
+// What managing a workspace's members takes, for its owners and admins (registerWorkspaceTools) and for Mynt's admins
+// on any workspace (registerWorkspaceAdminTools): the same rules, the same organization calls, the same offboarding.
+// With asAdmin, the account acts with an owner's authority on every workspace without being in it, and each audit
+// entry says so (by_admin: true).
+function membershipOps(store: Store, user: User, ctx: WorkspaceCtx, asAdmin: boolean) {
   const clerk = ctx.clerk ?? null;
   const db = store.db;
-  const audit = (action: string, target: string, details: unknown = {}) => store.audit(user.id, action, target, details);
-  const notYours = (id: string) => `No workspace of yours with id '${id}'`;
+  const audit = (action: string, target: string, details: Record<string, unknown> = {}) => store.audit(user.id, action, target, asAdmin ? { ...details, by_admin: true } : details);
+  const notYours = (id: string) => (asAdmin ? `No workspace with id '${id}'` : `No workspace of yours with id '${id}'`);
 
   // Membership changes run in a transaction holding the workspace's row, so "is this the last owner?" can't race.
   const locked = async <R>(workspaceId: string, f: (tx: Q, myRole: WorkspaceRole) => Promise<R>): Promise<R> =>
     inTransaction(db, async (tx) => {
       if (!isUuid(workspaceId) || !(await one(tx, `SELECT id FROM ${T}.workspaces WHERE id::text = $1 FOR UPDATE`, [workspaceId])))
         throw new Refused(notYours(workspaceId));
-      const role = await workspaceRole(tx, workspaceId, user.id);
+      const role = asAdmin ? "owner" : await workspaceRole(tx, workspaceId, user.id);
       if (!role) throw new Refused(notYours(workspaceId));
       return f(tx, role);
     });
@@ -838,6 +839,163 @@ export function registerWorkspaceTools(
         [workspaceId],
       ))!.n,
     );
+
+  const invite = async ({ workspace_id, email, role, mynt_role }: { workspace_id: string; email: string; role: WorkspaceRole; mynt_role: InviteMyntRole }) =>
+    attempt(async () => {
+      const lower = email.toLowerCase();
+      const myntRole = INVITE_MYNT_ROLES[mynt_role];
+      const invite = await locked(workspace_id, async (tx, mine) => {
+        if (role !== "member") manager(mine);
+        if (role === "owner" && mine !== "owner") throw new Refused("Only an owner can invite another owner");
+        if (mynt_role === "user" && role !== "member") throw new Refused("Someone invited as a user can't build or manage, so they can only be a member");
+        const frozen = await frozenReason(tx, workspace_id);
+        if (frozen) throw new Refused(frozen);
+        // One count at a time per sender, whichever workspace: the daily cap can't be raced past.
+        await tx.query("SELECT pg_advisory_xact_lock(hashtext('mynt.workspace_invites:' || $1))", [user.id]);
+        const sent = Number(
+          (await one(tx, `SELECT count(*)::int AS n FROM ${T}.workspace_invites WHERE invited_by = $1 AND created_at > now() - interval '1 day'`, [user.id]))!.n,
+        );
+        if (sent >= WORKSPACE_INVITES_PER_DAY) throw new Refused(`You've sent ${WORKSPACE_INVITES_PER_DAY} workspace invites in the last day; try again later`);
+        const already = await one(
+          tx,
+          `SELECT 1 FROM ${T}.workspace_members m JOIN ${T}.users u ON u.id = m.user_id WHERE m.workspace_id::text = $1 AND u.email = $2`,
+          [workspace_id, lower],
+        );
+        if (already) throw new Refused(`${lower} is already a member`);
+        // A lapsed invite to the same address makes way for this one.
+        const lapsed = (
+          await tx.query(
+            `UPDATE ${T}.workspace_invites SET revoked_at = now() WHERE workspace_id::text = $1 AND email = $2 AND accepted_at IS NULL AND revoked_at IS NULL
+               AND created_at <= now() - interval '${WORKSPACE_INVITE_DAYS} days' RETURNING id::text AS id`,
+            [workspace_id, lower],
+          )
+        ).rows as { id: string }[];
+        if (await one(tx, `SELECT 1 FROM ${T}.workspace_invites WHERE workspace_id::text = $1 AND email = $2 AND accepted_at IS NULL AND revoked_at IS NULL`, [workspace_id, lower]))
+          throw new Refused(`${lower} already has an open invite; revoke it first to change the role`);
+        const id = randomUUID();
+        await tx.query(`INSERT INTO ${T}.workspace_invites (id, workspace_id, email, role, invited_by, mynt_role) VALUES ($1, $2, $3, $4, $5, $6)`, [
+          id,
+          workspace_id,
+          lower,
+          role,
+          user.id,
+          myntRole,
+        ]);
+        return { id, workspace_id, email: lower, role, mynt_role, lapsed };
+      });
+      for (const l of invite.lapsed) await revokeOrgInvitation(db, l.id);
+      delete (invite as { lapsed?: unknown }).lapsed;
+      // An organization's invitation, which the invitee accepts with the identity provider (or in Mynt). A Mynt admin
+      // outside the organization invites without an inviter (subjectOf is null): the provider allows that.
+      const org = orgs ? await orgOf(db, workspace_id) : null;
+      if (org) {
+        try {
+          const sent = await orgs!.invite(org, {
+            email: lower,
+            role: orgRole(role),
+            inviter: await subjectOf(db, user.id),
+            metadata: { mynt_role, mynt_workspace_role: role, mynt_invite_id: invite.id },
+            redirectUrl: process.env.STUDIO_URL ?? null,
+          });
+          await db.query(`UPDATE ${T}.workspace_invites SET external_invitation_id = $2 WHERE id::text = $1`, [invite.id, sent.id]);
+        } catch (e) {
+          await db.query(`UPDATE ${T}.workspace_invites SET revoked_at = now() WHERE id::text = $1`, [invite.id]);
+          throw new Refused(`The invitation couldn't be sent just now (${(e as Error).message.slice(0, 120)}); try again`);
+        }
+      }
+      await audit("invite_to_workspace", workspace_id, { invite_id: invite.id, email: lower, role, mynt_role });
+      // Someone new may now sign in to Mynt (as a user), unless an admin revoked them.
+      const mynt = await admitWorkspaceInvitee(store, lower, { id: invite.id, invited_by: user.id }, clerk);
+      const offer = mynt_role === "developer" ? "accepting it makes them a developer if their account is just a user's" : "it adds no Mynt role";
+      const note = {
+        new: `${lower} can now sign in to Mynt as a user and accept the invite (list_my_invitations); ${offer}`,
+        already: `${lower} sees the invite when they sign in (list_my_invitations) and accepts or declines it; ${offer}`,
+        blocked: `${lower} was removed from Mynt by an admin, so they can't sign in: an admin has to let them back first`,
+      }[mynt.admitted];
+      return json({ ...invite, mynt_access: mynt.admitted, note, ...(mynt.warning ? { warning: mynt.warning } : {}) });
+    });
+
+  const revoke = async ({ invite_id }: { invite_id: string }) =>
+    attempt(async () => {
+      const inv = isUuid(invite_id) ? await one(db, `SELECT workspace_id::text AS workspace_id FROM ${T}.workspace_invites WHERE id::text = $1`, [invite_id]) : undefined;
+      if (!inv) return fail(`No open invite with id '${invite_id}'`);
+      const ws = inv.workspace_id as string;
+      const revoked = await locked(ws, async (tx, mine) => {
+        const r = await one(
+          tx,
+          `SELECT email, role, invited_by::text AS invited_by FROM ${T}.workspace_invites WHERE id::text = $1 AND accepted_at IS NULL AND revoked_at IS NULL`,
+          [invite_id],
+        );
+        if (!r) throw new Refused(`No open invite with id '${invite_id}'`);
+        if (r.invited_by !== user.id) manager(mine);
+        if (r.role === "owner" && mine !== "owner") throw new Refused("Only an owner can withdraw an invite for an owner");
+        const ext = (await one(tx, `SELECT external_invitation_id FROM ${T}.workspace_invites WHERE id::text = $1`, [invite_id]))?.external_invitation_id as string | null;
+        const org = orgs && ext ? await orgOf(tx, ws) : null;
+        // The requester is the actor's account in the identity provider; a Mynt admin who has none revokes without one.
+        if (org) await orgs!.revokeInvitation(org, ext!, await subjectOf(tx, user.id));
+        await tx.query(`UPDATE ${T}.workspace_invites SET revoked_at = now() WHERE id::text = $1`, [invite_id]);
+        return r;
+      });
+      await audit("revoke_workspace_invite", ws, { invite_id, email: revoked.email });
+      // The way onto Mynt this invite opened closes with it, if nobody used or changed it.
+      await releaseMyntInvite(store, invite_id, revoked.email as string, user.id, clerk);
+      return json({ invite_id, revoked: true });
+    });
+
+  const changeRole = async ({ workspace_id, user_id, role }: { workspace_id: string; user_id: string; role: WorkspaceRole }) =>
+    attempt(async () => {
+      const from = await locked(workspace_id, async (tx, mine) => {
+        manager(mine);
+        const current = await workspaceRole(tx, workspace_id, user_id);
+        if (!current) throw new Refused(`'${user_id}' isn't a member of this workspace`);
+        if ((current === "owner" || role === "owner") && mine !== "owner") throw new Refused("Only an owner can make or unmake an owner");
+        if (current === "owner" && role !== "owner" && (await owners(tx, workspace_id)) <= 1)
+          throw new Refused("A workspace needs an owner: make someone else an owner first");
+        // The organization agrees first (an owner is its admin): if that fails, nothing changes.
+        const org = orgs ? await liveOrgOf(tx, workspace_id) : null;
+        const subject = org ? await subjectOf(tx, user_id) : null;
+        if (org && subject) await orgs!.setMemberRole(org, subject, orgRole(role));
+        await tx.query(`UPDATE ${T}.workspace_members SET role = $3 WHERE workspace_id::text = $1 AND user_id::text = $2`, [workspace_id, user_id, role]);
+        return current;
+      });
+      await audit("change_member_role", workspace_id, { user_id, from, to: role });
+      if (from !== "member" && role === "member") await offboard(store, ctx.offboarding ?? {}, workspace_id, user_id, user.id, "demotion");
+      return json({ workspace_id, user_id, role });
+    });
+
+  const remove = async ({ workspace_id, user_id }: { workspace_id: string; user_id: string }) =>
+    attempt(async () => {
+      if (!asAdmin && user_id === user.id) return fail("To leave a workspace yourself, use leave_workspace");
+      const was = await locked(workspace_id, async (tx, mine) => {
+        manager(mine);
+        const current = await workspaceRole(tx, workspace_id, user_id);
+        if (!current) throw new Refused(`'${user_id}' isn't a member of this workspace`);
+        if (current === "owner" && mine !== "owner") throw new Refused("Only an owner can remove an owner");
+        if (current === "owner" && (await owners(tx, workspace_id)) <= 1) throw new Refused("A workspace needs an owner: it can't lose its last one");
+        const org = orgs ? await liveOrgOf(tx, workspace_id) : null;
+        const subject = org ? await subjectOf(tx, user_id) : null;
+        if (org && subject) await orgs!.removeMember(org, subject);
+        await tx.query(`DELETE FROM ${T}.workspace_members WHERE workspace_id::text = $1 AND user_id::text = $2`, [workspace_id, user_id]);
+        return current;
+      });
+      await audit("remove_workspace_member", workspace_id, { user_id, role: was });
+      const cut = await offboard(store, ctx.offboarding ?? {}, workspace_id, user_id, user.id);
+      return json({ workspace_id, user_id, removed: true, access_cut: cut });
+    });
+
+  return { clerk, db, audit, notYours, locked, attempt, manager, owners, invite, revoke, changeRole, remove };
+}
+
+const INVITE_INPUT = {
+  workspace_id: z.string(),
+  email: z.email(),
+  role: z.enum(WORKSPACE_ROLES).default("member"),
+  mynt_role: z.enum(["developer", "user"]).default("developer"),
+};
+
+export function registerWorkspaceTools(server: McpServer, store: Store, user: User, ctx: WorkspaceCtx = {}) {
+  const ops = membershipOps(store, user, ctx, false);
+  const { clerk, db, audit, notYours, locked, attempt, manager, owners } = ops;
 
   server.registerTool(
     "list_workspaces",
@@ -972,86 +1130,9 @@ export function registerWorkspaceTools(
       title: "Invite someone to a workspace",
       description:
         "Developer: invite an email address to a workspace you're in. role is their place in the workspace: member (anyone may invite members), admin (owners and admins only) or owner (owners only). mynt_role is what accepting offers them on Mynt: developer (build apps; given only to an account that's just a user, never a firm's or an admin's) or user (nothing more; they can be in the workspace but can't build). Someone new can sign in to Mynt at once, as a user; they see the invite with list_my_invitations and accept or decline it. Someone a Mynt admin removed stays out. Up to 20 invites a day each. When the workspace is an organization of the identity provider, the provider emails them its invitation (accepting it there or in Mynt both apply these same rules); otherwise Mynt doesn't email them: tell them yourself.",
-      inputSchema: {
-        workspace_id: z.string(),
-        email: z.email(),
-        role: z.enum(WORKSPACE_ROLES).default("member"),
-        mynt_role: z.enum(["developer", "user"]).default("developer"),
-      },
+      inputSchema: INVITE_INPUT,
     },
-    async ({ workspace_id, email, role, mynt_role }) =>
-      attempt(async () => {
-        const lower = email.toLowerCase();
-        const myntRole = INVITE_MYNT_ROLES[mynt_role as InviteMyntRole];
-        const invite = await locked(workspace_id, async (tx, mine) => {
-          if (role !== "member") manager(mine);
-          if (role === "owner" && mine !== "owner") throw new Refused("Only an owner can invite another owner");
-          if (mynt_role === "user" && role !== "member") throw new Refused("Someone invited as a user can't build or manage, so they can only be a member");
-          const frozen = await frozenReason(tx, workspace_id);
-          if (frozen) throw new Refused(frozen);
-          // One count at a time per sender, whichever workspace: the daily cap can't be raced past.
-          await tx.query("SELECT pg_advisory_xact_lock(hashtext('mynt.workspace_invites:' || $1))", [user.id]);
-          const sent = Number(
-            (await one(tx, `SELECT count(*)::int AS n FROM ${T}.workspace_invites WHERE invited_by = $1 AND created_at > now() - interval '1 day'`, [user.id]))!.n,
-          );
-          if (sent >= WORKSPACE_INVITES_PER_DAY) throw new Refused(`You've sent ${WORKSPACE_INVITES_PER_DAY} workspace invites in the last day; try again later`);
-          const already = await one(
-            tx,
-            `SELECT 1 FROM ${T}.workspace_members m JOIN ${T}.users u ON u.id = m.user_id WHERE m.workspace_id::text = $1 AND u.email = $2`,
-            [workspace_id, lower],
-          );
-          if (already) throw new Refused(`${lower} is already a member`);
-          // A lapsed invite to the same address makes way for this one.
-          const lapsed = (
-            await tx.query(
-              `UPDATE ${T}.workspace_invites SET revoked_at = now() WHERE workspace_id::text = $1 AND email = $2 AND accepted_at IS NULL AND revoked_at IS NULL
-                 AND created_at <= now() - interval '${WORKSPACE_INVITE_DAYS} days' RETURNING id::text AS id`,
-              [workspace_id, lower],
-            )
-          ).rows as { id: string }[];
-          if (await one(tx, `SELECT 1 FROM ${T}.workspace_invites WHERE workspace_id::text = $1 AND email = $2 AND accepted_at IS NULL AND revoked_at IS NULL`, [workspace_id, lower]))
-            throw new Refused(`${lower} already has an open invite; revoke it first to change the role`);
-          const id = randomUUID();
-          await tx.query(`INSERT INTO ${T}.workspace_invites (id, workspace_id, email, role, invited_by, mynt_role) VALUES ($1, $2, $3, $4, $5, $6)`, [
-            id,
-            workspace_id,
-            lower,
-            role,
-            user.id,
-            myntRole,
-          ]);
-          return { id, workspace_id, email: lower, role, mynt_role, lapsed };
-        });
-        for (const l of invite.lapsed) await revokeOrgInvitation(db, l.id);
-        delete (invite as { lapsed?: unknown }).lapsed;
-        // An organization's invitation, which the invitee accepts with the identity provider (or in Mynt).
-        const org = orgs ? await orgOf(db, workspace_id) : null;
-        if (org) {
-          try {
-            const sent = await orgs!.invite(org, {
-              email: lower,
-              role: orgRole(role),
-              inviter: await subjectOf(db, user.id),
-              metadata: { mynt_role, mynt_workspace_role: role, mynt_invite_id: invite.id },
-              redirectUrl: process.env.STUDIO_URL ?? null,
-            });
-            await db.query(`UPDATE ${T}.workspace_invites SET external_invitation_id = $2 WHERE id::text = $1`, [invite.id, sent.id]);
-          } catch (e) {
-            await db.query(`UPDATE ${T}.workspace_invites SET revoked_at = now() WHERE id::text = $1`, [invite.id]);
-            throw new Refused(`The invitation couldn't be sent just now (${(e as Error).message.slice(0, 120)}); try again`);
-          }
-        }
-        await audit("invite_to_workspace", workspace_id, { invite_id: invite.id, email: lower, role, mynt_role });
-        // Someone new may now sign in to Mynt (as a user), unless an admin revoked them.
-        const mynt = await admitWorkspaceInvitee(store, lower, { id: invite.id, invited_by: user.id }, clerk);
-        const offer = mynt_role === "developer" ? "accepting it makes them a developer if their account is just a user's" : "it adds no Mynt role";
-        const note = {
-          new: `${lower} can now sign in to Mynt as a user and accept the invite (list_my_invitations); ${offer}`,
-          already: `${lower} sees the invite when they sign in (list_my_invitations) and accepts or declines it; ${offer}`,
-          blocked: `${lower} was removed from Mynt by an admin, so they can't sign in: an admin has to let them back first`,
-        }[mynt.admitted];
-        return json({ ...invite, mynt_access: mynt.admitted, note, ...(mynt.warning ? { warning: mynt.warning } : {}) });
-      }),
+    (args) => ops.invite(args),
   );
 
   server.registerTool(
@@ -1061,31 +1142,7 @@ export function registerWorkspaceTools(
       description: "Developer: withdraw an invite that hasn't been accepted yet: your own, or anyone's if you're an owner or admin (list_workspace_members shows them).",
       inputSchema: { invite_id: z.string() },
     },
-    async ({ invite_id }) =>
-      attempt(async () => {
-        const inv = isUuid(invite_id) ? await one(db, `SELECT workspace_id::text AS workspace_id FROM ${T}.workspace_invites WHERE id::text = $1`, [invite_id]) : undefined;
-        if (!inv) return fail(`No open invite with id '${invite_id}'`);
-        const ws = inv.workspace_id as string;
-        const revoked = await locked(ws, async (tx, mine) => {
-          const r = await one(
-            tx,
-            `SELECT email, role, invited_by::text AS invited_by FROM ${T}.workspace_invites WHERE id::text = $1 AND accepted_at IS NULL AND revoked_at IS NULL`,
-            [invite_id],
-          );
-          if (!r) throw new Refused(`No open invite with id '${invite_id}'`);
-          if (r.invited_by !== user.id) manager(mine);
-          if (r.role === "owner" && mine !== "owner") throw new Refused("Only an owner can withdraw an invite for an owner");
-          const ext = (await one(tx, `SELECT external_invitation_id FROM ${T}.workspace_invites WHERE id::text = $1`, [invite_id]))?.external_invitation_id as string | null;
-          const org = orgs && ext ? await orgOf(tx, ws) : null;
-          if (org) await orgs!.revokeInvitation(org, ext!, await subjectOf(tx, user.id));
-          await tx.query(`UPDATE ${T}.workspace_invites SET revoked_at = now() WHERE id::text = $1`, [invite_id]);
-          return r;
-        });
-        await audit("revoke_workspace_invite", ws, { invite_id, email: revoked.email });
-        // The way onto Mynt this invite opened closes with it, if nobody used or changed it.
-        await releaseMyntInvite(store, invite_id, revoked.email as string, user.id, clerk);
-        return json({ invite_id, revoked: true });
-      }),
+    (args) => ops.revoke(args),
   );
 
   server.registerTool(
@@ -1096,26 +1153,7 @@ export function registerWorkspaceTools(
         "Developer: owners and admins change a member's role. Only owners make or unmake owners, and a workspace always keeps at least one owner.",
       inputSchema: { workspace_id: z.string(), user_id: z.string(), role: z.enum(WORKSPACE_ROLES) },
     },
-    async ({ workspace_id, user_id, role }) =>
-      attempt(async () => {
-        const from = await locked(workspace_id, async (tx, mine) => {
-          manager(mine);
-          const current = await workspaceRole(tx, workspace_id, user_id);
-          if (!current) throw new Refused(`'${user_id}' isn't a member of this workspace`);
-          if ((current === "owner" || role === "owner") && mine !== "owner") throw new Refused("Only an owner can make or unmake an owner");
-          if (current === "owner" && role !== "owner" && (await owners(tx, workspace_id)) <= 1)
-            throw new Refused("A workspace needs an owner: make someone else an owner first");
-          // The organization agrees first (an owner is its admin): if that fails, nothing changes.
-          const org = orgs ? await liveOrgOf(tx, workspace_id) : null;
-          const subject = org ? await subjectOf(tx, user_id) : null;
-          if (org && subject) await orgs!.setMemberRole(org, subject, orgRole(role));
-          await tx.query(`UPDATE ${T}.workspace_members SET role = $3 WHERE workspace_id::text = $1 AND user_id::text = $2`, [workspace_id, user_id, role]);
-          return current;
-        });
-        await audit("change_member_role", workspace_id, { user_id, from, to: role });
-        if (from !== "member" && role === "member") await offboard(store, ctx.offboarding ?? {}, workspace_id, user_id, user.id, "demotion");
-        return json({ workspace_id, user_id, role });
-      }),
+    (args) => ops.changeRole(args),
   );
 
   server.registerTool(
@@ -1127,25 +1165,7 @@ export function registerWorkspaceTools(
       inputSchema: { workspace_id: z.string(), user_id: z.string() },
       annotations: { destructiveHint: true },
     },
-    async ({ workspace_id, user_id }) =>
-      attempt(async () => {
-        if (user_id === user.id) return fail("To leave a workspace yourself, use leave_workspace");
-        const was = await locked(workspace_id, async (tx, mine) => {
-          manager(mine);
-          const current = await workspaceRole(tx, workspace_id, user_id);
-          if (!current) throw new Refused(`'${user_id}' isn't a member of this workspace`);
-          if (current === "owner" && mine !== "owner") throw new Refused("Only an owner can remove an owner");
-          if (current === "owner" && (await owners(tx, workspace_id)) <= 1) throw new Refused("A workspace needs an owner: it can't lose its last one");
-          const org = orgs ? await liveOrgOf(tx, workspace_id) : null;
-          const subject = org ? await subjectOf(tx, user_id) : null;
-          if (org && subject) await orgs!.removeMember(org, subject);
-          await tx.query(`DELETE FROM ${T}.workspace_members WHERE workspace_id::text = $1 AND user_id::text = $2`, [workspace_id, user_id]);
-          return current;
-        });
-        await audit("remove_workspace_member", workspace_id, { user_id, role: was });
-        const cut = await offboard(store, ctx.offboarding ?? {}, workspace_id, user_id, user.id);
-        return json({ workspace_id, user_id, removed: true, access_cut: cut });
-      }),
+    (args) => ops.remove(args),
   );
 
   server.registerTool(
@@ -1278,6 +1298,53 @@ export function registerWorkspaceTools(
   );
 }
 
+// Mynt's admins manage any workspace's members (Mynt Studio's platform admin, a workspace's Members tab) without being
+// in it: the owners' own rules and path (membershipOps), with an owner's authority. Invitations still go through the
+// workspace's organization in the identity provider, so it stays in step; the last owner is still kept; removing or
+// demoting someone still cuts their access (offboard). Every change is audited under the owners' action names with
+// by_admin: true.
+export function registerWorkspaceAdminTools(server: McpServer, store: Store, user: User, ctx: WorkspaceCtx = {}) {
+  const ops = membershipOps(store, user, ctx, true);
+  server.registerTool(
+    "admin_invite_workspace_member",
+    {
+      title: "Invite someone to any workspace",
+      description:
+        "Admin: invite an email address to any workspace, with an owner's authority (role owner, admin or member; mynt_role developer or user), by the same rules and path as invite_to_workspace: the workspace's organization in the identity provider sends its invitation, a frozen workspace refuses, and they accept it themselves. Audited with by_admin.",
+      inputSchema: INVITE_INPUT,
+    },
+    (args) => ops.invite(args),
+  );
+  server.registerTool(
+    "admin_revoke_workspace_invite",
+    {
+      title: "Withdraw any workspace invite",
+      description: "Admin: withdraw an open invite to any workspace (admin_get_workspace lists them), as revoke_workspace_invite does for its owners.",
+      inputSchema: { invite_id: z.string() },
+    },
+    (args) => ops.revoke(args),
+  );
+  server.registerTool(
+    "admin_change_workspace_member_role",
+    {
+      title: "Change a member's role in any workspace",
+      description: "Admin: change a member's role in any workspace (owner, admin or member), as change_member_role does for its owners: the organization agrees first, a workspace always keeps an owner, and a demotion to member cuts their elevated access.",
+      inputSchema: { workspace_id: z.string(), user_id: z.string(), role: z.enum(WORKSPACE_ROLES) },
+    },
+    (args) => ops.changeRole(args),
+  );
+  server.registerTool(
+    "admin_remove_workspace_member",
+    {
+      title: "Remove someone from any workspace",
+      description: "Admin: remove a member from any workspace, as remove_workspace_member does for its owners: never its last owner; they leave its organization and lose access to its apps and builds at once.",
+      inputSchema: { workspace_id: z.string(), user_id: z.string() },
+      annotations: { destructiveHint: true },
+    },
+    (args) => ops.remove(args),
+  );
+}
+
 // The invitee's side, for anyone signed in (a user invited to a workspace needn't be a developer yet): see the open
 // invites to their own address, and accept or decline each.
 export type OpenInvite = { id: string; workspace_id: string; email: string; role: WorkspaceRole; mynt_role: string; created_at: string; invited_by: string | null };
@@ -1305,7 +1372,9 @@ export type Acceptance =
 // (null: from Mynt, so they're added there). Reported by the provider, a role to set there is returned
 // (set_org_role) for the caller to send once its transaction is over.
 export async function acceptInvite(tx: Q, inv: OpenInvite, user: { id: string; email: string | null }, inOrg: OrgRole | null = null): Promise<Acceptance> {
-  const sender = inv.invited_by ? await workspaceRole(tx, inv.workspace_id, inv.invited_by) : null;
+  // A Mynt admin's invite (admin_invite_workspace_member) stands as an owner's while they're still an admin.
+  const senderIsAdmin = inv.invited_by ? (((await one(tx, `SELECT roles FROM ${T}.users WHERE id::text = $1`, [inv.invited_by]))?.roles as string[] | undefined) ?? []).includes("admin") : false;
+  const sender = inv.invited_by ? (senderIsAdmin ? "owner" : await workspaceRole(tx, inv.workspace_id, inv.invited_by)) : null;
   const allowed = sender && (inv.role === "member" || (inv.role === "admin" && sender !== "member") || (inv.role === "owner" && sender === "owner"));
   if (!allowed) {
     await tx.query(`UPDATE ${T}.workspace_invites SET revoked_at = now() WHERE id::text = $1`, [inv.id]);

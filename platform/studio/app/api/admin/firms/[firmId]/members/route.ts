@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { isUuid, writeBody } from "@/lib/admin-routes";
+import { hasTools, isUuid, UNSUPPORTED, writeBody } from "@/lib/admin-routes";
+import { FIRM_MEMBER_ROLES, firmRoleChange } from "@/lib/admin-members";
+import { changeWords } from "@/lib/people";
 import { callAdminTool, MyntRefusedError } from "@/lib/studio-server";
 import { ADMIN_TOOLS } from "@/lib/studio-tools";
 import { asAdmin, json } from "@/lib/studio-route";
@@ -8,39 +10,65 @@ export const dynamic = "force-dynamic";
 
 type Params = { params: Promise<{ firmId: string }> };
 
-// Admin → Firms → Invite member: lets the email sign in to Mynt with the roles picked (invite_user), then makes them
-// a member of the firm (add_entity_member). Someone who hasn't signed in yet can't be added: they're allowed in, and
-// the admin adds them once they have (the same action again). The firm's members are told by Mynt when someone joins.
-// A firm's people: never Mynt's admin role from here.
-const FIRM_ROLES = ["consumer", "developer", "innovator", "vendor", "license_provider", "liquidity_provider"] as const;
-const Body = z.object({ email: ADMIN_TOOLS.invite_user.shape.email, roles: z.array(z.enum(FIRM_ROLES)).min(1).max(FIRM_ROLES.length) }).strict();
+// Admin → Firms → one firm → Members: its three labelled actions, each from its own sheet.
+// - invite: lets the email sign in to Mynt with the roles picked (invite_user, keeping every role they already have),
+//   then makes them a member of the firm (add_entity_member). Someone who hasn't signed in yet can't be added: they're
+//   allowed in, and the admin adds them once they have (the same action again). The firm's members are told by Mynt.
+// - change_role: their roles for this firm are exactly the ones picked; every other role they hold (Mynt admin, user)
+//   stays (invite_user with the merged list).
+// - remove: takes them out of the firm (remove_entity_member); they keep their sign-in and roles.
+// A firm's people: never Mynt's admin role from here (it isn't one of FIRM_MEMBER_ROLES).
+const email = ADMIN_TOOLS.invite_user.shape.email;
+const roles = z.array(z.enum(FIRM_MEMBER_ROLES)).min(1).max(FIRM_MEMBER_ROLES.length);
+const Body = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("invite"), email, roles }).strict(),
+  z.object({ action: z.literal("change_role"), email, roles }).strict(),
+  z.object({ action: z.literal("remove"), email, confirm_email: email }).strict(),
+]);
+
+type Whitelist = { whitelist?: { email?: string; roles?: string[] }[] } | null;
 
 export async function POST(req: Request, { params }: Params) {
   const { firmId } = await params;
   if (!isUuid(firmId)) return json({ error: "bad_request" }, 400);
   const w = await writeBody(req, Body);
   if (!w.ok) return w.res;
-  const { email, roles } = w.body;
-  return asAdmin("inviting a firm member", async (mynt, session) => {
+  const body = w.body;
+  if (body.action === "remove" && body.confirm_email !== body.email) return json({ error: "bad_request", message: "Type their email again to confirm." }, 400);
+  return asAdmin("changing a firm's members", async (mynt, session) => {
+    if (body.action === "remove") {
+      if (!(await hasTools(mynt, "remove_entity_member"))) return json(UNSUPPORTED);
+      await callAdminTool(mynt, session, "remove_entity_member", { entity_id: firmId, email: body.email });
+      return json({ ok: true, message: `${body.email} is no longer a member of the firm. They can still sign in with their roles; its members were told.` });
+    }
+    const list = (await callAdminTool(mynt, session, "list_whitelist", {})) as Whitelist;
+    const had = (list?.whitelist ?? []).find((i) => i.email?.toLowerCase() === body.email)?.roles ?? [];
+
+    if (body.action === "change_role") {
+      const change = firmRoleChange(had, body.roles);
+      if (change.adding.length || change.removing.length) await callAdminTool(mynt, session, "invite_user", { email: body.email, roles: change.roles });
+      return json({ ok: true, ...change, message: changeWords(change) });
+    }
+
     // invite_user sets an email's roles outright: someone already allowed in keeps the roles they had (an admin stays
     // an admin), and gets the ones picked as well.
-    const list = (await callAdminTool(mynt, session, "list_whitelist", {})) as { whitelist?: { email?: string; roles?: string[] }[] } | null;
-    const had = (list?.whitelist ?? []).find((i) => i.email?.toLowerCase() === email)?.roles ?? [];
-    await callAdminTool(mynt, session, "invite_user", { email, roles: [...new Set([...had, ...roles])] });
+    await callAdminTool(mynt, session, "invite_user", { email: body.email, roles: [...new Set([...had, ...body.roles])] });
     try {
-      const r = (await callAdminTool(mynt, session, "add_entity_member", { email, entity_id: firmId })) as { status?: string; note?: string } | null;
+      const r = (await callAdminTool(mynt, session, "add_entity_member", { email: body.email, entity_id: firmId })) as { status?: string; note?: string } | null;
       const pending = r?.status === "pending_acceptance";
       return json({
         ok: true,
         added: true,
         message: pending
-          ? `${email} can sign in and is in the firm, but its licence providers accept them before they have any licence-provider powers there.`
-          : `${email} can sign in and is a member of the firm. Its members were told.`,
+          ? `${body.email} can sign in and is in the firm, but its licence providers accept them before they have any licence-provider powers there.`
+          : r?.note === "Already a member"
+            ? `${body.email} is already a member of the firm.`
+            : `${body.email} can sign in and is a member of the firm. Its members were told.`,
       });
     } catch (err) {
       // Not signed in yet: invited only. Any other refusal is Mynt's, in its words.
       if (err instanceof MyntRefusedError && /hasn't signed in/.test(err.raw))
-        return json({ ok: true, added: false, message: `${email} can now sign in with those roles. Once they have, use Invite member again to add them to the firm.` });
+        return json({ ok: true, added: false, message: `${body.email} can now sign in with those roles. Once they have, use Invite member again to add them to the firm.` });
       throw err;
     }
   });
