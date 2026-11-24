@@ -49,6 +49,14 @@ test("the TLS certificate made at boot parses, and its key is the one whose hash
   assert.deepEqual(x.publicKey.export({ type: "spki", format: "der" }), t.spki);
 });
 
+test("every certificate made at boot is valid DER, whatever its random serial (one in 256 used to start with a zero byte)", () => {
+  for (let i = 0; i < 1500; i++) {
+    const t = selfSignedEd25519("mynt-keyhouse");
+    const x = new X509Certificate(t.cert);
+    assert.ok(!x.serialNumber.startsWith("00"), x.serialNumber);
+  }
+});
+
 test("until it's initialised it attests but seals nothing; init hands back only the wrapped root, once", async () => {
   const { kh, kms } = await keyhouse({ initialised: false });
   await assert.rejects(kh.handle("POST", "/v1/seal", "mynt-core", { purpose: "secret", plaintext: b64u("x") }), refusedWith("not_initialised"));
