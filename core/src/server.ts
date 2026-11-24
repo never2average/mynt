@@ -52,6 +52,7 @@ import { registerMoneyRailTools } from "./money-rails.js";
 import { registerFirmCheckAdminTools } from "./firm-check-tools.js";
 import { registerProductHealthTools } from "./product-health-tools.js";
 import { registerPartnerKitTools } from "./partner-kit.js";
+import { registerConfidentialAdminTools, registerConfidentialTools } from "./confidential/governance.js";
 import { registerFirmNoticeTools } from "./firm-notices.js";
 import { hasLiquidityRole, registerLiquidityTools, rolesFrom } from "./liquidity-tools.js";
 import { registerTreasuryTools } from "./treasury-tools.js";
@@ -187,6 +188,10 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   if (ctx.productHealth && user && (has("license_provider") || has("liquidity_provider") || has("innovator") || has("developer") || has("admin"))) registerProductHealthTools(server, store, user, ctx.productHealth);
   // Every signed-in account reads its firm notices, and can block a recovery at a firm it has been a licence provider at.
   if (user) registerFirmNoticeTools(server, store, user);
+  // The confidential service's builds Mynt trusts: the firms that seal their books to it (and pools that rely on it) read
+  // them; admins announce or withdraw one.
+  if (user && (has("license_provider") || rolesFrom(user).liquidityProvider || has("admin"))) registerConfidentialTools(server, store);
+  if (user && has("admin")) registerConfidentialAdminTools(server, store, user);
   // The partner kit: a licence provider connects its ledger and sees pass or fail; admins set endpoints, never see figures.
   if (user && (has("license_provider") || has("admin"))) {
     const health = ctx.productHealth ?? null;

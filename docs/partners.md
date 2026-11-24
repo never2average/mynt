@@ -243,6 +243,22 @@ For the file source, the cases are `setup` and the statement checks above, run o
 
 **When things change.** An endpoint change takes effect only when you confirm it, and then you're back on the sandbox until you pass conformance again. Rotating the request secret doesn't change your source; update your endpoint as soon as you rotate.
 
+## Sealing your live statement to Mynt's confidential service
+
+Once Mynt runs its confidential service (an attested confidential VM: [Confidential computing](reference.md#confidential-computing)), you can answer a **live** request with your signed statement sealed to that service, so Mynt's own server never sees your books: it carries the sealed statement to the service, which checks it exactly as above (your firm, `live`, the request's `request_id`, your registered live key, a fresh `as_of`, a reason for every null), computes the one product's snapshot, and signs its fingerprint. Only that product's figures and the signature leave the service. Test statements and conformance stay as they are, in the clear: test books aren't real money.
+
+1. Check the service yourself, from a checkout of the release you expect (after `cd core && npm ci && npm run build`), with the image digest that release's CI published (it's also in `list_enclave_releases`):
+
+   ```
+   node scripts/verify-mynt-enclave.mjs --url https://<mynt>/confidential/attestation --expected-digest sha256:<64 hex>
+   ```
+
+   It fetches the attestation with a fresh nonce of its own and exits 0 only if the token is signed by the cloud's attestation service, the machine runs a production confidential OS with debugging off since boot, the image is the one you expect, and the keys beside the token are the ones it attests. It then prints `ingest_public_key` (what you seal to) and `health_attester_key` (what signs your snapshots). Run it again whenever Mynt announces a new release (`confidential.release_announced` on your webhooks; each takes effect 48 hours after it's announced).
+
+2. Seal each live answer with `sealStatement(statement, ingest_public_key, { provider_entity_id, environment: "live", request_id })` from `core/src/confidential/shared/envelope.ts` (Node's own crypto, no other dependency; X25519, HKDF-SHA256 and AES-256-GCM, the header bound as associated data), and answer with the envelope instead of the statement. Mynt refuses an envelope addressed to another firm, environment or request.
+
+3. Each snapshot computed this way shows `enclave: { public_key, signature_ok }` in `list_product_health`; check `public_key` is the `health_attester_key` you verified.
+
 ## What Mynt does and doesn't do with your figures
 
 - They go only into the product-health snapshot, encrypted per product, readable by your firm and by the liquidity providers in that product's pools. Admins see status, times and fingerprints, never the numbers.

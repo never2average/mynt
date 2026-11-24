@@ -2,7 +2,8 @@ import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { checkStatement, failedCases, ledgerUrl, requestLedger, signBody, type CheckCase, type Statement } from "./partner-ledger/contract.js";
-import { isLedgerError, ledgerError, sandboxPartnerLedger, type LedgerError, type PartnerLedger, type PartnerLedgerContext, type PartnerLedgerReading } from "./partner-ledger/index.js";
+import { isLedgerError, isSealedReading, ledgerError, sandboxPartnerLedger, type LedgerError, type PartnerLedger, type PartnerLedgerContext, type PartnerLedgerReading, type SealedLedgerReading } from "./partner-ledger/index.js";
+import { isSealedStatement } from "./confidential/shared/envelope.js";
 import { decideMembership, memberCoolOffMs, noticeFirm, pendingMembers, standingSince } from "./firm-notices.js";
 import { inTransaction } from "./db.js";
 import { base58Decode, isAddress, isWeakEd25519Key } from "./solana/codec.js";
@@ -239,16 +240,23 @@ function readingFor(s: Statement, productId: string): PartnerLedgerReading {
 }
 const transportCode = (r: VendorResult) => (r.error?.startsWith("refused") ? "endpoint_refused" : r.http_status == null ? (r.error === "timeout" ? "timeout" : "unreachable") : r.ok ? "bad_answer" : `http_${r.http_status}`);
 
-type Batch = { products: string[]; result: Promise<Statement | LedgerError> };
+type Batch = { products: string[]; result: Promise<Statement | SealedLedgerReading | LedgerError> };
 export type LedgerBatches = Map<string, { key: string; at: number; batch: Batch }>;
 
 // One live read of the firm's books, for every product it sponsors (and the one asked about): a statement for the live
-// environment, signed with the firm's live key, fresh and well-formed, or an error.
-async function readLive(store: Store, entityId: string, row: SourceRow, productIds: string[], periodEnd: string, now: Date, deps: PartnerKitDeps): Promise<Statement | LedgerError> {
+// environment, signed with the firm's live key, fresh and well-formed, or an error. A statement the partner sealed to
+// the confidential service (docs/partners.md) is passed on unopened, with what it must match: the confidential host
+// checks and computes it (product-health.ts), and Mynt's server never sees the partner's books.
+async function readLive(store: Store, entityId: string, row: SourceRow, productIds: string[], periodEnd: string, now: Date, deps: PartnerKitDeps): Promise<Statement | SealedLedgerReading | LedgerError> {
   const secret = secretOf(row);
   if (!row.live_url || !secret) return ledgerError("not_configured", "The partner's live endpoint isn't configured");
   const { request, result } = await requestLedger({ base_url: row.live_url, secret, environment: "live", entity_id: entityId, product_ids: productIds, period_end: periodEnd }, { timeoutMs: ledgerTimeoutMs(), ...deps.opts });
   if (!result.ok) return ledgerError(transportCode(result), "The partner's endpoint didn't answer with a statement");
+  if (isSealedStatement(result.body)) {
+    const e = result.body;
+    if (e.provider_entity_id !== entityId || e.environment !== "live" || e.request_id !== request.request_id) return ledgerError("statement_identity", "The partner's sealed statement is addressed to another firm, environment or request");
+    return { sealed: { envelope: e, expect: { entity_id: entityId, environment: "live", request_id: request.request_id, ...(await keysFor(store, entityId, deps, "live")), max_age_ms: httpMaxAgeMs() } } };
+  }
   const check = checkStatement(result.body, { entity_id: entityId, environment: "live", request_id: request.request_id, ...(await keysFor(store, entityId, deps, "live")), now, max_age_ms: httpMaxAgeMs(), product_ids: productIds });
   if (!check.ok) return ledgerError(`statement_${failedCases(check)[0] ?? "invalid"}`, "The partner's statement didn't pass Mynt's checks");
   return check.statement!;
@@ -273,7 +281,7 @@ export function httpPartnerLedger(store: Store, entityId: string, deps: PartnerK
         batches.set(entityId, entry);
       }
       const s = await entry.batch.result;
-      return isLedgerError(s) ? s : readingFor(s, ctx.product_id);
+      return isLedgerError(s) || isSealedReading(s) ? s : readingFor(s, ctx.product_id);
     },
   };
 }

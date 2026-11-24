@@ -1,0 +1,20 @@
+{
+  "$comment": "Part of the measured image: changing it changes the image digest, which partners see and Mynt announces 48 hours ahead. callers: by client certificate common name. purposes: whether what's sealed for each may ever come back out (core/src/confidential/host.ts PURPOSES must agree: test/confidential.test.js checks).",
+  "purposes": {
+    "secret": { "unseal": true },
+    "vault-keys": { "unseal": false },
+    "vault-legacy-root": { "unseal": false },
+    "signing-key": { "unseal": false },
+    "partner-ledger": { "unseal": false }
+  },
+  "callers": {
+    "mynt-core": {
+      "init": true,
+      "seal": ["secret", "signing-key", "partner-ledger"],
+      "unseal": ["secret"],
+      "sign": ["health-attester", "sealed"],
+      "health": true,
+      "vault": ["adopt", "release"]
+    }
+  }
+}

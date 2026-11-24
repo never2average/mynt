@@ -1,5 +1,7 @@
-import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
-import { defaultLedgerFor, isLedgerError, type PartnerLedger, type PartnerLedgerReading } from "./partner-ledger/index.js";
+import { createCipheriv, createDecipheriv, createHash, createHmac, createPublicKey, randomBytes, randomUUID, verify as edVerify } from "node:crypto";
+import { defaultLedgerFor, isLedgerError, isSealedReading, type PartnerLedger, type PartnerLedgerReading, type SealedLedgerReading } from "./partner-ledger/index.js";
+import type { ConfidentialHost } from "./confidential/host.js";
+import { HEALTH_ATTESTER_KEY, healthAttestationMessage } from "./confidential/shared/health.js";
 import type { Db } from "./db.js";
 import { base58Decode, isAddress, isWeakEd25519Key, Keypair } from "./solana/codec.js";
 import {
@@ -115,241 +117,14 @@ export const TABLES = `
     UNIQUE (subject, period_start)
   );
   CREATE INDEX IF NOT EXISTS product_health_status_idx ON ${T}.product_health_snapshots (status, subject, sequence);
+  -- A snapshot the confidential host computed from a partner's sealed statement: its health-attester key and signature
+  -- over the fingerprint (confidential/shared/health.ts).
+  ALTER TABLE ${T}.product_health_snapshots ADD COLUMN IF NOT EXISTS enclave_key text;
+  ALTER TABLE ${T}.product_health_snapshots ADD COLUMN IF NOT EXISTS enclave_signature text;
 `;
 
-// ---- canonical encoding ----
-
-// JSON with sorted keys and no spaces, so the same report always has the same bytes and so the same fingerprint.
-// Only what encodes one way is allowed: integers, strings, booleans, null, arrays, objects. No floats, ever.
-export function canonicalJson(value: unknown): string {
-  if (value === null) return "null";
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "number") {
-    if (!Number.isSafeInteger(value)) throw new Error(`Canonical JSON allows only safe integers, got ${value}`);
-    return String(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (typeof value === "object") {
-    const obj = value as Record<string, unknown>;
-    return `{${Object.keys(obj)
-      .sort()
-      .map((k) => {
-        if (obj[k] === undefined) throw new Error(`Canonical JSON has no 'undefined' (${k})`);
-        return `${JSON.stringify(k)}:${canonicalJson(obj[k])}`;
-      })
-      .join(",")}}`;
-  }
-  throw new Error(`Canonical JSON can't encode ${typeof value}`);
-}
-
-export const fingerprintOf = (canonical: string) => createHash("sha256").update(canonical, "utf8").digest("hex");
-
-// ---- figures: a value, or null with a reason, never 0 for "unknown" ----
-
-export interface Figure {
-  value: number | null;
-  reason: string | null;
-  partial?: boolean; // a total of only what could be measured: `reason` says what's left out
-}
-export const measured = (value: number): Figure => ({ value, reason: null });
-export const partialFigure = (value: number, reason: string): Figure => ({ value, reason, partial: true });
-export const unmeasured = (reason: string): Figure => ({ value: null, reason });
-
-export const FIGURE_NAMES = [
-  "reserves_cents",
-  "obligations_cents",
-  "coverage_bps",
-  "requested_in_cents",
-  "requested_out_cents",
-  "unresolved_cents",
-  "flows_in_cents",
-  "flows_out_cents",
-  "pending_settlements_cents",
-  "reversal_rate_bps",
-  "failure_rate_bps",
-  "open_withdrawal_requests",
-  "open_complaints",
-  "open_incidents",
-] as const;
-export type Figures = Record<(typeof FIGURE_NAMES)[number], Figure>;
-
-// What every flow figure in a report measures, stated in the report: the money rails total movements by when they
-// were requested, so a period's figures are that period's requests, not the money that settled in it.
-export const FLOWS_BASIS =
-  "Movements requested in this period, by each one's status when the snapshot was computed. requested_* is every movement requested; flows_* is the part of those already settled, so payments that take days to settle show as pending here and aren't counted in a later period; pending_settlements covers this period's requests only. Movements nobody ever answered for are in unresolved_cents and in requested_*, and in no other total. Rates are by value, among this period's completed requests. A figure marked partial totals only the directions the rails can see.";
-
-export interface FlowBuckets {
-  settled: number | null;
-  pending: number | null;
-  failed: number | null;
-  reversed: number | null;
-  unresolved: number | null;
-}
-export interface NormalizedFlows {
-  in: FlowBuckets;
-  out: FlowBuckets;
-}
-export interface PartialFlows {
-  in: string | null; // what the money-in totals leave out, when they only cover part of it
-  out: string | null;
-  overall: string | null;
-}
-export interface AdaptedFlows {
-  flows: NormalizedFlows | null;
-  reason: string | null; // why anything is unmeasured
-  not_measured: Record<string, string>; // the directions the rails can't see
-  partial: PartialFlows;
-}
-// The money rails, bound to the store: what they report for a product and period.
-export type FlowsFor = (productId: string, from: Date, to: Date) => Promise<unknown>;
-
-const cents = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null);
-const NULL_BUCKETS: FlowBuckets = { settled: null, pending: null, failed: null, reversed: null, unresolved: null };
-const NOT_PARTIAL: PartialFlows = { in: null, out: null, overall: null };
-const FLOWS_UNAVAILABLE = "The money rails aren't connected to this Mynt";
-const FLOWS_UNREADABLE = "The money rails answered with something Mynt can't read";
-
-const sumOrNull = (...xs: (number | null)[]) => {
-  if (!xs.length || xs.some((x) => x === null)) return null;
-  const n = (xs as number[]).reduce((a, b) => a + b, 0);
-  return Number.isSafeInteger(n) ? n : null;
-};
-
-type Tally = { count?: unknown; amount_cents?: unknown };
-type Rail = Record<string, Tally | undefined>;
-const amount = (d: Rail, status: string) => cents(d[status]?.amount_cents);
-
-// Sums directions: only those the rails can see. Statuses requested and submitted are both still pending.
-function sumDirections(directions: Rail[], unresolved: (number | null)[]): FlowBuckets {
-  if (!directions.length) return { ...NULL_BUCKETS };
-  return {
-    settled: sumOrNull(...directions.map((d) => amount(d, "settled"))),
-    pending: sumOrNull(...directions.flatMap((d) => [amount(d, "requested"), amount(d, "submitted")])),
-    failed: sumOrNull(...directions.map((d) => amount(d, "failed"))),
-    reversed: sumOrNull(...directions.map((d) => amount(d, "reversed"))),
-    unresolved: sumOrNull(...unresolved),
-  };
-}
-
-// The money rails' answer, in the report's terms: on_ramp and deposit are money in; off_ramp and payout are money out.
-export function adaptRailFlows(raw: unknown): AdaptedFlows {
-  if (!raw || typeof raw !== "object" || typeof (raw as { flows?: unknown }).flows !== "object" || (raw as { flows?: unknown }).flows === null) {
-    console.error("product health: the money rails answered in an unknown shape");
-    return { flows: null, reason: FLOWS_UNREADABLE, not_measured: {}, partial: NOT_PARTIAL };
-  }
-  const r = raw as { measured?: unknown; flows: Record<string, Rail | null | undefined>; unresolved?: Record<string, Tally | null | undefined>; not_measured?: Record<string, string> };
-  const notMeasured = r.not_measured && typeof r.not_measured === "object" ? r.not_measured : {};
-  const reasons = [...new Set(Object.values(notMeasured))];
-  if (r.measured !== true) return { flows: null, reason: reasons.join("; ") || "The money rails can't measure this period", not_measured: notMeasured, partial: NOT_PARTIAL };
-  const has = (n: string) => !!r.flows[n] && typeof r.flows[n] === "object";
-  const leftOut = (names: string[]) => names.filter((n) => !has(n)).map((n) => `${n}: ${notMeasured[n] ?? "not measured"}`).join("; ") || null;
-  const side = (names: string[]) => {
-    const present = names.filter(has);
-    return sumDirections(present.map((n) => r.flows[n] as Rail), present.map((n) => cents(r.unresolved?.[n]?.amount_cents)));
-  };
-  const IN = ["on_ramp", "deposit"];
-  const OUT = ["off_ramp", "payout"];
-  return {
-    flows: { in: side(IN), out: side(OUT) },
-    reason: reasons.join("; ") || null,
-    not_measured: notMeasured,
-    partial: { in: IN.some(has) ? leftOut(IN) : null, out: OUT.some(has) ? leftOut(OUT) : null, overall: [...IN, ...OUT].some(has) ? leftOut([...IN, ...OUT]) : null },
-  };
-}
-
-// Rounded down: coverage is never overstated.
-function basisPoints(numerator: number, denominator: number): Figure {
-  const bps = (BigInt(numerator) * 10_000n) / BigInt(denominator);
-  return bps > BigInt(Number.MAX_SAFE_INTEGER) ? unmeasured("The ratio is too large to represent") : measured(Number(bps));
-}
-// Rounded up: a failure or reversal rate is never understated.
-function basisPointsUp(numerator: number, denominator: number): Figure {
-  const d = BigInt(denominator);
-  const bps = (BigInt(numerator) * 10_000n + d - 1n) / d;
-  return bps > BigInt(Number.MAX_SAFE_INTEGER) ? unmeasured("The ratio is too large to represent") : measured(Number(bps));
-}
-
-const sideSeen = (b: FlowBuckets) => Object.values(b).some((v) => v !== null);
-
-// The figures of one snapshot. Everything null carries the reason it couldn't be measured.
-export function buildFigures(i: {
-  reading: PartnerLedgerReading | { error: { code: string; message: string } } | null;
-  flows: NormalizedFlows | null;
-  flowsReason?: string | null;
-  partial?: PartialFlows;
-  complaints?: number | null;
-  incidents?: number | null;
-  withdrawals?: number | null;
-}): Figures {
-  const ledgerFailed = !i.reading || isLedgerError(i.reading) ? `The partner's ledger couldn't be read${isLedgerError(i.reading) ? ` (${i.reading.error.code})` : ""}` : null;
-  const reading = !i.reading || isLedgerError(i.reading) ? null : i.reading;
-  const held = cents(reading?.reserves_held_cents);
-  const owed = cents(reading?.customer_obligations_cents);
-  const reservesFig = held !== null ? measured(held) : unmeasured(ledgerFailed ?? reading?.reason ?? "The partner's ledger didn't give reserves as integer cents");
-  const obligationsFig = owed !== null ? measured(owed) : unmeasured(ledgerFailed ?? reading?.reason ?? "The partner's ledger didn't give obligations as integer cents");
-
-  let coverage: Figure;
-  if (held === null || owed === null) coverage = unmeasured("Coverage needs both reserves and obligations from the partner's ledger");
-  else if (owed === 0) coverage = unmeasured("No customer obligations: coverage is undefined, not infinite");
-  else coverage = basisPoints(held, owed);
-
-  const f = i.flows;
-  const why = i.flowsReason ?? (f ? null : FLOWS_UNAVAILABLE);
-  const partial = i.partial ?? NOT_PARTIAL;
-  const figure = (v: number | null, label: string, leavesOut: string | null): Figure => {
-    if (v === null) return unmeasured(why ?? `The money rails gave no ${label} total`);
-    return leavesOut ? partialFigure(v, `Partial: leaves out ${leavesOut}`) : measured(v);
-  };
-  const sides = f ? [f.in, f.out].filter(sideSeen) : [];
-  const requested = (b: FlowBuckets | undefined) => (b && sideSeen(b) ? sumOrNull(b.settled, b.pending, b.failed, b.reversed, b.unresolved) : null);
-
-  const rate = (top: (b: FlowBuckets) => number | null, parts: ((b: FlowBuckets) => number | null)[], what: string): Figure => {
-    if (!sides.length) return unmeasured(why ?? `The money rails gave no ${what} totals`);
-    const numerator = sumOrNull(...sides.map(top));
-    const denominator = sumOrNull(...parts.flatMap((p) => sides.map(p)));
-    if (numerator === null || denominator === null) return unmeasured(`The money rails gave no ${what} totals`);
-    if (denominator === 0) return unmeasured(`No requests from this period have completed yet, so there's no ${what} rate`);
-    const up = basisPointsUp(numerator, denominator);
-    return up.value !== null && partial.overall ? partialFigure(up.value, `Partial: leaves out ${partial.overall}`) : up;
-  };
-
-  return {
-    reserves_cents: reservesFig,
-    obligations_cents: obligationsFig,
-    coverage_bps: coverage,
-    requested_in_cents: figure(requested(f?.in), "requested inflow", partial.in),
-    requested_out_cents: figure(requested(f?.out), "requested outflow", partial.out),
-    unresolved_cents: figure(sides.length ? sumOrNull(...sides.map((b) => b.unresolved)) : null, "unresolved", partial.overall),
-    flows_in_cents: figure(f?.in.settled ?? null, "settled inflow", partial.in),
-    flows_out_cents: figure(f?.out.settled ?? null, "settled outflow", partial.out),
-    pending_settlements_cents: figure(sides.length ? sumOrNull(...sides.map((b) => b.pending)) : null, "pending", partial.overall),
-    reversal_rate_bps: rate((b) => b.reversed, [(b) => b.settled, (b) => b.reversed], "reversal"),
-    failure_rate_bps: rate((b) => b.failed, [(b) => b.settled, (b) => b.reversed, (b) => b.failed], "failure"),
-    open_withdrawal_requests: typeof i.withdrawals === "number" ? measured(i.withdrawals) : unmeasured("Withdrawal requests aren't tracked for this product"),
-    open_complaints: typeof i.complaints === "number" ? measured(i.complaints) : unmeasured("Complaints aren't tracked on Mynt yet"),
-    open_incidents: typeof i.incidents === "number" ? measured(i.incidents) : unmeasured("Incidents aren't tracked on Mynt yet"),
-  };
-}
-
-export interface HealthReport {
-  schema: string;
-  product_id: string;
-  pool_id: string | null;
-  sequence: number;
-  period_start: string;
-  period_end: string;
-  computed_at: string;
-  salt: string; // random: the fingerprint of a report can't be guessed from its numbers
-  source: "sandbox" | "partner_ledger" | "unavailable";
-  live: boolean;
-  partner: { entity_id: string; ledger: string; ledger_name: string };
-  ledger_as_of: string | null;
-  flows_basis: string;
-  flows_not_measured: Record<string, string>;
-  figures: Figures;
-  notes: string[];
-}
+export * from "./confidential/shared/figures.js";
+import { adaptRailFlows, buildFigures, canonicalJson, fingerprintOf, FLOWS_BASIS, FLOWS_UNAVAILABLE, NOT_PARTIAL, type AdaptedFlows, type FlowsFor, type HealthReport } from "./confidential/shared/figures.js";
 
 // ---- encryption ----
 
@@ -406,6 +181,8 @@ export interface SnapshotRow {
   tx_signature: string | null;
   published_at: string | null;
   created_at: string;
+  enclave_key?: string | null;
+  enclave_signature?: string | null;
 }
 
 export interface Gap {
@@ -462,6 +239,7 @@ export interface Assessment {
   attestation: string | null;
   signature_ok: boolean | null; // null: no signature
   on_chain: string;
+  enclave_signature_ok?: boolean | null; // null: not computed by the confidential host
 }
 
 // What the record says about a snapshot, for anyone allowed to see that it exists: no figures. `verified` needs all of
@@ -494,6 +272,8 @@ export function snapshotStatus(r: SnapshotRow, a: Assessment) {
     tx_signature: r.tx_signature,
     published_at: r.published_at ? iso(r.published_at) : null,
     notes,
+    // Computed by the confidential host from the partner's sealed statement: its key and whether its signature checks.
+    ...(r.enclave_signature ? { enclave: { public_key: r.enclave_key, signature_ok: a.enclave_signature_ok === true } } : {}),
   };
 }
 
@@ -546,7 +326,17 @@ export interface ProductHealthDeps {
   exitedLiquidityProvider?: (productId: string, entityId: string) => Promise<Date | null>; // when a firm left its last pool of this product
   liquidityProviderBooks?: (productId: string, entityId: string) => Promise<string[]>; // the sponsors whose books a firm may read: those of its own pools
   poolSponsorOf?: (poolId: string) => Promise<string | null>; // whose books a pool's snapshots read
+  confidential?: ConfidentialHost | null; // computes snapshots from partners' sealed statements (confidential/)
   now?: () => Date;
+}
+
+// Whether `signature` (hex) is the confidential host's health-attester key (base64url) over a snapshot's fingerprint.
+export function verifyHealthAttestation(publicKey: string, fingerprint: string, signature: string): boolean {
+  try {
+    return edVerify(null, healthAttestationMessage(fingerprint), createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: publicKey }, format: "jwk" }), Buffer.from(signature, "hex"));
+  } catch {
+    return false;
+  }
 }
 
 export class HealthError extends Error {}
@@ -757,11 +547,16 @@ export class ProductHealthService {
   }
 
   // Builds one snapshot for a period, sealed and ready to go. Never throws for a figure it can't get.
-  private async compute(s: Subject, start: Date, end: Date, sequence: number) {
+  private async compute(s: Subject, start: Date, end: Date, sequence: number): Promise<{ report: HealthReport; fingerprint: string; sealed: string; enclave: { key: string; signature: string } | null }> {
     const ledger = await this.ledgerOf(s.partner);
-    const reading = await ledger
+    let reading = await ledger
       .read({ product_id: s.productId, pool_id: s.poolId, provider_entity_id: s.partner, period_end: end.toISOString(), now: () => this.now() })
       .catch(() => ({ error: { code: "ledger_error", message: "The ledger call failed" } }));
+    // A statement sealed to the confidential service: computed there, and only that product's figures come back.
+    if (isSealedReading(reading)) {
+      if (this.deps.confidential && ledger.kind === "live") return this.computeSealed(s, start, end, sequence, ledger, reading);
+      reading = { error: { code: "no_confidential_host", message: "The partner sealed its statement, and this Mynt has no confidential host to open it" } };
+    }
     const failed = isLedgerError(reading);
     // partner_ledger only ever means a ledger that says it's live; anything else counts as sandbox.
     const source: HealthReport["source"] = failed ? "unavailable" : ledger.kind === "live" ? "partner_ledger" : "sandbox";
@@ -790,7 +585,43 @@ export class ProductHealthService {
     const canonical = canonicalJson(report);
     const fingerprint = fingerprintOf(canonical);
     const sealed = sealReport(await this.dataKey(s.subject), canonical, s.subject, sequence, fingerprint);
-    return { report, fingerprint, sealed };
+    return { report, fingerprint, sealed, enclave: null };
+  }
+
+  // The confidential host opens the partner's statement, checks it against the firm's registered key, computes the
+  // report exactly as compute() would, and signs its fingerprint with its health-attester key. The signature is kept
+  // with the snapshot, so anyone holding the host's attested public key can check the figures came from there.
+  private async computeSealed(s: Subject, start: Date, end: Date, sequence: number, ledger: PartnerLedger, reading: SealedLedgerReading) {
+    const flows = await this.flows(s, start, end, "partner_ledger");
+    const withdrawals = this.deps.openWithdrawalRequests ? await this.deps.openWithdrawalRequests(s.productId, s.poolId).catch(() => null) : null;
+    const r = await this.deps.confidential!.computeHealth({
+      envelope: reading.sealed.envelope,
+      expect: reading.sealed.expect,
+      now: this.now().toISOString(),
+      report: {
+        schema: SCHEMA,
+        product_id: s.productId,
+        pool_id: s.poolId,
+        sequence,
+        period_start: start.toISOString(),
+        period_end: end.toISOString(),
+        computed_at: this.now().toISOString(),
+        live: s.live,
+        partner: { entity_id: s.partner, ledger: ledger.id, ledger_name: ledger.name },
+      },
+      flows,
+      withdrawals,
+      host: this.deps.confidential!.kind,
+    });
+    // Never taken on trust: the fingerprint is recomputed from the report, and the signature checked, here.
+    const canonical = canonicalJson(r.report);
+    const fingerprint = fingerprintOf(canonical);
+    if (fingerprint !== r.fingerprint || canonical !== r.canonical) throw new HealthError("The confidential host's report doesn't match its fingerprint");
+    if (r.report.product_id !== s.productId || r.report.sequence !== sequence || r.report.period_end !== end.toISOString()) throw new HealthError("The confidential host answered for another snapshot");
+    const attester = await this.deps.confidential!.publicKey(HEALTH_ATTESTER_KEY);
+    if (r.attestation.public_key !== attester || !verifyHealthAttestation(attester, fingerprint, r.attestation.signature)) throw new HealthError("The confidential host's signature doesn't verify");
+    const sealed = sealReport(await this.dataKey(s.subject), canonical, s.subject, sequence, fingerprint);
+    return { report: r.report, fingerprint, sealed, enclave: { key: attester, signature: r.attestation.signature } };
   }
 
   // Brings one product's record up to the last complete period. A stretch Mynt didn't cover is one missed record, and
@@ -829,10 +660,10 @@ export class ProductHealthService {
     const publishDeadline = new Date(lastEnd.getTime() + interval);
     await this.db.query(
       `INSERT INTO ${T}.product_health_snapshots
-        (id, subject, epoch, product_id, pool_id, sequence, period_start, period_end, status, source, live, partner_entity_id, fingerprint, report_sealed, attestation, sign_deadline, publish_deadline)
-       SELECT $1::uuid, $2::text, $3::int, $4::text, $5::text, $6::int, $7::timestamptz, $8::timestamptz, $9::text, $10::text, $11::boolean, $12::uuid, $13::text, $14::text, 'mynt_only', $15::timestamptz, $16::timestamptz
+        (id, subject, epoch, product_id, pool_id, sequence, period_start, period_end, status, source, live, partner_entity_id, fingerprint, report_sealed, attestation, sign_deadline, publish_deadline, enclave_key, enclave_signature)
+       SELECT $1::uuid, $2::text, $3::int, $4::text, $5::text, $6::int, $7::timestamptz, $8::timestamptz, $9::text, $10::text, $11::boolean, $12::uuid, $13::text, $14::text, 'mynt_only', $15::timestamptz, $16::timestamptz, $17::text, $18::text
        WHERE $3::int = (SELECT COALESCE(MAX(epoch), 0) FROM ${T}.product_health_anchors WHERE subject = $2::text) ON CONFLICT DO NOTHING`,
-      [randomUUID(), s.subject, epoch, s.productId, s.poolId ?? "", sequence, periodStart, lastEnd, key ? "pending_signature" : "ready", result.report.source, result.report.live, s.partner, result.fingerprint, result.sealed, signDeadline, publishDeadline],
+      [randomUUID(), s.subject, epoch, s.productId, s.poolId ?? "", sequence, periodStart, lastEnd, key ? "pending_signature" : "ready", result.report.source, result.report.live, s.partner, result.fingerprint, result.sealed, signDeadline, publishDeadline, result.enclave?.key ?? null, result.enclave?.signature ?? null],
     );
   }
 
@@ -1202,6 +1033,7 @@ export class ProductHealthService {
         attestation: r.status === "missed" ? null : r.partner_signature ? (signatureOk ? "partner_signed" : "invalid_signature") : "mynt_only",
         signature_ok: signatureOk,
         on_chain: verdict.get(r.id) ?? "not_on_chain",
+        enclave_signature_ok: r.enclave_signature && r.enclave_key && r.fingerprint ? verifyHealthAttestation(r.enclave_key, r.fingerprint, r.enclave_signature) : null,
       });
     }
     return out;

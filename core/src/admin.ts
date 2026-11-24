@@ -47,6 +47,8 @@ import type { MainnetGateService } from "./solana/mainnet-gate.js";
 import type { ProductHealthService } from "./product-health.js";
 import { auditForAdmin, type CovenantService } from "./covenants.js";
 import type { TreasuryService } from "./treasury.js";
+import type { ConfidentialHost } from "./confidential/host.js";
+import type { ConfidentialReleases } from "./confidential/governance.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string) => ({ ...json({ error }), isError: true });
@@ -70,6 +72,8 @@ export interface AdminContext {
   treasury?: TreasuryService | null; // pools' on-chain treasuries (devnet): registry, deposit approvals, indexer
   vendors?: VendorCallOptions; // how Mynt calls vendors' services (tests only override the defaults)
   esign?: EsignSource; // e-signature for program agreements: the live settings (esign-settings.ts), or a fixed one in tests
+  confidential?: ConfidentialHost | null; // where the vault's keys, partners' sealed books and attesting keys live (confidential/)
+  confidentialReleases?: ConfidentialReleases | null; // the confidential service's builds Mynt trusts
 }
 
 // Admin: everything is managed through Mynt itself, and every change is written to the audit log.

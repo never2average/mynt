@@ -10,7 +10,9 @@
 // pools on a product are treated as sharing these reserves. Money that leaves those reserves in a way Mynt can't see
 // (outside its movement ledger) is treated as none until the next reading shows it.
 
-export type LedgerError = { error: { code: string; message: string } }; // code: [a-z0-9_]; message: no partner text, no secrets
+import type { SealedStatement } from "../confidential/shared/envelope.js";
+
+export type LedgerError ={ error: { code: string; message: string } }; // code: [a-z0-9_]; message: no partner text, no secrets
 export const ledgerError = (code: string, message: string): LedgerError => ({ error: { code, message } });
 export const isLedgerError = (x: unknown): x is LedgerError => !!x && typeof x === "object" && "error" in (x as object);
 
@@ -34,5 +36,16 @@ export interface PartnerLedger {
   name: string;
   // sandbox: test figures, which can never count as a live product's health. live: the partner's real books.
   kind: "sandbox" | "live";
-  read(ctx: PartnerLedgerContext): Promise<PartnerLedgerReading | LedgerError>;
+  read(ctx: PartnerLedgerContext): Promise<PartnerLedgerReading | SealedLedgerReading | LedgerError>;
 }
+
+// A live statement the partner sealed to the confidential service (confidential/shared/envelope.ts): Mynt's server
+// can't open it, so it carries it, with what the statement must match, to the confidential host, which checks it and
+// computes the snapshot there (ProductHealthService.compute). Only the figures for one product and a signature leave.
+export interface SealedLedgerReading {
+  sealed: {
+    envelope: SealedStatement;
+    expect: { entity_id: string; environment: "live"; request_id: string | null; public_key: string | null; other_key: string | null; max_age_ms: number };
+  };
+}
+export const isSealedReading = (x: unknown): x is SealedLedgerReading => !!x && typeof x === "object" && "sealed" in (x as object);
