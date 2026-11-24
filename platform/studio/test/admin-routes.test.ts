@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "@/lib/session-store";
 import { ADMIN_TOOLS, parseAdminCall, parseStudioCall, STUDIO_TOOLS } from "@/lib/studio-tools";
 
-// The Admin area's routes (app/api/admin/*) and pages: only for an account Mynt says is an admin (anyone else, a 404,
+// The platform admin's routes (app/api/admin/*) and pages (app/(platform), /platform/…): only for an account Mynt says is an admin (anyone else, a 404,
 // with nothing sent to Mynt), writes only from the studio's own origin, strict bodies, and every action an existing
 // admin tool with exactly the arguments the sheet gave. Admin tools are a separate allow-list nobody else can call.
 
@@ -54,7 +54,10 @@ const licence = await import("@/app/api/admin/licences/[licenceId]/route");
 const vendors = await import("@/app/api/admin/vendors/route");
 const serviceTypes = await import("@/app/api/admin/vendors/service-types/route");
 const offering = await import("@/app/api/admin/vendors/offerings/[offeringId]/route");
-const adminPage = await import("@/app/(studio)/admin/page");
+const overviewPage = await import("@/app/(platform)/platform/page");
+const sectionPage = await import("@/app/(platform)/platform/[section]/page");
+const detailPage = await import("@/app/(platform)/platform/[section]/[id]/page");
+const platformLayout = await import("@/app/(platform)/layout");
 const settingsPage = await import("@/app/(studio)/settings/page");
 
 const WS = "11111111-1111-4111-8111-111111111111";
@@ -120,22 +123,45 @@ describe("who gets in", () => {
     ];
     for (const res of await Promise.all(posts)) expect(res.status).toBe(404);
     expect(fake.calls).toEqual([]);
-    await expect(adminPage.default({ searchParams: Promise.resolve({}) })).rejects.toThrow("NEXT_NOT_FOUND");
+    const pages = () => [
+      overviewPage.default(),
+      sectionPage.default({ params: Promise.resolve({ section: "firms" }) }),
+      detailPage.default({ params: Promise.resolve({ section: "firms", id: FIRM }) }),
+      platformLayout.default({ children: null }),
+    ];
+    for (const page of pages()) await expect(page).rejects.toThrow("NEXT_NOT_FOUND");
     fake.session = undefined;
     expect((await firms.GET()).status).toBe(401);
-    await expect(adminPage.default({ searchParams: Promise.resolve({}) })).rejects.toThrow("NEXT_NOT_FOUND");
+    for (const page of pages()) await expect(page).rejects.toThrow("NEXT_NOT_FOUND");
   });
 
-  it("an admin gets the page, on the tab and item in the address", async () => {
-    const el = (await adminPage.default({ searchParams: Promise.resolve({ tab: "firms", id: FIRM }) })) as { props: { initialTab: string; initialId: string | null } };
-    expect(el.props.initialTab).toBe("firms");
-    expect(el.props.initialId).toBe(FIRM);
-    const fallback = (await adminPage.default({ searchParams: Promise.resolve({ tab: "nope", id: "../x" }) })) as { props: { initialTab: string; initialId: string | null } };
-    expect(fallback.props).toMatchObject({ initialTab: "overview", initialId: null });
+  it("an admin gets each section at its own address, and each detail at /platform/<section>/<id>", async () => {
+    type El = { props: { tab: string; id: string | null } };
+    expect(((await overviewPage.default()) as El).props).toMatchObject({ tab: "overview", id: null });
+    for (const section of ["workspaces", "apps", "products", "firms", "licences", "vendors", "settings"]) {
+      const el = (await sectionPage.default({ params: Promise.resolve({ section }) })) as El;
+      expect(el.props).toMatchObject({ tab: section, id: null });
+    }
+    for (const section of ["workspaces", "apps", "firms"]) {
+      const el = (await detailPage.default({ params: Promise.resolve({ section, id: FIRM }) })) as El;
+      expect(el.props).toMatchObject({ tab: section, id: FIRM });
+    }
+    // Tab titles: the section's name ("Platform settings · Mynt platform admin", from the layout's template).
+    expect(await sectionPage.generateMetadata({ params: Promise.resolve({ section: "settings" }) })).toEqual({ title: "Platform settings" });
+    expect(await detailPage.generateMetadata({ params: Promise.resolve({ section: "firms", id: FIRM }) })).toEqual({ title: "Firms" });
+    expect(platformLayout.metadata.title).toEqual({ default: "Mynt platform admin", template: "%s · Mynt platform admin" });
+    // Anything else is a 404: an unknown section, Overview by name, an id where a section has no details, an id that isn't one.
+    for (const section of ["nope", "overview", "admin"]) await expect(sectionPage.default({ params: Promise.resolve({ section }) })).rejects.toThrow("NEXT_NOT_FOUND");
+    const bad: [string, string][] = [["products", FIRM], ["licences", LIC], ["vendors", OFF], ["settings", "x"], ["overview", FIRM], ["firms", "../x"], ["apps", "a b"], ["firms", "x".repeat(101)]];
+    for (const [section, id] of bad) await expect(detailPage.default({ params: Promise.resolve({ section, id }) })).rejects.toThrow("NEXT_NOT_FOUND");
+    // The layout is the platform admin's own, not the studio's shell.
+    const layout = (await platformLayout.default({ children: "page" })) as { type: { name: string }; props: { children: unknown } };
+    expect(layout.type.name).toBe("PlatformShell");
+    expect(layout.props.children).toBe("page");
   });
 
-  it("workspace Settings' old E-signature tab goes to Admin → Platform settings", async () => {
-    await expect(settingsPage.default({ searchParams: Promise.resolve({ tab: "esign" }) })).rejects.toThrow("NEXT_REDIRECT /admin?tab=settings");
+  it("workspace Settings' old E-signature tab goes to the platform admin's Platform settings", async () => {
+    await expect(settingsPage.default({ searchParams: Promise.resolve({ tab: "esign" }) })).rejects.toThrow("NEXT_REDIRECT /platform/settings");
   });
 
   it("writes come only from the studio's own origin, with strict bodies", async () => {

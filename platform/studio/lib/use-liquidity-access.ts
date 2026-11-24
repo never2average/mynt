@@ -9,7 +9,7 @@ import { useEffect, useState } from "react";
 import { NO_ACCESS, type LiquidityAccess } from "./liquidity";
 
 // licenceProvider: Mynt's licence-provider role, which opens the Licences page's Agreements tab (apps' agreements with its firm).
-// admin: a Mynt admin (the role Mynt gave the account, read from its whoami), who sees the sidebar's Admin group (/admin).
+// admin: a Mynt admin (the role Mynt gave the account, read from its whoami), who gets the sidebar's Platform admin badge (/platform).
 export type StudioAccess = { developer: boolean; liquidity: LiquidityAccess; owner: string | null; licenceProvider?: boolean; admin?: boolean };
 export const NO_STUDIO_ACCESS: StudioAccess = { developer: false, liquidity: NO_ACCESS, owner: null };
 

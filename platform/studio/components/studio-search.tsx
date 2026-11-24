@@ -130,8 +130,12 @@ const pick = async <T,>(url: string, read: (body: Record<string, unknown>) => T 
 function useSearchSources(open: boolean): SearchSources {
   const { selected, loading } = useWorkspace();
   // Apps, members, licences and audit actions are developers' (their routes are developer-only).
-  const developer = useStudioAccess()?.developer === true;
-  const [sources, setSources] = useState<SearchSources>({});
+  const access = useStudioAccess();
+  const developer = access?.developer === true;
+  // The platform admin's sections, only for Mynt admins (its pages are a 404 for anyone else).
+  const admin = access?.admin === true;
+  const [fetched, setSources] = useState<SearchSources>({});
+  const sources = useMemo(() => ({ ...fetched, admin }), [fetched, admin]);
   useEffect(() => {
     if (!open || loading || !developer) return;
     let live = true;

@@ -434,7 +434,7 @@ export const STUDIO_TOOLS = {
   delete_chat_session: z.object({ id: SessionId }).strict(),
 } as const;
 
-// Mynt admins' tools, for the Admin area (/admin) only: a separate allow-list that only an admin's session may call
+// Mynt admins' tools, for the platform admin (/platform) only: a separate allow-list that only an admin's session may call
 // (lib/studio-server.ts callAdminTool checks the role Mynt gave the account; Mynt checks it again on every call). The
 // chat, Ask AI and every other page use STUDIO_TOOLS, which holds none of these. Each is an existing admin tool,
 // with the arguments the Admin area sends; anything else (approving mainnet programs, the regulatory model, rails,

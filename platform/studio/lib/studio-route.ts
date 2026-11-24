@@ -59,7 +59,7 @@ export async function asDeveloper(
 }
 
 // The Admin area's routes (app/api/admin/*): only for an account Mynt says is an admin. Anyone else is told there's
-// nothing here (404), as the /admin page tells them; Mynt checks every call again.
+// nothing here (404), as the /platform pages tell them; Mynt checks every call again.
 export const NOT_FOUND = { error: "not_found" } as const;
 export function asAdmin(what: string, handle: (mynt: Client, session: Session) => Promise<NextResponse>): Promise<NextResponse> {
   return asDeveloper(what, handle, sessionIsAdmin, () => json(NOT_FOUND, 404));

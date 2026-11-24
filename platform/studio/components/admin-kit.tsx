@@ -1,6 +1,6 @@
 "use client"
 
-// The Admin area's building blocks (/admin, components/admin-view.tsx), in the studio's list and detail layouts:
+// The platform admin's building blocks (/platform, components/platform-view.tsx), in the studio's list and detail layouts:
 // a list is one toolbar row (full-width search, one Filters popover, labelled Import and Export CSV, then the tab's
 // call to action) over a full-height table paged 25 rows at a time; a detail is a metadata card on top, a tab
 // selector, and each tab a table. Tabs only show; every change is a labelled button opening a sheet (AdminSheet),
