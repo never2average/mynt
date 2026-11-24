@@ -485,6 +485,9 @@ export const ADMIN_TOOLS = {
   list_whitelist: z.object({}).strict(),
   invite_user: z.object({ email, roles: z.array(z.enum(MYNT_ROLES)).min(1).max(MYNT_ROLES.length) }).strict(),
   add_entity_member: z.object({ email, entity_id: uuid }).strict(),
+  // People: stop an email from using Mynt (what they created stays), and the audit log their Activity tab reads.
+  revoke_user: z.object({ email }).strict(),
+  audit_log: z.object({ limit: z.number().int().min(1).max(500).optional() }).strict(),
   set_entity_status: z.object({ entity_id: uuid, status: z.enum(ENTITY_STATUSES), note: z.string().trim().max(2000).optional() }).strict(),
   // Licences: firms' registered licences by review status, and the decision on one.
   list_license_reviews: z.object({ status: z.enum(["pending", "verified", "rejected", "suspended"]).optional() }).strict(),

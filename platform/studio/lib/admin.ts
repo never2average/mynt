@@ -2,11 +2,14 @@
 // answers. Every list is platform-wide (all workspaces, all firms), never scoped to a workspace picked in the studio. Pure, for
 // the routes, the views and the tests. A figure Mynt didn't measure is null here and "Not measured" on screen, never 0.
 
-export const ADMIN_TABS = ["overview", "workspaces", "apps", "products", "firms", "licences", "vendors", "settings"] as const
+import { PERSON_ID } from "./people"
+
+export const ADMIN_TABS = ["overview", "workspaces", "people", "apps", "products", "firms", "licences", "vendors", "settings"] as const
 export type AdminTab = (typeof ADMIN_TABS)[number]
 export const ADMIN_TAB_LABELS: Record<AdminTab, string> = {
   overview: "Overview",
   workspaces: "Workspaces",
+  people: "People",
   apps: "Apps",
   products: "Products",
   firms: "Firms",
@@ -18,13 +21,15 @@ export const adminTabOf = (v: unknown): AdminTab => (ADMIN_TABS.includes(v as Ad
 
 // Where it lives: its own base path and layout (app/(platform)), never inside the studio's shell. Overview is
 // /platform, each other section /platform/<section>, and a row opened in Workspaces, Apps or Firms
-// /platform/<section>/<id>.
+// /platform/<section>/<id>. A person's id is their account's or their email's (lib/people.ts).
 export const PLATFORM_BASE = "/platform"
 export const PLATFORM_NAME = "Mynt platform admin"
 // The sections whose rows open a detail page.
-export const ADMIN_DETAIL_TABS: readonly AdminTab[] = ["workspaces", "apps", "firms"]
+export const ADMIN_DETAIL_TABS: readonly AdminTab[] = ["workspaces", "people", "apps", "firms"]
 // An id in the address: letters, digits and dashes (Mynt's uuids), nothing that could leave the path.
 export const ADMIN_ID = /^[A-Za-z0-9-]{1,100}$/
+/** Whether an id may be opened in a section: a detail section, and an id of its kind. */
+export const adminIdOk = (tab: AdminTab, id: string) => ADMIN_DETAIL_TABS.includes(tab) && (tab === "people" ? PERSON_ID.test(id) : ADMIN_ID.test(id))
 export const adminHref = (tab: AdminTab, id?: string) =>
   tab === "overview" ? PLATFORM_BASE : `${PLATFORM_BASE}/${tab}${id ? `/${encodeURIComponent(id)}` : ""}`
 export const isPlatformPath = (pathname: string) => pathname === PLATFORM_BASE || pathname.startsWith(`${PLATFORM_BASE}/`)
@@ -37,7 +42,7 @@ export function platformRouteOf(pathname: string): { tab: AdminTab; id: string |
   if (section === "overview" || !ADMIN_TABS.includes(section as AdminTab) || rest.length) return null
   const tab = section as AdminTab
   if (id === undefined) return { tab, id: null }
-  return ADMIN_DETAIL_TABS.includes(tab) && ADMIN_ID.test(id) ? { tab, id } : null
+  return adminIdOk(tab, id) ? { tab, id } : null
 }
 
 /** The header's and the tab's title for a /platform address: the section's name, or the platform admin's own. */
