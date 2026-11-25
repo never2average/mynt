@@ -158,7 +158,7 @@ describe("promotions, attention and workspace settings on the allow-list", () =>
 
 describe("My services (service providers) on the allow-list", () => {
   const OFF = "55555555-5555-4555-8555-555555555555";
-  const TERMS = { document_url: "https://example.com/terms.pdf", document_sha256: "a".repeat(64), summary: "Our standard terms.", pricing_summary: "$1 per check" };
+  const TERMS = { document_url: "https://example.com/terms.pdf", document_sha256: "a".repeat(64), summary: "Our standard terms.", pricing_summary: "$1 per check", scopes: ["technology"] };
   it("reads the caller's own firm only, and writes services strictly: https endpoints, a SHA-256, no extra fields", () => {
     expect(parseStudioCall("get_vendor_onboarding", {})).toHaveProperty("tool");
     expect(parseStudioCall("get_vendor_onboarding", { offering_id: OFF })).toHaveProperty("tool");
@@ -171,6 +171,12 @@ describe("My services (service providers) on the allow-list", () => {
     expect(parseStudioCall("update_vendor_offering", { offering_id: OFF, standard_terms: TERMS })).toHaveProperty("tool");
     expect(parseStudioCall("update_vendor_offering", { offering_id: OFF, standard_terms: { ...TERMS, document_sha256: "A".repeat(64) } })).toHaveProperty("error");
     expect(parseStudioCall("update_vendor_offering", { offering_id: OFF, standard_terms: { ...TERMS, version: 3 } })).toHaveProperty("error");
+    // The terms name what they cover: at least one scope from the fixed list, each once.
+    const { scopes: _scopes, ...unscoped } = TERMS;
+    expect(parseStudioCall("update_vendor_offering", { offering_id: OFF, standard_terms: unscoped })).toHaveProperty("error");
+    expect(parseStudioCall("update_vendor_offering", { offering_id: OFF, standard_terms: { ...TERMS, scopes: [] } })).toHaveProperty("error");
+    expect(parseStudioCall("update_vendor_offering", { offering_id: OFF, standard_terms: { ...TERMS, scopes: ["marketing"] } })).toHaveProperty("error");
+    expect(parseStudioCall("update_vendor_offering", { offering_id: OFF, standard_terms: { ...TERMS, scopes: ["manpower", "financial_regulatory_operations"] } })).toHaveProperty("tool");
     expect(parseStudioCall("update_vendor_offering", { offering_id: OFF, listed: true })).toHaveProperty("tool");
     expect(parseStudioCall("update_vendor_offering", { offering_id: "x", listed: true })).toHaveProperty("error");
     expect(parseStudioCall("run_conformance", { offering_id: OFF, test_credential: "c" })).toHaveProperty("tool");

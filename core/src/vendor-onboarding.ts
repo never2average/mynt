@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { licenseInForce } from "./access.js";
+import { agreementScopeLabel } from "./app-agreements-schema.js";
 import type { Entity, HeldLicense, Store, User } from "./store.js";
 import { effectiveRoles } from "./store.js";
 import { getOffering, offeringsOf, rampRefusal, serviceType, type Offering, type ServiceType } from "./vendors.js";
@@ -198,10 +199,23 @@ async function offeringOnboarding(store: Store, o: Offering, held: HeldLicense[]
   else raws.push(step("conformance", "Pass Mynt's conformance test", "todo", `The last run on ${day(last.at)} failed: ${failureWords(last)}. Fix your endpoint and run it again.`, "run_conformance", "vendor", conformanceFacts));
 
   // Standard terms: what subscribers accept in the Marketplace.
-  const termsFacts = { terms_version: o.terms?.version ?? null, set_at: o.terms?.set_at ?? null };
-  if (o.terms) raws.push(step("terms", "Set your standard terms", "done", `Version ${o.terms.version}, set on ${day(o.terms.set_at) ?? "an earlier date"}.`, "update_vendor_offering", "vendor", termsFacts));
+  const termsFacts = { terms_version: o.terms?.version ?? null, set_at: o.terms?.set_at ?? null, scopes: o.terms?.scopes ?? [] };
+  // Terms from before scopes were recorded: they stand (agreements made on them keep no scopes), but new terms name them.
+  if (o.terms && !o.terms.scopes.length && !suspended)
+    raws.push(
+      step(
+        "terms",
+        "Set your standard terms",
+        "todo",
+        `Version ${o.terms.version} doesn't say what it covers. Set new terms with their scope (technology, manpower or financial regulatory operations); agreements already made keep version ${o.terms.version}.`,
+        "update_vendor_offering",
+        "vendor",
+        termsFacts,
+      ),
+    );
+  else if (o.terms) raws.push(step("terms", "Set your standard terms", "done", `Version ${o.terms.version}, set on ${day(o.terms.set_at) ?? "an earlier date"}${o.terms.scopes.length ? `. Scope: ${o.terms.scopes.map(agreementScopeLabel).join(", ")}` : ""}.`, "update_vendor_offering", "vendor", termsFacts));
   else if (suspended) raws.push(step("terms", "Set your standard terms", "blocked", suspendedWords, "suspend_vendor_offering", "admin", termsFacts));
-  else raws.push(step("terms", "Set your standard terms", "todo", "No standard terms yet. App teams can't subscribe from the Marketplace without them.", "update_vendor_offering", "vendor", termsFacts));
+  else raws.push(step("terms", "Set your standard terms", "todo", "No standard terms yet: set them with their scope (technology, manpower or financial regulatory operations). App teams can't subscribe from the Marketplace without them.", "update_vendor_offering", "vendor", termsFacts));
 
   // Listing.
   const listedFacts = { offering_status: o.status };
@@ -225,11 +239,11 @@ async function offeringOnboarding(store: Store, o: Offering, held: HeldLicense[]
 // Every version of an offering's standard terms Mynt knows: the current one in full, earlier ones from the audit log
 // (version, SHA-256, when, by whom) and from the agreements that accepted them (each keeps its own copy).
 async function termsVersions(store: Store, o: Offering) {
-  type V = { version: number; current: boolean; document_url: string | null; document_sha256: string | null; summary: string | null; pricing_summary: string | null; set_at: string | null; set_by: string | null; agreements: number };
+  type V = { version: number; current: boolean; document_url: string | null; document_sha256: string | null; summary: string | null; pricing_summary: string | null; scopes: string[] | null; set_at: string | null; set_by: string | null; agreements: number };
   const by = new Map<number, V>();
   const get = (version: number): V => {
     let v = by.get(version);
-    if (!v) by.set(version, (v = { version, current: false, document_url: null, document_sha256: null, summary: null, pricing_summary: null, set_at: null, set_by: null, agreements: 0 }));
+    if (!v) by.set(version, (v = { version, current: false, document_url: null, document_sha256: null, summary: null, pricing_summary: null, scopes: null, set_at: null, set_by: null, agreements: 0 }));
     return v;
   };
   const audits = await store.db.query(
@@ -237,16 +251,17 @@ async function termsVersions(store: Store, o: Offering) {
     [o.id],
   );
   for (const r of audits.rows) {
-    const d = (r.details ?? {}) as { version?: unknown; document_sha256?: unknown };
+    const d = (r.details ?? {}) as { version?: unknown; document_sha256?: unknown; scopes?: unknown };
     if (typeof d.version !== "number") continue;
     const v = get(d.version);
     v.document_sha256 ??= typeof d.document_sha256 === "string" ? d.document_sha256 : null;
+    v.scopes ??= Array.isArray(d.scopes) ? (d.scopes as string[]) : null;
     v.set_at = iso(r.created_at);
     v.set_by = (r.actor as string | null) ?? null;
   }
   const agreed = await store.db.query(
-    `SELECT terms_version, document_url, document_sha256, terms_summary, pricing_summary, counterparty_signed_at, count(*)::int AS n FROM ${T}.app_agreements
-      WHERE offering_id = $1 AND terms_version IS NOT NULL GROUP BY terms_version, document_url, document_sha256, terms_summary, pricing_summary, counterparty_signed_at`,
+    `SELECT terms_version, document_url, document_sha256, terms_summary, pricing_summary, scopes, counterparty_signed_at, count(*)::int AS n FROM ${T}.app_agreements
+      WHERE offering_id = $1 AND terms_version IS NOT NULL GROUP BY terms_version, document_url, document_sha256, terms_summary, pricing_summary, scopes, counterparty_signed_at`,
     [o.id],
   );
   for (const r of agreed.rows) {
@@ -255,12 +270,13 @@ async function termsVersions(store: Store, o: Offering) {
     v.document_sha256 ??= (r.document_sha256 as string | null) ?? null;
     v.summary ??= (r.terms_summary as string | null) ?? null;
     v.pricing_summary ??= (r.pricing_summary as string | null) ?? null;
+    v.scopes ??= (r.scopes as string[] | null) ?? null;
     v.set_at ??= iso(r.counterparty_signed_at);
     v.agreements += Number(r.n ?? 0);
   }
   if (o.terms) {
     const v = get(o.terms.version);
-    Object.assign(v, { current: true, document_url: o.terms.document_url, document_sha256: o.terms.document_sha256, summary: o.terms.summary, pricing_summary: o.terms.pricing_summary, set_at: o.terms.set_at ?? v.set_at });
+    Object.assign(v, { current: true, document_url: o.terms.document_url, document_sha256: o.terms.document_sha256, summary: o.terms.summary, pricing_summary: o.terms.pricing_summary, scopes: o.terms.scopes, set_at: o.terms.set_at ?? v.set_at });
   }
   return [...by.values()].sort((a, b) => b.version - a.version);
 }

@@ -9,8 +9,8 @@ export const dynamic = "force-dynamic";
 type Params = { params: Promise<{ offeringId: string }> };
 
 // POST: Set standard terms (update_vendor_offering { standard_terms }): the document's https link and its SHA-256
-// (computed in the browser from the file, or pasted), a summary and the pricing in words. Anything changed is a new
-// version; agreements already made keep the version they accepted. Only the firm's own members set them.
+// (computed in the browser from the file, or pasted), a summary, the pricing in words and the scopes they cover (at
+// least one). Anything changed, scopes included, is a new version; agreements already made keep the version they accepted. Only the firm's own members set them.
 const Body = z.object({ standard_terms: standardTerms }).strict();
 
 export async function POST(req: Request, { params }: Params) {

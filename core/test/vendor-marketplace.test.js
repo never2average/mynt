@@ -20,6 +20,7 @@ const TERMS = {
   document_sha256: "a".repeat(64),
   summary: "Standard identity checks, 99.9% uptime, data kept 30 days.",
   pricing_summary: "$0.40 per check, invoiced monthly by the vendor",
+  scopes: ["technology"],
 };
 const CREDENTIAL = "idv-test-cred-41c9";
 
@@ -239,4 +240,69 @@ test("prerequisites still apply; offerings without standard terms subscribe as b
   assert.equal(contracts[0].no_standard_terms, true);
   assert.equal(contracts[0].terms_version, null);
   assert.equal(ok(await w.vendor.call("list_my_subscribers"))[0].terms_accepted, null);
+});
+
+test("standard terms name their scopes: required, part of the version, copied onto each agreement; legacy terms stay empty", async () => {
+  const w = await setup();
+  const id = await w.offering("identity_check", "Verify Co identity");
+  const { scopes: _s, ...noScopes } = TERMS;
+  refused(await w.vendor.call("update_vendor_offering", { offering_id: id, standard_terms: noScopes }), /scopes/);
+  refused(await w.vendor.call("update_vendor_offering", { offering_id: id, standard_terms: { ...TERMS, scopes: [] } }), /at least one scope/);
+  refused(await w.vendor.call("update_vendor_offering", { offering_id: id, standard_terms: { ...TERMS, scopes: ["technology", "technology"] } }), /each scope once/);
+  refused(await w.vendor.call("update_vendor_offering", { offering_id: id, standard_terms: { ...TERMS, scopes: ["marketing"] } }));
+  const v1 = ok(await w.vendor.call("update_vendor_offering", { offering_id: id, standard_terms: { ...TERMS, scopes: ["technology", "manpower"] } }));
+  assert.equal(v1.terms.version, 1);
+  assert.deepEqual(v1.terms.scopes, ["technology", "manpower"]);
+  // The same scopes in another order are the same terms; a scope change is a new version.
+  assert.equal(ok(await w.vendor.call("update_vendor_offering", { offering_id: id, standard_terms: { ...TERMS, scopes: ["manpower", "technology"] } })).terms.version, 1);
+
+  const row = ok(await w.dev.call("list_vendor_offerings", { region: "US" })).find((o) => o.offering_id === id);
+  assert.deepEqual(row.standard_terms.scopes, ["technology", "manpower"]);
+  assert.deepEqual(row.standard_terms.scope_labels, ["Technology", "Manpower"]);
+
+  const sub = ok(await w.dev.call("subscribe_vendor_service", { offering_id: id, accept_terms_version: 1, app_ids: [w.app.id] }));
+  assert.deepEqual(sub.terms_accepted[0].scopes, ["technology", "manpower"]);
+  const contract = ok(await w.dev.call("list_app_agreements", { app_id: w.app.id })).vendor_contracts[0];
+  assert.deepEqual([contract.scopes, contract.scope_labels], [["technology", "manpower"], ["Technology", "Manpower"]]);
+  assert.equal(ok(await w.dev.call("list_app_agreements", { app_id: w.app2.id })).vendor_contracts[0].scopes, null, "no agreement for that app: none recorded, not invented");
+  const v2 = ok(await w.vendor.call("update_vendor_offering", { offering_id: id, standard_terms: { ...TERMS, scopes: ["financial_regulatory_operations"] } }));
+  assert.equal(v2.terms.version, 2, "a scope change is a new terms version");
+  const trail = (await w.store.db.query(`SELECT details FROM ${T}.audit_log WHERE action = 'set_vendor_terms' AND target = $1 ORDER BY created_at`, [id])).rows;
+  assert.deepEqual(trail.map((r) => r.details.scopes), [["technology", "manpower"], ["financial_regulatory_operations"]]);
+  ok(await w.dev.call("subscribe_vendor_service", { offering_id: id, accept_terms_version: 2, app_ids: [w.app2.id] }));
+  // Each agreement keeps the scopes of the version it accepted.
+  assert.deepEqual((await agreementsOf(w.store, sub.subscription_id)).map((a) => [a.app_id, a.terms_version, a.scopes]), [
+    [w.app.id, 1, ["technology", "manpower"]],
+    [w.app2.id, 2, ["financial_regulatory_operations"]],
+  ]);
+  const accept = (await w.store.db.query(`SELECT details FROM ${T}.audit_log WHERE action = 'accept_vendor_terms' ORDER BY created_at`)).rows;
+  assert.deepEqual(accept.map((r) => r.details.scopes), [["technology", "manpower"], ["financial_regulatory_operations"]]);
+
+  // Filtering by scope finds vendor agreements, on both sides.
+  const tech = ok(await w.dev.call("list_app_agreements", { app_id: w.app.id, scope: "technology" })).agreements;
+  assert.deepEqual(tech.map((a) => [a.kind, a.terms_version, a.scope_labels]), [["vendor", 1, ["Technology", "Manpower"]]]);
+  assert.deepEqual(ok(await w.dev.call("list_app_agreements", { app_id: w.app.id, scope: "financial_regulatory_operations" })).agreements, []);
+  assert.deepEqual(ok(await w.vendor.call("list_app_agreements", { scope: "financial_regulatory_operations" })).agreements.map((a) => a.app.id), [w.app2.id]);
+
+  // Terms set before scopes were recorded (written directly, as an older server did): they stand, and an agreement
+  // made on them records no scopes ("Not set"), never invented ones.
+  const legacy = await w.offering("identity_check", "Verify Co legacy terms");
+  await w.store.db.query(
+    `UPDATE ${T}.vendor_offerings SET terms_version = 1, terms_document_url = $2, terms_document_sha256 = $3, terms_summary = $4, pricing_summary = $5, terms_set_by = $6, terms_set_at = now() WHERE id = $1`,
+    [legacy, TERMS.document_url, TERMS.document_sha256, TERMS.summary, TERMS.pricing_summary, w.vendor.user.id],
+  );
+  const old = ok(await w.dev.call("list_vendor_offerings", { region: "US" })).find((o) => o.offering_id === legacy);
+  assert.equal(old.standard_terms.version, 1);
+  assert.deepEqual(old.standard_terms.scopes, []);
+  const legacySub = ok(await w.dev.call("subscribe_vendor_service", { offering_id: legacy, accept_terms_version: 1, app_ids: [w.app.id] }));
+  const [la] = await agreementsOf(w.store, legacySub.subscription_id);
+  assert.equal(la.terms_version, 1);
+  assert.deepEqual(la.scopes, []);
+  const listedLegacy = ok(await w.dev.call("list_app_agreements", { app_id: w.app.id })).agreements.find((a) => a.id === la.id);
+  assert.deepEqual(listedLegacy.scopes, []);
+  assert.deepEqual(listedLegacy.scope_labels, []);
+  // New terms on that offering name their scopes, as a new version; the legacy agreement keeps none.
+  const next = ok(await w.vendor.call("update_vendor_offering", { offering_id: legacy, standard_terms: TERMS }));
+  assert.equal(next.terms.version, 2);
+  assert.deepEqual((await agreementsOf(w.store, legacySub.subscription_id))[0].scopes, []);
 });

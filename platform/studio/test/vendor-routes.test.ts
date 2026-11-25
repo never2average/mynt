@@ -85,7 +85,7 @@ const post = (path: string, body: unknown) => new Request(`http://localhost:3000
 const params = (offeringId: string) => ({ params: Promise.resolve({ offeringId }) });
 const session = (roles: string[]) => ({ id: "s", userId: "v1", createdAt: 0, lastSeen: 0, tokens: { access_token: "t", token_type: "Bearer" }, roles, rolesAt: Date.now() }) as Session;
 const writes = () => fake.calls.filter((c) => ["create_vendor_offering", "update_vendor_offering", "run_conformance"].includes(c.name));
-const TERMS = { document_url: "https://example.com/terms.pdf", document_sha256: "a".repeat(64), summary: "Our standard terms.", pricing_summary: "$1 per check" };
+const TERMS = { document_url: "https://example.com/terms.pdf", document_sha256: "a".repeat(64), summary: "Our standard terms.", pricing_summary: "$1 per check", scopes: ["technology"] };
 
 beforeEach(() => {
   fake.session = session(["vendor"]);
@@ -148,6 +148,7 @@ describe("My services' routes, for a service provider", () => {
     expect((await one.POST(post(`/api/vendor/offerings/${OFF}`, { test_base_url: "http://test.example.com" }), params(OFF))).status).toBe(400);
     expect((await terms.POST(post(`/api/vendor/offerings/${OFF}/terms`, { standard_terms: { ...TERMS, document_sha256: "nope" } }), params(OFF))).status).toBe(400);
     expect((await terms.POST(post(`/api/vendor/offerings/${OFF}/terms`, { standard_terms: { ...TERMS, document_url: "http://example.com/t.pdf" } }), params(OFF))).status).toBe(400);
+    expect((await terms.POST(post(`/api/vendor/offerings/${OFF}/terms`, { standard_terms: { ...TERMS, scopes: [] } }), params(OFF))).status).toBe(400); // a scope is required
     fake.ownOrigin = false;
     expect((await create.POST(post("/api/vendor/offerings", { region: "US" }))).status).toBe(403);
     expect((await terms.POST(post(`/api/vendor/offerings/${OFF}/terms`, { standard_terms: TERMS }), params(OFF))).status).toBe(403);

@@ -1,6 +1,8 @@
 // The tables for app agreements and an app's target customers (app-agreements.ts), on their own so the store creates
 // them without importing the tools.
 
+import { z } from "zod";
+
 const T = "financial_products";
 
 export const APP_AGREEMENT_KINDS = ["program", "vendor", "data_sharing", "msa", "sla"] as const;
@@ -16,6 +18,13 @@ export const AGREEMENT_SCOPES = [
 export const AGREEMENT_SCOPE_KEYS = AGREEMENT_SCOPES.map((s) => s.key) as unknown as readonly ["technology", "manpower", "financial_regulatory_operations"];
 export type AgreementScope = (typeof AGREEMENT_SCOPES)[number]["key"];
 export const agreementScopeLabel = (key: string) => AGREEMENT_SCOPES.find((s) => s.key === key)?.label ?? key;
+// What an agreement (or a vendor's standard terms) covers: one or more of AGREEMENT_SCOPES, each once.
+export const AgreementScopesSchema = z
+  .array(z.enum(AGREEMENT_SCOPE_KEYS))
+  .min(1, "Name at least one scope: technology, manpower or financial_regulatory_operations")
+  .max(AGREEMENT_SCOPE_KEYS.length)
+  .refine((s) => new Set(s).size === s.length, "Name each scope once")
+  .describe("What the agreement covers, one or more of: technology (a platform or software licence), manpower (people and staffing), financial_regulatory_operations (compliance and regulatory operations)");
 
 export const APP_AGREEMENT_TABLES = `
   -- A business agreement between an app's workspace (the developer side) and another firm on Mynt: a program agreement
@@ -90,6 +99,9 @@ export const APP_AGREEMENT_TABLES = `
   ALTER TABLE ${T}.vendor_offerings ADD COLUMN IF NOT EXISTS pricing_summary text;
   ALTER TABLE ${T}.vendor_offerings ADD COLUMN IF NOT EXISTS terms_set_by uuid REFERENCES ${T}.users(id);
   ALTER TABLE ${T}.vendor_offerings ADD COLUMN IF NOT EXISTS terms_set_at timestamptz;
+  -- What the standard terms cover (AGREEMENT_SCOPES), part of the terms version: every click-through agreement copies
+  -- them. Terms versions from before scopes keep an empty list, and so do the agreements made on them ("Not set").
+  ALTER TABLE ${T}.vendor_offerings ADD COLUMN IF NOT EXISTS terms_scopes text[] NOT NULL DEFAULT '{}';
   -- The customer segments (personas) an app targets, picked from its products' customer_segments.
   CREATE TABLE IF NOT EXISTS ${T}.app_target_segments (
     app_id uuid NOT NULL REFERENCES ${T}.apps(id),

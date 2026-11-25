@@ -228,6 +228,7 @@ export function peekRows(o: Offering, tab: PeekTab): Pair[] {
       if (!o.terms) return [["Standard terms", "No standard terms on file. The provider hasn't set any yet, so there's nothing to accept."]]
       return [
         ["Version", `v${o.terms.version}`],
+        ["Scope", <span key="scope" data-terms-scope>{o.terms.scopeLabel}</span>],
         ["Summary", o.terms.summary],
         [
           "Document",
@@ -237,7 +238,7 @@ export function peekRows(o: Offering, tab: PeekTab): Pair[] {
         ],
         ["Document SHA-256", <span key="sha" className="font-mono text-xs break-all">{o.terms.documentSha256}</span>],
         ["Set on", o.terms.setAt ? o.terms.setAt.slice(0, 10) : "—"],
-        ["How it's signed", "The provider accepts these terms by listing them; you accept them by subscribing. A later version doesn't change your agreement."],
+        ["How it's signed", "The provider accepts these terms by listing them; you accept them by subscribing. Your agreement records this version's scope; a later version doesn't change your agreement."],
       ]
     case "pricing":
       return [

@@ -36,6 +36,7 @@ import {
   type TermsVersion,
   type VendorOffering,
 } from "@/lib/vendor-area"
+import { scopeLabelOf } from "@/lib/app-panel"
 
 export type VendorData = { onboarding: Onboarding; offerings: VendorOffering[]; serviceTypes: ServiceTypeOption[]; licences: LicenceOption[] }
 export type OfferingDetailData = { offering: VendorOffering; runs: ConformanceRun[]; termsVersions: TermsVersion[]; subscribers: Subscriber[] | null }
@@ -266,6 +267,7 @@ export function OfferingDetailView({
           ["Live endpoint", o.liveBaseUrl ?? "Not yet"],
           ["Conformance", conformanceWords(o.lastConformance)],
           ["Standard terms", o.terms ? `v${o.terms.version}` : "None yet"],
+          ["Terms scope", o.terms ? o.terms.scopeLabel : "None yet"],
           ["Subscribers", o.subscribers === null ? "Not known" : String(o.subscribers)],
           ["Credential", o.requiresCredential ? "Subscribers need one you issue" : "Not needed"],
         ]}
@@ -323,7 +325,7 @@ export function OfferingDetailView({
         )}
         {tab === "terms" && (
           <AdminTable
-            head={["Version", "Current", "Set on", "Set by", "Summary", "Pricing", "Document", "SHA-256", "Agreements"]}
+            head={["Version", "Current", "Set on", "Set by", "Summary", "Pricing", "Scope", "Document", "SHA-256", "Agreements"]}
             rowKeys={detail.termsVersions.map((v) => `v${v.version}`)}
             rows={detail.termsVersions.map((v) => [
               `v${v.version}`,
@@ -332,6 +334,9 @@ export function OfferingDetailView({
               v.setBy ?? "—",
               v.summary ?? "Not kept",
               v.pricing ?? "Not kept",
+              <span key="scope" data-terms-version-scope>
+                {v.scopes === null ? "Not kept" : scopeLabelOf(v.scopes)}
+              </span>,
               v.documentUrl ? (
                 <a key="d" href={v.documentUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 underline underline-offset-4">
                   Read <ExternalLink className="size-3" />

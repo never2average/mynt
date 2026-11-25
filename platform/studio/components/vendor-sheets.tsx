@@ -3,15 +3,18 @@
 // My services' sheets: every change in a service provider's own area is a labelled button opening one of these, which
 // posts to an /api/vendor route and shows Mynt's answer in its own words. Create service and Edit service
 // (create_vendor_offering, update_vendor_offering), Set standard terms (an https link with the document's SHA-256,
-// computed here in the browser from the file, or pasted; a summary; the pricing in words; each change a new version),
+// computed here in the browser from the file, or pasted; a summary; the pricing in words; the Scope, at least one;
+// each change a new version),
 // Run conformance (Mynt's own test of the endpoint, with each failure) and List service / Unlist service.
 // Server-renderable for the tests.
 import { useEffect, useMemo, useState } from "react"
 import { Copy } from "lucide-react"
 
 import { AdminSheet, Field, fieldClass, useAdminAction } from "@/components/admin-kit"
+import { ScopeField } from "@/components/agreement-scope-field"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import type { AgreementScope } from "@/lib/app-panel"
 import { categoryLabel } from "@/lib/marketplace"
 import { isHttpsUrl, sha256Hex, sha256Of, type LicenceOption, type ServiceTypeOption, type VendorOffering } from "@/lib/vendor-area"
 
@@ -220,6 +223,7 @@ export function TermsSheet({ offering, onClose, onDone, fetcher }: { offering: V
   const [fileName, setFileName] = useState<string | null>(null)
   const [summary, setSummary] = useState("")
   const [pricing, setPricing] = useState("")
+  const [scopes, setScopes] = useState<AgreementScope[]>([])
   const [invalid, setInvalid] = useState<string | null>(null)
   useEffect(() => {
     reset()
@@ -229,6 +233,8 @@ export function TermsSheet({ offering, onClose, onDone, fetcher }: { offering: V
     setSha(offering?.terms?.documentSha256 ?? "")
     setSummary(offering?.terms?.summary ?? "")
     setPricing(offering?.terms?.pricing ?? "")
+    // Terms from before scopes were recorded have none: the vendor chooses them for the new version.
+    setScopes(offering?.terms?.scopes ?? [])
   }, [offering, reset])
   const next = (offering?.terms?.version ?? 0) + 1
   return (
@@ -237,7 +243,7 @@ export function TermsSheet({ offering, onClose, onDone, fetcher }: { offering: V
       open={offering !== null}
       onClose={onClose}
       title="Set standard terms"
-      description={`What subscribers accept in the Marketplace, with no negotiation. Saving a change makes version ${next}; agreements already made keep the version they accepted.`}
+      description={`What subscribers accept in the Marketplace, with no negotiation. Saving a change makes version ${next}, a change of scope included; agreements already made keep the version and scope they accepted.`}
       error={invalid ?? error}
       result={result}
     >
@@ -252,8 +258,11 @@ export function TermsSheet({ offering, onClose, onDone, fetcher }: { offering: V
             if (!digest) return setInvalid("The document's SHA-256 is 64 hex characters: choose the file to compute it, or paste it.")
             if (summary.trim().length < 10) return setInvalid("Write a short summary (10 characters or more).")
             if (pricing.trim().length < 3) return setInvalid("Say your pricing in words.")
+            if (!scopes.length) return setInvalid("Choose what your terms cover: at least one scope.")
             setInvalid(null)
-            const r = await run(offeringPath(offering.id, "/terms"), { standard_terms: { document_url: url.trim(), document_sha256: digest, summary: summary.trim(), pricing_summary: pricing.trim() } })
+            const r = await run(offeringPath(offering.id, "/terms"), {
+              standard_terms: { document_url: url.trim(), document_sha256: digest, summary: summary.trim(), pricing_summary: pricing.trim(), scopes },
+            })
             if (r?.ok) onDone()
           }}
         >
@@ -282,8 +291,12 @@ export function TermsSheet({ offering, onClose, onDone, fetcher }: { offering: V
           <Field label="Pricing in words" hint="e.g. $0.40 per check, invoiced monthly. You bill subscribers directly, never through Mynt">
             <Input value={pricing} onChange={(e) => setPricing(e.target.value)} maxLength={1000} required data-terms-pricing />
           </Field>
+          <div data-terms-scopes>
+            <ScopeField value={scopes} onChange={setScopes} />
+            <p className="mt-1 text-xs text-muted-foreground">Every agreement made on these terms records this scope.</p>
+          </div>
           <div>
-            <Button type="submit" disabled={busy || result !== null} data-terms-submit>
+            <Button type="submit" disabled={busy || result !== null || !scopes.length} data-terms-submit>
               {busy ? "Saving…" : "Save standard terms"}
             </Button>
           </div>

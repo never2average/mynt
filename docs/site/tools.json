@@ -4480,7 +4480,7 @@
     {
       "name": "create_vendor_offering",
       "title": "Offer a standard service",
-      "description": "Vendor: offer a standard service type in a region from your test (and live) HTTPS endpoint, with your per-call price and the licences you hold for it, and your standard terms (standard_terms: the document link (https) and its SHA-256, a short summary and your pricing in words; you bill subscribers directly). Listing an offering with terms is your standing acceptance of them: app workspaces subscribe by accepting them in the marketplace, with no negotiation. It starts as a draft: run_conformance, then update_vendor_offering { listed: true }. The conformance signing secret is shown once.",
+      "description": "Vendor: offer a standard service type in a region from your test (and live) HTTPS endpoint, with your per-call price and the licences you hold for it, and your standard terms (standard_terms: the document link (https) and its SHA-256, a short summary, your pricing in words, and scopes: what they cover, one or more of technology, manpower, financial_regulatory_operations, recorded on every agreement made on them; you bill subscribers directly). Listing an offering with terms is your standing acceptance of them: app workspaces subscribe by accepting them in the marketplace, with no negotiation. It starts as a draft: run_conformance, then update_vendor_offering { listed: true }. The conformance signing secret is shown once.",
       "area": "vendors",
       "roles": [
         "vendor",
@@ -4577,13 +4577,28 @@
                 "minLength": 3,
                 "maxLength": 1000,
                 "description": "Your pricing in words (e.g. '$0.40 per check, invoiced monthly'); you bill subscribers directly, never through Mynt"
+              },
+              "scopes": {
+                "minItems": 1,
+                "maxItems": 3,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "technology",
+                    "manpower",
+                    "financial_regulatory_operations"
+                  ]
+                },
+                "description": "What your terms cover, one or more of: technology (a platform or software licence), manpower (people and staffing), financial_regulatory_operations (compliance and regulatory operations); every agreement made on these terms records them"
               }
             },
             "required": [
               "document_url",
               "document_sha256",
               "summary",
-              "pricing_summary"
+              "pricing_summary",
+              "scopes"
             ],
             "additionalProperties": false
           }
@@ -9710,7 +9725,7 @@
     {
       "name": "list_app_agreements",
       "title": "App agreements",
-      "description": "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, program_coverage (each product and the licence provider sponsoring it where the app serves, and whether a signed program agreement in force covers it: production needs every one; production_gate says what's missing, and flagged when the app is already in production without one), the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on (each with the version of the vendor's standard terms accepted for this app, or no_standard_terms when none were), and introductions the business-development agent has in progress for its members (null when that agent isn't running here). With workspace_id (developer, any member): every agreement of the workspace's apps (all kinds), can_manage, and proposable_counterparties (the sponsors of its apps' products). Without either (licence provider or vendor): the agreements made with your firm, both those apps' workspaces proposed and those your firm proposed, and proposable_workspaces (those whose apps use products your firm sponsors, or that already have an agreement with it). Each agreement says which side proposed it (proposed_by_side), the template it was made on, your_side and what you may do now (actions: accept, decline, sign, withdraw, end). Each agreement carries its scopes (what it covers: technology, manpower, financial_regulatory_operations; empty on one from before scopes were recorded) and scope_labels. status and scope filter any list.",
+      "description": "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, program_coverage (each product and the licence provider sponsoring it where the app serves, and whether a signed program agreement in force covers it: production needs every one; production_gate says what's missing, and flagged when the app is already in production without one), the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on (each with the version of the vendor's standard terms accepted for this app and the scopes it covers, or no_standard_terms when none were), and introductions the business-development agent has in progress for its members (null when that agent isn't running here). With workspace_id (developer, any member): every agreement of the workspace's apps (all kinds), can_manage, and proposable_counterparties (the sponsors of its apps' products). Without either (licence provider or vendor): the agreements made with your firm, both those apps' workspaces proposed and those your firm proposed, and proposable_workspaces (those whose apps use products your firm sponsors, or that already have an agreement with it). Each agreement says which side proposed it (proposed_by_side), the template it was made on, your_side and what you may do now (actions: accept, decline, sign, withdraw, end). Each agreement carries its scopes (what it covers: technology, manpower, financial_regulatory_operations; empty on one from before scopes were recorded) and scope_labels. status and scope filter any list.",
       "area": "apps",
       "roles": [
         "developer",
@@ -11730,7 +11745,7 @@
     {
       "name": "list_vendor_offerings",
       "title": "Standard services you can plug in",
-      "description": "Innovator (the vendor marketplace): listed vendors' offerings of standard services, by region, service type or category: the vendor's standard terms (document link, SHA-256, summary, pricing and version; null when none are on file), price per call, SLA notes, the vendor's licences, its last conformance result, whether your firm meets the licence prerequisites to subscribe, and your firm's subscription to it, if any. Subscribe with subscribe_vendor_service, accepting the terms' version.",
+      "description": "Innovator (the vendor marketplace): listed vendors' offerings of standard services, by region, service type or category: the vendor's standard terms (document link, SHA-256, summary, pricing, scopes with scope_labels (what they cover; empty on a terms version from before scopes were recorded) and version; null when none are on file), price per call, SLA notes, the vendor's licences, its last conformance result, whether your firm meets the licence prerequisites to subscribe, and your firm's subscription to it, if any. Subscribe with subscribe_vendor_service, accepting the terms' version.",
       "area": "vendors",
       "roles": [
         "developer",
@@ -17307,7 +17322,7 @@
     {
       "name": "subscribe_vendor_service",
       "title": "Subscribe to a vendor's service",
-      "description": "Innovator: subscribe your firm to a listed offering (in the sandbox first). When the vendor has standard terms on file (list_vendor_offerings' standard_terms), subscribing is click-through: pass accept_terms_version (the current version: you accept those terms) and app_ids, the apps it's for (your workspace's owners and admins only), optionally with products (ids of those apps' products it's used for); Mynt records one vendor agreement per app with the vendor's firm, signed by both sides (the vendor through its listing, you through this call), with the terms' version and SHA-256. Already subscribed: naming more apps adds their agreements. Checks the licences the service needs your firm to hold, keeps the test (and live) credentials the vendor gave you, if it needs them, in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id. The vendor bills you directly; Mynt never bills or holds money for it.",
+      "description": "Innovator: subscribe your firm to a listed offering (in the sandbox first). When the vendor has standard terms on file (list_vendor_offerings' standard_terms), subscribing is click-through: pass accept_terms_version (the current version: you accept those terms) and app_ids, the apps it's for (your workspace's owners and admins only), optionally with products (ids of those apps' products it's used for); Mynt records one vendor agreement per app with the vendor's firm, signed by both sides (the vendor through its listing, you through this call), with the terms' version, SHA-256 and scopes (what they cover; none when that version names none). Already subscribed: naming more apps adds their agreements. Checks the licences the service needs your firm to hold, keeps the test (and live) credentials the vendor gave you, if it needs them, in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id. The vendor bills you directly; Mynt never bills or holds money for it.",
       "area": "vendors",
       "roles": [
         "developer",
@@ -18582,7 +18597,7 @@
     {
       "name": "update_vendor_offering",
       "title": "Change or list an offering",
-      "description": "Vendor: change an offering (changing an endpoint or licences sends it back to draft, to pass conformance again), or list it (listed: true, once conformance passed) or take it off the list (listed: false; current subscribers keep it). standard_terms sets your standard terms: any change is a new version, which new subscribers accept; agreements already made keep the version they accepted. Only your firm's own members set its terms.",
+      "description": "Vendor: change an offering (changing an endpoint or licences sends it back to draft, to pass conformance again), or list it (listed: true, once conformance passed) or take it off the list (listed: false; current subscribers keep it). standard_terms sets your standard terms, with their scopes (one or more of technology, manpower, financial_regulatory_operations): any change, scopes included, is a new version, which new subscribers accept; agreements already made keep the version (and scopes) they accepted. Only your firm's own members set its terms.",
       "area": "vendors",
       "roles": [
         "vendor",
@@ -18671,13 +18686,28 @@
                 "minLength": 3,
                 "maxLength": 1000,
                 "description": "Your pricing in words (e.g. '$0.40 per check, invoiced monthly'); you bill subscribers directly, never through Mynt"
+              },
+              "scopes": {
+                "minItems": 1,
+                "maxItems": 3,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "technology",
+                    "manpower",
+                    "financial_regulatory_operations"
+                  ]
+                },
+                "description": "What your terms cover, one or more of: technology (a platform or software licence), manpower (people and staffing), financial_regulatory_operations (compliance and regulatory operations); every agreement made on these terms records them"
               }
             },
             "required": [
               "document_url",
               "document_sha256",
               "summary",
-              "pricing_summary"
+              "pricing_summary",
+              "scopes"
             ],
             "additionalProperties": false
           }

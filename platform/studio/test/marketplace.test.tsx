@@ -27,7 +27,7 @@ const REPLY = [
     vendor_entity_id: "e1",
     region: "US",
     service_type: { key: "identity_check", name: "Identity check", category: "identity", consent_purpose: "kyc", fills: ["full_name"], innovator_licences: [] },
-    standard_terms: { version: 2, document_url: "https://vendor.example.com/terms.pdf", document_sha256: "a".repeat(64), summary: "Standard checks, data kept 30 days.", pricing_summary: "$0.40 per check", set_at: "2026-11-01T00:00:00.000Z" },
+    standard_terms: { version: 2, document_url: "https://vendor.example.com/terms.pdf", document_sha256: "a".repeat(64), summary: "Standard checks, data kept 30 days.", pricing_summary: "$0.40 per check", scopes: ["manpower", "technology"], set_at: "2026-11-01T00:00:00.000Z" },
     price: { amount: 0.4, currency: "USD", per: "call" },
     sla_notes: "99.9% monthly",
     live_available: true,
@@ -101,6 +101,11 @@ afterEach(() => cleanup());
 describe("reading the offerings", () => {
   it("keeps the standard terms, the pricing in words, conformance and prerequisites; none on file is null", () => {
     expect(OFFERINGS[0].terms?.version).toBe(2);
+    expect(OFFERINGS[0].terms?.scopes).toEqual(["technology", "manpower"]); // in the list's order
+    expect(OFFERINGS[0].terms?.scopeLabel).toBe("Technology, Manpower");
+    // Terms from before scopes were recorded: none, "Not set", never invented.
+    const legacy = fromOfferings([{ ...REPLY[0], standard_terms: { ...REPLY[0].standard_terms, scopes: undefined } }])[0]!;
+    expect([legacy.terms?.scopes, legacy.terms?.scopeLabel]).toEqual([[], "Not set"]);
     expect(OFFERINGS[0].pricing).toBe("$0.40 per check");
     expect(OFFERINGS[1].terms).toBeNull();
     expect(OFFERINGS[1].pricing).toMatch(/per call/);
@@ -151,6 +156,7 @@ describe("the Marketplace page", () => {
     const terms = document.querySelector("[data-peek-table=terms]")!;
     expect(terms.textContent).toContain("v2");
     expect(terms.textContent).toContain("Standard checks, data kept 30 days.");
+    expect(terms.querySelector("[data-terms-scope]")?.textContent).toBe("Technology, Manpower");
     expect(terms.querySelector("[data-terms-document]")?.getAttribute("href")).toBe("https://vendor.example.com/terms.pdf");
     await act(async () => void fireEvent.click(document.querySelector("[data-peek-tab=pricing]")!));
     expect(document.querySelector("[data-peek-table=pricing]")?.textContent).toContain("bills you directly");
@@ -173,6 +179,7 @@ describe("the Subscribe sheet", () => {
     const submit = document.querySelector("[data-subscribe-submit]") as HTMLButtonElement;
     expect((document.querySelector(`[data-subscribe-app="${APP}"]`) as HTMLInputElement).checked).toBe(true);
     expect(document.querySelector("[data-accept-terms]")?.parentElement?.textContent).toBe("I accept Verify Co's standard terms v2");
+    expect(document.querySelector("[data-subscribe-terms-scope]")?.textContent?.trim()).toBe("You accept Verify Co's standard terms v2 — Scope: Technology, Manpower");
     expect(submit.disabled).toBe(true);
     fireEvent.click(document.querySelector("[data-accept-terms]")!);
     expect(submit.disabled).toBe(true); // the provider needs a test credential
@@ -263,8 +270,8 @@ describe("the app's Agreements tab", () => {
     agreements: [],
     products: [],
     vendor_contracts: [
-      { subscription_id: SUB, vendor: { entity_id: "e1", name: "Verify Co" }, offering: "Verify identity", environment: "test", since: "2026-11-02T00:00:00.000Z", terms_version: 2, no_standard_terms: false },
-      { subscription_id: "s2", vendor: { name: "Old KYC" }, offering: "KYC", environment: "live", since: null, terms_version: null, no_standard_terms: true },
+      { subscription_id: SUB, vendor: { entity_id: "e1", name: "Verify Co" }, offering: "Verify identity", environment: "test", since: "2026-11-02T00:00:00.000Z", terms_version: 2, no_standard_terms: false, scopes: ["technology"] },
+      { subscription_id: "s2", vendor: { name: "Old KYC" }, offering: "KYC", environment: "live", since: null, terms_version: null, no_standard_terms: true, scopes: null },
     ],
     introductions: null,
   })!;
@@ -275,6 +282,9 @@ describe("the app's Agreements tab", () => {
     expect(document.querySelector("[data-browse-vendors]")?.textContent?.trim()).toBe("Browse vendors");
     expect(document.querySelector(`[data-vendor-contract="${SUB}"] [data-vendor-terms]`)?.textContent).toBe("Standard terms v2");
     expect(document.querySelector(`[data-vendor-contract="s2"] [data-vendor-terms]`)?.textContent).toBe("No standard terms on file");
+    // Each contract's scope, from the terms version accepted for this app; none recorded: a dash, never invented.
+    expect(document.querySelector(`[data-vendor-scope="${SUB}"]`)?.textContent).toBe("Technology");
+    expect(document.querySelector(`[data-vendor-scope="s2"]`)?.textContent).toBe("—");
     await act(async () => void fireEvent.click(document.querySelector(`[data-end-subscription="${SUB}"]`)!));
     expect(screen.getByRole("heading", { name: "End subscription" })).toBeTruthy();
   });

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { AgreementScopesSchema, type AgreementScope } from "./app-agreements-schema.js";
 import type { Db } from "./db.js";
 import { noticeFirm } from "./firm-notices.js";
 import type { Store } from "./store.js";
@@ -8,14 +9,17 @@ import type { Store } from "./store.js";
 // accepting them, instead of negotiating each deal (app-agreements.ts keeps negotiated ones).
 //
 // Each offering carries the vendor's standard terms: a link to the document (https) with its SHA-256, a short summary,
-// the pricing in words (billed by the vendor directly; Mynt never bills or holds money for it) and a version. Setting
-// them again with anything changed is a new version; agreements already made keep the version they accepted. Listing an
+// the pricing in words (billed by the vendor directly; Mynt never bills or holds money for it), the scopes they cover
+// (AGREEMENT_SCOPES: technology, manpower, financial regulatory operations) and a version. Setting them again with
+// anything changed, scopes included, is a new version; agreements already made keep the version they accepted. Terms
+// versions from before scopes were recorded have none (an empty list) and stay so until the vendor sets new terms. Listing an
 // offering with terms is the vendor's standing acceptance of them (who set them and when is kept).
 //
 // Subscribing to an offering with terms is click-through: the subscriber names the version it accepts (it must be the
 // current one) and the apps (and products) it's for, and Mynt records, with the subscription, one app agreement per
 // app (kind 'vendor', with the vendor's firm) already signed: by the vendor through its listing, by the subscriber
-// through the click. Ending the subscription ends those agreements, and ending the last of them ends the subscription.
+// through the click. Each copies the accepted version's document, SHA-256, summary, pricing and scopes (empty when that
+// version has none: never invented). Ending the subscription ends those agreements, and ending the last of them ends the subscription.
 
 const T = "financial_products";
 type Row = Record<string, unknown>;
@@ -32,11 +36,16 @@ export const StandardTermsSchema = z
     document_sha256: z.string().regex(/^[a-f0-9]{64}$/, "A SHA-256 as 64 lowercase hex characters"),
     summary: z.string().trim().min(10).max(2000).describe("The terms in a few sentences, as subscribers see them before accepting"),
     pricing_summary: z.string().trim().min(3).max(1000).describe("Your pricing in words (e.g. '$0.40 per check, invoiced monthly'); you bill subscribers directly, never through Mynt"),
+    scopes: AgreementScopesSchema.describe(
+      "What your terms cover, one or more of: technology (a platform or software licence), manpower (people and staffing), financial_regulatory_operations (compliance and regulatory operations); every agreement made on these terms records them",
+    ),
   })
   .strict();
 export type StandardTermsInput = z.infer<typeof StandardTermsSchema>;
 
-export interface StandardTerms extends StandardTermsInput {
+export interface StandardTerms extends Omit<StandardTermsInput, "scopes"> {
+  // Empty only on a terms version from before scopes were recorded ("Not set").
+  scopes: AgreementScope[];
   version: number;
   set_by: string | null;
   set_at: string | null;
@@ -51,16 +60,25 @@ export function termsOfRow(r: Row): StandardTerms | null {
     document_sha256: r.terms_document_sha256 as string,
     summary: r.terms_summary as string,
     pricing_summary: r.pricing_summary as string,
+    scopes: Array.isArray(r.terms_scopes) ? (r.terms_scopes as AgreementScope[]) : [],
     set_by: (r.terms_set_by as string | null) ?? null,
     set_at: iso(r.terms_set_at),
   };
 }
 
+// Scopes compare as a set (the order they're named in doesn't make new terms).
+const sameScopes = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((s) => b.includes(s));
 const same = (a: StandardTerms | null, b: StandardTermsInput) =>
-  a !== null && a.document_url === b.document_url && a.document_sha256 === b.document_sha256 && a.summary === b.summary && a.pricing_summary === b.pricing_summary;
+  a !== null &&
+  a.document_url === b.document_url &&
+  a.document_sha256 === b.document_sha256 &&
+  a.summary === b.summary &&
+  a.pricing_summary === b.pricing_summary &&
+  sameScopes(a.scopes, b.scopes);
 
 /**
- * Sets an offering's standard terms: unchanged terms keep their version, anything changed is the next version.
+ * Sets an offering's standard terms: unchanged terms keep their version, anything changed (scopes included) is the
+ * next version.
  * Agreements already made keep the version they accepted (they carry their own copy).
  */
 export async function setOfferingTerms(db: Query, offeringId: string, terms: StandardTermsInput, by: string): Promise<{ terms: StandardTerms; changed: boolean }> {
@@ -70,8 +88,8 @@ export async function setOfferingTerms(db: Query, offeringId: string, terms: Sta
   const r = (
     await db.query(
       `UPDATE ${T}.vendor_offerings SET terms_version = COALESCE(terms_version, 0) + 1, terms_document_url = $2, terms_document_sha256 = $3, terms_summary = $4, pricing_summary = $5,
-         terms_set_by = $6, terms_set_at = now(), updated_at = now() WHERE id = $1 RETURNING *`,
-      [offeringId, terms.document_url, terms.document_sha256, terms.summary, terms.pricing_summary, by],
+         terms_scopes = $7::text[], terms_set_by = $6, terms_set_at = now(), updated_at = now() WHERE id = $1 RETURNING *`,
+      [offeringId, terms.document_url, terms.document_sha256, terms.summary, terms.pricing_summary, by, terms.scopes],
     )
   ).rows[0];
   return { terms: termsOfRow(r)!, changed: true };
@@ -94,8 +112,8 @@ export async function recordClickThrough(
     await tx.query(
       `INSERT INTO ${T}.app_agreements (id, workspace_id, app_id, counterparty_entity_id, kind, status, products, terms_summary, document_url, document_sha256,
          proposed_by, responded_by, responded_at, app_signed_by, app_signed_at, counterparty_signed_by, counterparty_signed_at,
-         vendor_subscription_id, offering_id, terms_version, pricing_summary, effective_from)
-       VALUES ($1, $2, $3, $4, 'vendor', 'signed', $5, $6, $7, $8, $9, $10, $11, $9, now(), $10, $11, $12, $13, $14, $15, current_date)`,
+         vendor_subscription_id, offering_id, terms_version, pricing_summary, effective_from, scopes)
+       VALUES ($1, $2, $3, $4, 'vendor', 'signed', $5, $6, $7, $8, $9, $10, $11, $9, now(), $10, $11, $12, $13, $14, $15, current_date, $16::text[])`,
       [
         id,
         app.workspace_id,
@@ -112,6 +130,7 @@ export async function recordClickThrough(
         o.offering_id,
         o.terms.version,
         o.terms.pricing_summary,
+        o.terms.scopes, // the accepted version's own (empty for a version from before scopes: never invented)
       ],
     );
     out.push({ id, app_id: app.id });

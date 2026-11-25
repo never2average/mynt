@@ -79,6 +79,8 @@ export const standardTerms = z
     document_sha256: z.string().regex(/^[a-f0-9]{64}$/, "64 lowercase hex characters"),
     summary: z.string().trim().min(10).max(2000),
     pricing_summary: z.string().trim().min(3).max(1000),
+    // What the terms cover; part of the version, copied onto every agreement made on them.
+    scopes: agreementScopes,
   })
   .strict();
 

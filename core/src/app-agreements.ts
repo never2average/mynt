@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { AGREEMENT_SCOPE_KEYS, APP_AGREEMENT_KINDS, APP_AGREEMENT_STATUSES, agreementScopeLabel, type AgreementScope } from "./app-agreements-schema.js";
+import { AGREEMENT_SCOPE_KEYS, AgreementScopesSchema, APP_AGREEMENT_KINDS, APP_AGREEMENT_STATUSES, agreementScopeLabel, type AgreementScope } from "./app-agreements-schema.js";
 import { cancelSigning, signatureDocumentOf, startSigning } from "./agreement-esign.js";
 import { inTransaction } from "./db.js";
 import type { ESign } from "./esign/provider.js";
@@ -54,12 +54,7 @@ const day = (v: unknown) => (v == null ? null : typeof v === "string" ? v.slice(
 const DATE = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "A date as YYYY-MM-DD");
 const UUID = z.string().uuid();
 // What an agreement covers: one or more of AGREEMENT_SCOPES, each once.
-export const SCOPES = z
-  .array(z.enum(AGREEMENT_SCOPE_KEYS))
-  .min(1, "Name at least one scope: technology, manpower or financial_regulatory_operations")
-  .max(AGREEMENT_SCOPE_KEYS.length)
-  .refine((s) => new Set(s).size === s.length, "Name each scope once")
-  .describe("What the agreement covers, one or more of: technology (a platform or software licence), manpower (people and staffing), financial_regulatory_operations (compliance and regulatory operations)");
+export const SCOPES = AgreementScopesSchema;
 
 export interface AppAgreement {
   id: string;
@@ -197,7 +192,7 @@ async function vendorContracts(store: Store, app: App) {
   const { rows } = await store.db.query(
     `SELECT s.id, s.live, s.status, s.created_at, s.offering_id, o.name AS offering, o.service_type, o.entity_id AS vendor_entity_id, o.terms_version AS current_terms_version, e.name AS vendor,
             (SELECT count(*)::int FROM ${T}.app_agreements a WHERE a.vendor_subscription_id = s.id) AS accepted_any,
-            mine.id AS agreement_id, mine.terms_version, mine.document_url AS terms_document_url, mine.app_signed_at AS accepted_at
+            mine.id AS agreement_id, mine.terms_version, mine.scopes AS agreement_scopes, mine.document_url AS terms_document_url, mine.app_signed_at AS accepted_at
        FROM ${T}.vendor_subscriptions s JOIN ${T}.vendor_offerings o ON o.id = s.offering_id LEFT JOIN ${T}.entities e ON e.id = o.entity_id
        LEFT JOIN ${T}.app_agreements mine ON mine.vendor_subscription_id = s.id AND mine.app_id = $2 AND mine.status IN ('proposed', 'accepted', 'signed')
       WHERE s.entity_id = ANY($1::uuid[]) AND s.status = 'active' ORDER BY s.created_at`,
@@ -215,6 +210,10 @@ async function vendorContracts(store: Store, app: App) {
     agreement_id: r.agreement_id ?? null,
     terms_version: r.terms_version == null ? null : Number(r.terms_version),
     terms_document_url: r.terms_document_url ?? null,
+    // What that agreement covers, copied from the accepted terms version (empty for a version from before scopes:
+    // "Not set"); null with no agreement for this app.
+    scopes: r.agreement_id ? ((r.agreement_scopes as string[] | null) ?? []) : null,
+    scope_labels: r.agreement_id ? ((r.agreement_scopes as string[] | null) ?? []).map(agreementScopeLabel) : null,
     accepted_at: iso(r.accepted_at),
     current_terms_version: r.current_terms_version == null ? null : Number(r.current_terms_version),
     // Subscribed before the vendor had standard terms on file (or without accepting any): no agreement records them.
@@ -767,7 +766,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
     {
       title: "App agreements",
       description:
-        "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, program_coverage (each product and the licence provider sponsoring it where the app serves, and whether a signed program agreement in force covers it: production needs every one; production_gate says what's missing, and flagged when the app is already in production without one), the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on (each with the version of the vendor's standard terms accepted for this app, or no_standard_terms when none were), and introductions the business-development agent has in progress for its members (null when that agent isn't running here). With workspace_id (developer, any member): every agreement of the workspace's apps (all kinds), can_manage, and proposable_counterparties (the sponsors of its apps' products). Without either (licence provider or vendor): the agreements made with your firm, both those apps' workspaces proposed and those your firm proposed, and proposable_workspaces (those whose apps use products your firm sponsors, or that already have an agreement with it). Each agreement says which side proposed it (proposed_by_side), the template it was made on, your_side and what you may do now (actions: accept, decline, sign, withdraw, end). Each agreement carries its scopes (what it covers: technology, manpower, financial_regulatory_operations; empty on one from before scopes were recorded) and scope_labels. status and scope filter any list.",
+        "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, program_coverage (each product and the licence provider sponsoring it where the app serves, and whether a signed program agreement in force covers it: production needs every one; production_gate says what's missing, and flagged when the app is already in production without one), the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on (each with the version of the vendor's standard terms accepted for this app and the scopes it covers, or no_standard_terms when none were), and introductions the business-development agent has in progress for its members (null when that agent isn't running here). With workspace_id (developer, any member): every agreement of the workspace's apps (all kinds), can_manage, and proposable_counterparties (the sponsors of its apps' products). Without either (licence provider or vendor): the agreements made with your firm, both those apps' workspaces proposed and those your firm proposed, and proposable_workspaces (those whose apps use products your firm sponsors, or that already have an agreement with it). Each agreement says which side proposed it (proposed_by_side), the template it was made on, your_side and what you may do now (actions: accept, decline, sign, withdraw, end). Each agreement carries its scopes (what it covers: technology, manpower, financial_regulatory_operations; empty on one from before scopes were recorded) and scope_labels. status and scope filter any list.",
       inputSchema: { app_id: UUID.optional(), workspace_id: UUID.optional(), status: z.enum(APP_AGREEMENT_STATUSES).optional(), scope: z.enum(AGREEMENT_SCOPE_KEYS).optional().describe("Only agreements covering this scope") },
       annotations: { readOnlyHint: true },
     },

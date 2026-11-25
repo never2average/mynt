@@ -2,6 +2,7 @@
 // replies (get_vendor_onboarding, list_my_offerings, list_my_subscribers, list_service_types, get_my_entity) into what
 // the page shows, each step's status in words and the action the studio offers for it, the CSV, and the SHA-256 of a
 // standard terms document (computed in the browser, from the file itself). Mynt decides every step; nothing here does.
+import { scopeLabelOf, scopesOf, type AgreementScope } from "./app-panel";
 import { toCsv } from "./compliance";
 
 type Obj = Record<string, unknown>;
@@ -43,7 +44,9 @@ export type Step = {
 export type Progress = { done: number; total: number; next: { key: string; title: string; status: StepStatus; offeringId: string | null } | null; complete: boolean };
 export type OfferingChecklist = { offeringId: string; name: string; region: string; serviceType: string; serviceName: string | null; status: string; steps: Step[]; progress: Progress };
 export type ConformanceRun = { runId: string; passed: boolean; at: string | null; runBy: string | null; failures: { case: string; problems: string[] }[] };
-export type TermsVersion = { version: number; current: boolean; documentUrl: string | null; documentSha256: string | null; summary: string | null; pricing: string | null; setAt: string | null; setBy: string | null; agreements: number | null };
+// scopes: null when Mynt doesn't know them for that version (an earlier one nobody accepted), [] for one from before
+// scopes were recorded.
+export type TermsVersion = { version: number; current: boolean; documentUrl: string | null; documentSha256: string | null; summary: string | null; pricing: string | null; scopes: AgreementScope[] | null; setAt: string | null; setBy: string | null; agreements: number | null };
 export type Onboarding = {
   entity: { id: string; name: string; status: string } | null;
   firmSteps: Step[];
@@ -110,7 +113,7 @@ export function fromOnboarding(reply: unknown): Onboarding | null {
                   .filter(isObj)
                   .flatMap((v) =>
                     num(v.version) !== null
-                      ? [{ version: num(v.version)!, current: v.current === true, documentUrl: str(v.document_url), documentSha256: str(v.document_sha256), summary: str(v.summary), pricing: str(v.pricing_summary), setAt: str(v.set_at), setBy: str(v.set_by), agreements: num(v.agreements) }]
+                      ? [{ version: num(v.version)!, current: v.current === true, documentUrl: str(v.document_url), documentSha256: str(v.document_sha256), summary: str(v.summary), pricing: str(v.pricing_summary), scopes: Array.isArray(v.scopes) ? scopesOf(v.scopes) : null, setAt: str(v.set_at), setBy: str(v.set_by), agreements: num(v.agreements) }]
                       : [],
                   ),
               },
@@ -169,7 +172,8 @@ export type VendorOffering = {
   licenceIds: string[];
   requiresCredential: boolean;
   statusNote: string | null;
-  terms: { version: number; documentUrl: string; documentSha256: string; summary: string; pricing: string; setAt: string | null } | null;
+  // scopes: what the terms cover; none on a terms version from before scopes were recorded (scopeLabel "Not set").
+  terms: { version: number; documentUrl: string; documentSha256: string; summary: string; pricing: string; scopes: AgreementScope[]; scopeLabel: string; setAt: string | null } | null;
   lastConformance: { passed: boolean; at: string | null } | null;
   subscribers: number | null; // null: Mynt didn't say
   createdAt: string | null;
@@ -200,7 +204,16 @@ export function fromMyOfferings(reply: unknown): VendorOffering[] {
           statusNote: str(o.status_note),
           terms:
             t && num(t.version) !== null
-              ? { version: num(t.version)!, documentUrl: str(t.document_url) ?? "", documentSha256: str(t.document_sha256) ?? "", summary: str(t.summary) ?? "", pricing: str(t.pricing_summary) ?? "", setAt: str(t.set_at) }
+              ? {
+                  version: num(t.version)!,
+                  documentUrl: str(t.document_url) ?? "",
+                  documentSha256: str(t.document_sha256) ?? "",
+                  summary: str(t.summary) ?? "",
+                  pricing: str(t.pricing_summary) ?? "",
+                  scopes: scopesOf(t.scopes),
+                  scopeLabel: scopeLabelOf(scopesOf(t.scopes)),
+                  setAt: str(t.set_at),
+                }
               : null,
           lastConformance: c,
           subscribers: num(o.subscribers),

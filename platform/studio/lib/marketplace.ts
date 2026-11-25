@@ -2,6 +2,7 @@
 // provider's standard terms, which an app's workspace subscribes to by accepting them (no negotiation). Pure: Mynt's
 // replies (list_vendor_offerings) into rows, the filters, and the CSV. Billing is between the provider and the
 // subscriber directly; Mynt never bills or holds money for it.
+import { scopeLabelOf, scopesOf, type AgreementScope } from "./app-panel";
 import { toCsv } from "./compliance";
 
 type Obj = Record<string, unknown>;
@@ -24,7 +25,9 @@ export const CATEGORY_LABELS: Record<string, string> = {
 };
 export const categoryLabel = (c: string) => CATEGORY_LABELS[c] ?? c;
 
-export type StandardTerms = { version: number; documentUrl: string; documentSha256: string; summary: string; pricing: string; setAt: string | null };
+// scopes: what the terms cover (AGREEMENT_SCOPES), part of the version and copied onto each agreement made on them;
+// none on a terms version from before scopes were recorded (scopeLabel "Not set").
+export type StandardTerms = { version: number; documentUrl: string; documentSha256: string; summary: string; pricing: string; scopes: AgreementScope[]; scopeLabel: string; setAt: string | null };
 export type Conformance = { passed: boolean; at: string | null } | null;
 export type ProviderLicence = { type: string; number: string | null; inForce: boolean };
 
@@ -68,7 +71,16 @@ export function fromOfferings(reply: unknown): Offering[] {
       const st = isObj(o.standard_terms) ? o.standard_terms : null;
       const terms: StandardTerms | null =
         st && typeof st.version === "number" && str(st.document_url)
-          ? { version: st.version, documentUrl: str(st.document_url)!, documentSha256: str(st.document_sha256) ?? "", summary: str(st.summary) ?? "", pricing: str(st.pricing_summary) ?? "", setAt: str(st.set_at) }
+          ? {
+              version: st.version,
+              documentUrl: str(st.document_url)!,
+              documentSha256: str(st.document_sha256) ?? "",
+              summary: str(st.summary) ?? "",
+              pricing: str(st.pricing_summary) ?? "",
+              scopes: scopesOf(st.scopes),
+              scopeLabel: scopeLabelOf(scopesOf(st.scopes)),
+              setAt: str(st.set_at),
+            }
           : null;
       const conf = isObj(o.conformance) ? { passed: o.conformance.passed === true, at: str(o.conformance.at) } : null;
       return [
