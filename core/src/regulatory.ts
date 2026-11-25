@@ -583,7 +583,8 @@ export function summarizeModel(model: RegulatoryModel) {
       short_name: r.short_name,
       product_types: r.scope.product_types.length,
       customer_personas: r.scope.customer_personas.length,
-      license_types: r.license_types.map((l) => ({ _id: l._id, name: l.name })),
+      // A type issued per jurisdiction says so, with where: a held licence of it names one of them (register_license).
+      license_types: r.license_types.map((l) => ({ _id: l._id, name: l.name, ...(l.issued_per_jurisdiction ? { issued_per_jurisdiction: true, covers: l.covers ?? [] } : {}) })),
     })),
     legal: {
       legislative: model.legal.legislative.map((l) => ({ id: l.id, title: l.title, kind: l.kind, status: l.status, citation: l.citation })),

@@ -10,6 +10,7 @@
 // icon, "App: …" / "Financial product: …" to screen readers). Product chats that haven't made a product
 // yet have no stage, so they aren't in the folders: they reopen from the Build page (?thread=).
 // Service providers (Mynt's vendor role) also get My services (/vendor), their own services and onboarding.
+// Regulated firms' own people (Mynt's licence-provider role, as granted) also get My firm (/firm).
 // Docs isn't in the sidebar (the header's Docs button opens /docs). Build is in every page's header; Builds isn't in
 // the sidebar (/builds still works). Mynt admins (the role Mynt gave their account, never a list in the studio's
 // settings) also get a labelled "Platform admin" badge at the foot, above their name: it opens the platform admin
@@ -17,7 +18,7 @@
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
-import { Coins, FileBadge, Handshake, History, LayoutDashboard, ServerCog, Settings, ShieldCheck } from "lucide-react"
+import { Coins, FileBadge, Handshake, History, Landmark, LayoutDashboard, ServerCog, Settings, ShieldCheck } from "lucide-react"
 
 import { NavFolders } from "@/components/nav-folders"
 import { NavUser } from "@/components/nav-user"
@@ -59,6 +60,9 @@ const PAGES = [
 const EARN_PAGE = { href: "/earn", label: "Earn", icon: Coins } as const
 // Only for service providers (Mynt's vendor role): their own services and onboarding, last of the fixed pages.
 export const VENDOR_PAGE = { href: "/vendor", label: "My services", icon: ServerCog } as const
+// Only for regulated firms' own people (Mynt's licence-provider role, as granted): their firm's onboarding, licences,
+// sponsorship requests, roster, people and notices.
+export const FIRM_PAGE = { href: "/firm", label: "My firm", icon: Landmark } as const
 // Only for Mynt admins, at the foot above their name: the platform admin, in its own layout.
 export const PLATFORM_ADMIN_LABEL = "Platform admin"
 export function PlatformAdminLink() {
@@ -98,6 +102,7 @@ export type SidebarViewProps = {
   products?: MyProduct[] | null // the user's own financial products, in the stage folders with the apps (null while loading)
   admin?: boolean // a Mynt admin: the Platform admin badge above their name
   vendor?: boolean // a service provider: My services (/vendor)
+  firm?: boolean // a regulated firm's own licence provider (the role as granted): My firm (/firm)
 }
 
 // The folders' items: the workspace's apps and the user's products, each in its stage.
@@ -108,7 +113,7 @@ export function stagedItems(groups: Record<Stage, StagedApp[]> | null, products:
 }
 
 // What the sidebar shows, from its data; rendered on the server by the tests.
-export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, licenceProvider = false, workspaceSettings, products = null, admin = false, vendor = false, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
+export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, licenceProvider = false, workspaceSettings, products = null, admin = false, vendor = false, firm = false, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
   // The app or product on screen, marked in its folder: an app's workspace is /<app id>, a product's /products/<id>.
   const activeProductId = productIdOfPath(pathname)
   const appId = activeProductId ? undefined : pathname.split("/").filter(Boolean)[0]
@@ -129,7 +134,7 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
       <SidebarContent>
         <SidebarGroup>
           <SidebarMenu>
-            {[...(developer ? PAGES : [...PAGES.slice(0, 1), ...(licenceProvider ? PAGES.slice(1, 2) : [])]), ...(liquidity ? [EARN_PAGE] : []), ...(vendor ? [VENDOR_PAGE] : [])].map(({ href, label, icon: Icon }) => (
+            {[...(developer ? PAGES : [...PAGES.slice(0, 1), ...(licenceProvider ? PAGES.slice(1, 2) : [])]), ...(liquidity ? [EARN_PAGE] : []), ...(vendor ? [VENDOR_PAGE] : []), ...(firm ? [FIRM_PAGE] : [])].map(({ href, label, icon: Icon }) => (
               <SidebarMenuItem key={href}>
                 <SidebarMenuButton asChild tooltip={label} isActive={pathname === href || (href === VENDOR_PAGE.href && pathname.startsWith(`${href}/`))}>
                   <Link href={href}>
@@ -241,6 +246,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       products={products}
       admin={access?.admin === true}
       vendor={access?.vendor === true}
+      firm={access?.firm === true}
     />
   )
 }

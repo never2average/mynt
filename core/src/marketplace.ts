@@ -401,11 +401,13 @@ export function registerFirmTools(server: McpServer, store: Store, user: User) {
       if (!entity_id) return fail(noFirm);
       const entity = await store.getEntity(entity_id);
       const members = (await store.entityMembers(entity_id)).map((m) => ({ id: m.id, name: m.name, email: m.email }));
+      // An external party is another firm: named, so the roster reads without its id.
+      const parties = await Promise.all((await store.partiesOf(entity_id)).map(async (p) => (p.legal_entity_id ? { ...p, legal_entity_name: (await store.getEntity(p.legal_entity_id))?.name ?? null } : p)));
       return json({
         ...entity,
         members,
         licenses: await store.licensesOf(entity_id),
-        parties: await store.partiesOf(entity_id),
+        parties,
         reconciliation: await reconcileEntity(store, entity_id),
         grc: await reconcileEntityGrc(store, entity_id),
         // Mynt's public checks that the firm is a real company (an admin runs them; see firm-checks.ts).

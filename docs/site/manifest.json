@@ -143,6 +143,7 @@
           "sources": [
             { "file": "docs/reference/licence-providers.md", "heading": "Sponsorship", "title": "Licence providers and sponsorship" },
             { "file": "docs/reference/licence-providers.md", "heading": "Firm checks" },
+            { "file": "docs/reference/licence-providers.md", "heading": "Onboarding a regulated firm" },
             { "file": "docs/reference/licence-providers.md", "heading": "Covenants" },
             { "file": "docs/reference/licence-providers.md", "heading": "Partner kit" },
             { "file": "docs/reference/money-rails.md", "heading": "Money rails" }

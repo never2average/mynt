@@ -548,6 +548,79 @@ export const STUDIO_TOOLS = {
   delete_chat_session: z.object({ id: SessionId }).strict(),
 } as const;
 
+// A regulated firm's own tools, for My firm (/firm) only: a separate allow-list that only a licence provider's session
+// may call (lib/studio-server.ts callFirmTool checks the role Mynt gave the account; the routes also check it was
+// granted, not implied by an admin's; Mynt checks it again on every call). The chat, Ask AI and every other page use
+// STUDIO_TOOLS, which holds none of the writes here. The firm's onboarding checklist (its own firm only: an admin's read
+// of any firm is in ADMIN_TOOLS), its record and licences (Register licence, from the region's licence types), the
+// requests to sponsor (Review request: Approve sponsorship or Decline request; Revoke sponsorship), what it sponsors,
+// its roster (Add party, End party), its facts (Set firm facts: identifiers only), its people (Decide on a member
+// waiting to be accepted) and its notices. None takes a firm id: Mynt acts for the caller's own firm, and the routes
+// check a sponsorship, licence or party is that firm's before they write. A covenant breach on a revocation, a party's
+// qualification facts, the partner kit and webhooks stay with the MCP tools.
+export const FIRM_TOOLS = {
+  get_my_entity: z.object({}).strict(),
+  list_my_licenses: z.object({}).strict(),
+  get_regulated_firm_onboarding: z.object({}).strict(),
+  get_region: z.object({ code: z.string().regex(/^[A-Z]{2}$/) }).strict(),
+  register_license: z
+    .object({
+      region: z.string().regex(/^[A-Z]{2}$/),
+      regulator_id: z.string().regex(/^[a-z][a-z0-9_]{0,79}$/),
+      license_id: z.string().regex(/^[a-z][a-z0-9_]{0,119}$/),
+      jurisdiction: z.string().regex(/^[a-z]{2}-[a-z0-9]{1,3}$/).optional(),
+      registration_number: z.string().trim().min(1).max(100),
+      valid_from: auditDate.optional(),
+      valid_to: auditDate.optional(),
+    })
+    .strict(),
+  set_entity_facts: z
+    .object({
+      identifiers: z
+        .array(z.object({ scheme: z.string().regex(/^(lei|[a-z]{2}_[a-z0-9_]{1,40})$/), value: z.string().trim().min(1).max(100) }).strict())
+        .max(20)
+        .refine((ids) => new Set(ids.map((i) => i.scheme)).size === ids.length, "Each identifier once"),
+    })
+    .strict(),
+  list_sponsorship_requests: z.object({ status: z.enum(["pending", "approved", "declined", "revoked"]).optional() }).strict(),
+  list_sponsored_products: z.object({}).strict(),
+  approve_sponsorship: z
+    .object({
+      sponsorship_id: uuid,
+      licence_ids: z.array(uuid).min(1).max(20),
+      jurisdictions: z.array(z.string().regex(/^[a-z]{2}(-[a-z0-9]{1,3})?$/)).min(1).max(60).optional(),
+      note: z.string().trim().max(2000).optional(),
+    })
+    .strict(),
+  decline_sponsorship: z.object({ sponsorship_id: uuid, reason: z.string().trim().min(3).max(2000) }).strict(),
+  revoke_sponsorship: z.object({ sponsorship_id: uuid, reason: z.string().trim().min(3).max(2000) }).strict(),
+  add_party: z
+    .object({
+      kind: z.enum(["internal", "external"]),
+      person: z.object({ name: z.string().trim().min(1).max(200) }).strict().optional(),
+      legal_entity_id: uuid.optional(),
+      new_legal_entity: z.object({ name: z.string().trim().min(1).max(200) }).strict().optional(),
+      fills: z.array(z.object({ licence_id: uuid, stakeholder: z.string().trim().min(1).max(120) }).strict()).max(20).optional(),
+      relationship: z.string().regex(/^[a-z][a-z0-9_]{0,79}$/).optional(),
+      since: auditDate.optional(),
+    })
+    .strict(),
+  end_party: z.object({ party_id: uuid, until: auditDate.optional() }).strict(),
+  decide_firm_member: z.object({ request_id: uuid, accept: z.boolean() }).strict(),
+  list_firm_notices: z.object({ limit: z.number().int().min(1).max(200).optional() }).strict(),
+} as const;
+
+export type FirmTool = keyof typeof FIRM_TOOLS;
+export const isFirmTool = (name: unknown): name is FirmTool => typeof name === "string" && Object.prototype.hasOwnProperty.call(FIRM_TOOLS, name);
+
+// Checks a firm tool's name and arguments against FIRM_TOOLS (the caller checks the session is a licence provider's).
+export function parseFirmCall(tool: unknown, args: unknown): { tool: FirmTool; args: Record<string, unknown> } | { error: string } {
+  if (!isFirmTool(tool)) return { error: "That tool isn't available in My firm" };
+  const parsed = FIRM_TOOLS[tool].safeParse(args ?? {});
+  if (!parsed.success) return { error: parsed.error.issues.map((i) => `${i.path.join(".") || "args"}: ${i.message}`).join("; ") };
+  return { tool, args: parsed.data as Record<string, unknown> };
+}
+
 // Mynt admins' tools, for the platform admin (/platform) only: a separate allow-list that only an admin's session may call
 // (lib/studio-server.ts callAdminTool checks the role Mynt gave the account; Mynt checks it again on every call). The
 // chat, Ask AI and every other page use STUDIO_TOOLS, which holds none of these. Each is an existing admin tool,
@@ -699,6 +772,10 @@ export const ADMIN_TOOLS = {
   suspend_vendor_offering: z.object({ offering_id: uuid, suspended: z.boolean(), note: z.string().trim().max(500).optional() }).strict(),
   // Vendor firms: each firm's onboarding progress (the Vendors section's Vendor firms tab), reading only.
   get_vendor_onboarding: z.object({ all_firms: z.literal(true) }).strict(),
+  // Regulated firms: each firm's onboarding progress (the list's Onboarding column) or one firm's checklist with its
+  // real-company check and the registers' answers so far (its page), reading only; and Run checks on a firm's page.
+  get_regulated_firm_onboarding: z.union([z.object({ all_firms: z.literal(true) }).strict(), z.object({ entity_id: uuid }).strict()]),
+  run_firm_checks: z.object({ entity_id: uuid }).strict(),
 } as const;
 
 export type AdminTool = keyof typeof ADMIN_TOOLS;

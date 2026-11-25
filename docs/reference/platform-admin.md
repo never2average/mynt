@@ -88,11 +88,13 @@ Regulated firms (`/platform/firms`) has two tabs in the page:
 | **Regulated firms** | `/platform/firms` or `/platform/firms?tab=firms` | Every firm, with Register regulated firm |
 | **Licences** | `/platform/firms?tab=licences` | Every licence firms registered, for review |
 
-**Regulated firms** lists every firm (`list_entities`), each typed in words by its members' roles: licence provider, vendor, liquidity provider, innovator. A firm that is only a vendor is listed here too, as Vendor; its onboarding is under Vendors, on the Vendor firms tab. The Awaiting review column counts the firm's licences waiting for review, and says "Not available" when Mynt's answer doesn't say, never 0. Register regulated firm runs `register_firm`. Firms are only ever added by hand.
+**Regulated firms** lists every firm (`list_entities`), each typed in words by its members' roles: licence provider, vendor, liquidity provider, innovator. A firm that is only a vendor is listed here too, as Vendor; its onboarding is under Vendors, on the Vendor firms tab. The Onboarding column says how far a licence provider's firm is towards sponsoring, and its next step ("5 of 7 steps done · Next: Roster filled for your licences"), from `get_regulated_firm_onboarding` with `all_firms`. A firm that isn't a licence provider's says so. The Awaiting review column counts the firm's licences waiting for review, and says "Not available" when Mynt's answer doesn't say, never 0. Register regulated firm runs `register_firm`. Firms are only ever added by hand.
 
 **Licences** lists every licence firms registered, opening on the ones waiting for review (`list_license_reviews`), with the count in each review status, filters and Export CSV. The Firm column links to the firm's page. Its actions are Verify licence, Reject licence and Suspend licence (`review_license`). A rejection or suspension needs a reason.
 
-A firm's page has Invite member and Set firm status (`set_entity_status`), then the tabs Members, Licences, Offerings and Products.
+A firm's page has Invite member, Set firm status (`set_entity_status`) and Run checks, then the tabs Members, Licences, Offerings, Products, Onboarding and Checks.
+
+Its card shows the real-company check: the latest result in words (Passed, Not passed, Not run yet, or Not known when the registers couldn't be reached), when it was last checked, the rule, and what is missing. Run checks runs `run_firm_checks` and says each register's answer, whether the firm now passes, and how many products it sponsors drifted.
 
 **Members** lists the firm's people (name, email, roles, status) with Change role and Remove on each.
 
@@ -104,6 +106,10 @@ A firm's page has Invite member and Set firm status (`set_entity_status`), then 
 **Licences** lists the firm's licences with the same Verify licence, Reject licence and Suspend licence, so a licence can be reviewed beside the firm's members and products. `/platform/firms/<id>?tab=licences` opens on it.
 
 **Products** lists the products the firm owns or sponsors (`list_all_products`): line, region, stage, status, whether it is archived, and its sponsors. It is read-only. `/platform/firms/<id>?tab=products` opens on it.
+
+**Onboarding** lists the firm's checklist towards sponsoring (`get_regulated_firm_onboarding` with `entity_id`): each step, its status in words, where it stands and who does it. `/platform/firms/<id>?tab=onboarding` opens on it.
+
+**Checks** lists every answer the public registers gave about the firm, newest first: when, the register, the result, any note, and whether an admin ran it or it was Mynt's monthly re-check. `/platform/firms/<id>?tab=checks` opens on it.
 
 What a firm keeps to itself, such as its encrypted health books and its signatures, isn't shown. Mynt admins can't read or co-sign them.
 
@@ -208,6 +214,7 @@ The firms of licence providers, vendors and liquidity providers are added by han
 | `set_entity_status` | Records the firm's status from its company registry: `active`, `suspended`, `under_liquidation`, `dissolved` or `struck_off`. Every published product resting on it is re-checked, and drifted ones pause new sales |
 | `list_entities` | Lists every firm with its members, licences, roster and Mynt's public checks on it |
 | `run_firm_checks` | Runs Mynt's public checks that a firm is a real company |
+| `get_regulated_firm_onboarding` | Reads a regulated firm's checklist towards sponsoring (`entity_id`), or every regulated firm's progress (`all_firms`) |
 | `recover_firm_member` | The last resort when none of a firm's licence providers can accept a new one |
 | `list_license_reviews` | Lists the licences firms registered, by review status (pending by default) |
 | `review_license` | Verifies, rejects or suspends a licence, after checking it against the regulator's public register |
