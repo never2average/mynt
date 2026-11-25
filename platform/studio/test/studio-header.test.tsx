@@ -261,8 +261,8 @@ describe("an app's top bar", () => {
       expect(b.getAttribute("data-state"), name).not.toBeNull(); // a Radix tooltip trigger
     }
     expect(screen.getByRole("link", { name: "Open preview in a new tab" }).getAttribute("data-state")).not.toBeNull();
-    // The plug and theme icon buttons stay.
-    expect(bar.querySelector("[data-connect-agent-open]")).not.toBeNull();
+    // The theme button stays; the Connect your agent plug button was removed (Docs reaches /connect).
+    expect(bar.querySelector("[data-connect-agent-open]")).toBeNull();
     expect(bar.querySelector("[data-theme-switcher]")).not.toBeNull();
   });
 

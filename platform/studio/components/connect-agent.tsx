@@ -7,11 +7,10 @@
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useEffect, useState } from "react"
-import { BookOpen, Check, Copy, ExternalLink, Plug } from "lucide-react"
+import { BookOpen, Check, Copy, ExternalLink } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Tab, TabList } from "@/components/ui/tabs"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { isDocsPath } from "@/lib/page-gate"
 
 export type AgentId = "claude-code" | "claude" | "cursor" | "vscode" | "chatgpt" | "other"
@@ -148,23 +147,7 @@ export function ConnectAgentPanel() {
   )
 }
 
-// The header's icon button beside the theme switcher, opening /connect. Outlined and sized like the theme button.
-export function ConnectAgentButton() {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button asChild variant="outline" size="icon" className="size-8 shrink-0 p-0">
-          <Link href="/connect" aria-label="Connect your agent" data-connect-agent-open>
-            <Plug />
-          </Link>
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>Connect your agent</TooltipContent>
-    </Tooltip>
-  )
-}
-
-// The header's Docs link (/docs, Mynt's docs and tool reference), labelled, beside Connect your agent; from md up.
+// The header's Docs link (/docs, Mynt's docs and tool reference; Connect your agent is its /connect page), labelled; from md up.
 // Shown as the current page on the docs (inside the studio's shell when signed in).
 export function DocsButton() {
   const active = isDocsPath(usePathname() ?? "")

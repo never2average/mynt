@@ -12,7 +12,7 @@ import { Separator } from "@/components/ui/separator"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { GithubControl } from "@/components/github-control"
 import { DeveloperOnly } from "@/components/studio-gates"
-import { ConnectAgentButton, DocsButton } from "@/components/connect-agent"
+import { DocsButton } from "@/components/connect-agent"
 import { ThemeSwitcher } from "@/components/theme-switcher"
 import { WalletControl } from "@/components/wallet-control"
 
@@ -65,7 +65,6 @@ export function SiteHeader({ title, children }: { title: string; children?: Reac
             </span>
           </DeveloperOnly>
           <DocsButton />
-          <ConnectAgentButton />
           <ThemeSwitcher />
         </div>
       </div>

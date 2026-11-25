@@ -54,7 +54,8 @@ export function DocsInStudio({ children }: { children: React.ReactNode }) {
           <DocsLayout
             tree={source.pageTree}
             tabs={false}
-            nav={{ title: <DocsTitleMark />, url: "/docs" }}
+            // No "Mynt Docs" title row inside the studio: the studio's header already says Docs.
+            nav={{ enabled: false, title: null }}
             sidebar={{ collapsible: false }}
             themeSwitch={{ enabled: false }}
           >

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 
-import { AgentInstructions, ConnectAgentButton, ConnectAgentPanel, claudeCodeCommand, cursorInstallLink, mcpUrl, vscodeInstallLink } from "@/components/connect-agent";
+import { AgentInstructions, ConnectAgentPanel, claudeCodeCommand, cursorInstallLink, mcpUrl, vscodeInstallLink } from "@/components/connect-agent";
 
 const URL_ = "https://studio.example/mcp";
 
@@ -33,11 +33,11 @@ describe("connect your agent", () => {
     }
   });
 
-  it("the plug button opens /connect, where the docs' Connect your agent page is served; /docs/connect sends people there", async () => {
-    render(<TooltipProvider><ConnectAgentButton /></TooltipProvider>);
-    const button = document.querySelector("[data-connect-agent-open]")!;
-    expect(button.getAttribute("href")).toBe("/connect");
-    expect(button.getAttribute("aria-label")).toBe("Connect your agent");
+  it("there's no Connect your agent button in the header; /connect still serves the docs' page and /docs/connect sends people there", async () => {
+    const mod = await import("@/components/connect-agent");
+    expect("ConnectAgentButton" in mod).toBe(false);
+    render(<TooltipProvider><mod.DocsButton /></TooltipProvider>);
+    expect(document.querySelector("[data-connect-agent-open]")).toBeNull();
     // Ahead of the file routes and the sign-in check (next.config.ts): /connect shows the docs' page at its own
     // address, and the docs' address redirects to it.
     const { STUDIO_REDIRECTS, STUDIO_REWRITES } = await import("@/lib/redirects");

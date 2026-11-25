@@ -28,7 +28,7 @@ import { StageControl } from "@/components/promotion-view";
 import { HostingControl } from "@/components/hosting-control";
 import { GithubControl } from "@/components/github-control";
 import { DeveloperOnly } from "@/components/studio-gates";
-import { ConnectAgentButton, DocsButton } from "@/components/connect-agent";
+import { DocsButton } from "@/components/connect-agent";
 import { ThemeSwitcher } from "@/components/theme-switcher";
 import { WalletControl } from "@/components/wallet-control";
 import { NewAppButton } from "@/components/site-header";
@@ -141,7 +141,6 @@ export function AppTopBar({ appId = null, appName, stage, backLabel, onBack, pre
           </span>
         </DeveloperOnly>
         <DocsButton />
-        <ConnectAgentButton />
         <ThemeSwitcher compact />
       </div>
     </header>
