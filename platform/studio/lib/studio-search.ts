@@ -105,13 +105,18 @@ export type SearchSources = {
 export const PLATFORM_SEARCH_PAGES: readonly StudioPage[] = [
   { href: "/platform", label: "Platform admin: Overview", keywords: "mynt platform admin attention operations status" },
   { href: "/platform/workspaces", label: "Platform admin: Workspaces", keywords: "all workspaces teams members people invite roles" },
-  { href: "/platform/firms", label: "Platform admin: Firms", keywords: "firms licence providers vendors liquidity providers register members people invite roles products" },
-  { href: "/platform/licences", label: "Platform admin: Licences", keywords: "licences licenses review verify approve reject" },
+  { href: "/platform/firms", label: "Platform admin: Regulated firms", keywords: "regulated firms licence providers vendors liquidity providers register members people invite roles products" },
   { href: "/platform/vendors", label: "Platform admin: Vendors", keywords: "vendors service types offerings suspend" },
   { href: "/platform/audit", label: "Platform admin: Audit trails", keywords: "audit log trail history who changed what actions security financial obligations" },
   { href: "/platform/risk-models", label: "Platform admin: Risk models", keywords: "risk models model validation versions thresholds method financial compliance third-party operations business process technology regulated product scorecard" },
   { href: "/platform/risk-register", label: "Platform admin: Risk register", keywords: "risk register risks platform security signals attention backups conformance financial compliance third-party vendor operations business process technology regulated product" },
   { href: "/platform/settings", label: "Platform admin: Platform settings", keywords: "platform settings esign e-signature pricing budget audit" },
+];
+
+// Tabs inside a section, found by what they hold and never listed as sections of their own: Regulated firms → Licences, the
+// licences firms registered and their review (it was the Licences section).
+export const PLATFORM_SEARCH_TABS: readonly StudioPage[] = [
+  { href: "/platform/firms?tab=licences", label: "Platform admin: Regulated firms → Licences", keywords: "licences licenses licence license review verify reject suspend approve awaiting waiting register regulator" },
 ];
 
 const lower = (...parts: (string | null | undefined)[]) => parts.filter(Boolean).join(" ").toLowerCase();
@@ -120,6 +125,8 @@ const lower = (...parts: (string | null | undefined)[]) => parts.filter(Boolean)
 export function searchIndex(sources: SearchSources): SearchItem[] {
   const pages = [...STUDIO_PAGES, ...(sources.admin ? PLATFORM_SEARCH_PAGES : [])];
   const items: SearchItem[] = pages.map((p) => ({ id: `page:${p.href}`, group: "Pages", label: p.label, href: p.href, text: lower(p.label, p.keywords) }));
+  if (sources.admin)
+    for (const p of PLATFORM_SEARCH_TABS) items.push({ id: `page:${p.href}`, group: "Pages", label: p.label, href: p.href, text: lower(p.label, p.keywords), requires: lower(p.keywords) });
   for (const a of sources.apps ?? []) {
     const stage = STAGE_LABELS[a.stage];
     items.push({ id: `app:${a.id}`, group: "Apps", label: a.name, hint: stage, href: `/${encodeURIComponent(a.id)}`, text: lower(a.name, stage, a.stage) });
@@ -143,8 +150,8 @@ export function searchIndex(sources: SearchSources): SearchItem[] {
 
 // The platform admin's own search (its header, /platform): its sections first, then workspaces and firms by name, then
 // the studio's pages as a secondary group. Across Mynt, never a workspace picked in the studio.
-export type PlatformSearchGroup = "Platform admin" | "Workspaces" | "Firms" | "Studio";
-export const PLATFORM_SEARCH_GROUPS: readonly PlatformSearchGroup[] = ["Platform admin", "Workspaces", "Firms", "Studio"];
+export type PlatformSearchGroup = "Platform admin" | "Workspaces" | "Regulated firms" | "Studio";
+export const PLATFORM_SEARCH_GROUPS: readonly PlatformSearchGroup[] = ["Platform admin", "Workspaces", "Regulated firms", "Studio"];
 
 export type PlatformSearchSources = {
   workspaces?: { id: string; name: string; personal?: boolean; status?: string | null }[];
@@ -160,13 +167,17 @@ export function platformSearchIndex(sources: PlatformSearchSources): SearchItem[
     const label = p.label.startsWith(PLATFORM_PREFIX) ? p.label.slice(PLATFORM_PREFIX.length) : p.label;
     return { id: `platform:${p.href}`, group: "Platform admin", label, href: p.href, text: lower(label, "platform admin", p.keywords) };
   });
+  for (const p of PLATFORM_SEARCH_TABS) {
+    const label = p.label.slice(PLATFORM_PREFIX.length);
+    items.push({ id: `platform:${p.href}`, group: "Platform admin", label, href: p.href, text: lower(label, "platform admin", p.keywords), requires: lower(p.keywords) });
+  }
   for (const w of sources.workspaces ?? []) {
     const hint = w.personal ? "Personal" : w.status || undefined;
     items.push({ id: `workspace:${w.id}`, group: "Workspaces", label: w.name, hint, href: platformItemHref("workspaces", w.id), text: lower(w.name, w.id, "workspace", hint) });
   }
   for (const f of sources.firms ?? []) {
     const hint = [f.country, f.status].filter(Boolean).join(" · ") || undefined;
-    items.push({ id: `firm:${f.id}`, group: "Firms", label: f.name, hint, href: platformItemHref("firms", f.id), text: lower(f.name, f.id, "firm", f.country, f.status) });
+    items.push({ id: `firm:${f.id}`, group: "Regulated firms", label: f.name, hint, href: platformItemHref("firms", f.id), text: lower(f.name, f.id, "firm", f.country, f.status) });
   }
   for (const p of STUDIO_PAGES)
     items.push({ id: `studio:${p.href}`, group: "Studio", label: `Studio: ${p.label}`, href: p.href, text: lower("studio", p.label, p.keywords) });

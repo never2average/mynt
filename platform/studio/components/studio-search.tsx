@@ -275,9 +275,9 @@ function PlatformSearchDialog() {
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent showCloseButton={false} className="gap-0 overflow-hidden p-0 sm:max-w-xl" data-search-mode="search" data-platform-search>
         <DialogTitle className="sr-only">Search the platform admin</DialogTitle>
-        <DialogDescription className="sr-only">Search the platform admin&apos;s sections, workspaces, firms and the studio&apos;s pages.</DialogDescription>
+        <DialogDescription className="sr-only">Search the platform admin&apos;s sections, workspaces, regulated firms and the studio&apos;s pages.</DialogDescription>
         <Command shouldFilter={false} loop className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground">
-          <CommandInput value={query} onValueChange={setQuery} placeholder="Search sections, workspaces, firms…" />
+          <CommandInput value={query} onValueChange={setQuery} placeholder="Search sections, workspaces, regulated firms…" />
           <CommandList className="max-h-[min(60vh,26rem)]">
             <SearchResults items={items} query={query} groups={PLATFORM_SEARCH_GROUPS} search={searchPlatform} empty="Nothing in the platform admin matches that." onSelect={(i) => go(i.href)} />
           </CommandList>

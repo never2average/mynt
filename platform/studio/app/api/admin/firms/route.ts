@@ -7,7 +7,7 @@ import { asAdmin, json } from "@/lib/studio-route";
 export const dynamic = "force-dynamic";
 
 // Admin → Firms: every registered firm with its members (and their roles) and licences (list_entities). Firms are
-// added by hand by Mynt's admins: Register firm (register_firm), with no members yet.
+// added by hand by Mynt's admins: Register regulated firm (register_firm), with no members yet.
 export async function GET() {
   return asAdmin("reading the firms", async (mynt, session) => {
     if (!(await hasTools(mynt, "list_entities"))) return json(UNSUPPORTED);
