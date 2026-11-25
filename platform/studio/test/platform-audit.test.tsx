@@ -149,6 +149,7 @@ const FIRM_ROW: import("@/lib/admin").Firm = {
   regions: ["US"],
   members: [{ id: USER, name: "Lee", email: "lee@example.com", roles: ["license_provider", "consumer"] }],
   licences: [],
+  awaitingReview: 0,
   types: ["license_provider"],
   createdAt: null,
 };

@@ -1,16 +1,23 @@
 "use client"
 
-// Admin → Firms: every firm registered on Mynt (list_entities), each a licence provider, a vendor, a liquidity
-// provider or an innovator by its members' roles. Firms are added by hand by Mynt's admins: Register firm
-// (register_firm) adds one with no members. A row's Open shows the firm: its metadata card with Invite member (an
+// Admin → Regulated firms (the section's name on screen; its address stays /platform/firms), with two tabs in the
+// page's body (/platform/firms?tab=firms, the default, or ?tab=licences):
+// - Regulated firms: every firm registered on Mynt (list_entities), each a licence provider, a vendor, a liquidity provider or an
+//   innovator by its members' roles, with how many of its licences wait for review. Firms are added by hand by Mynt's
+//   admins: Register regulated firm (register_firm) adds one with no members. A vendor-only firm is listed too, its
+//   type in words (Vendors → Vendor firms has their onboarding).
+// - Licences: every firm's licences and their review (components/admin-licences.tsx; it was a section of its own).
+// A row's Open shows the firm: its metadata card with Invite member (an
 // email allowed to sign in with the roles picked, invite_user, then added to the firm, add_entity_member) and Set firm
-// status (set_entity_status), then Members (each with Change role and Remove: components/admin-members.tsx), Licences,
+// status (set_entity_status), then Members (each with Change role and Remove: components/admin-members.tsx), Licences
+// (each with Verify licence, Reject licence or Suspend licence, as the Licences tab has them),
 // Offerings and Products (the firm's products, owned or sponsored: the platform admin has no products list of its own;
 // /platform/firms/<id>?tab=products opens it), each a table. What a firm keeps to
 // itself (its encrypted health books, its signatures) isn't here: admins can't read or co-sign them. Server-renderable.
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { Building2, ShieldAlert, UserPlus } from "lucide-react"
 
+import { LicenceActions, LicencesTab, LicenceStatus, ReviewLicenceSheet, type Decision } from "@/components/admin-licences"
 import { FirmMembersTable, InviteFirmMemberSheet } from "@/components/admin-members"
 import { AdminDetail, AdminList, AdminNotReady, AdminSheet, AdminTable, Field, fieldClass, useAdminAction, useAdminData } from "@/components/admin-kit"
 import { downloadCsv } from "@/components/licences-view"
@@ -18,16 +25,19 @@ import { matches, usePaged } from "@/components/list-layout"
 import { StageMark, StatusDot } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { conformanceWords, csvOf, dateOf, FIRM_TYPE_LABELS, FIRM_TYPES, words, type AdminOffering, type AdminProduct, type Firm } from "@/lib/admin"
+import { Tab, TabList } from "@/components/ui/tabs"
+import { conformanceWords, csvOf, dateOf, FIRM_TYPE_LABELS, FIRM_TYPES, FIRMS_TAB_LABELS, FIRMS_TABS, NOT_AVAILABLE, words, type AdminLicence, type AdminOffering, type AdminProduct, type Firm, type FirmsTab } from "@/lib/admin"
 import type { Stage } from "@/lib/workspaces"
 
 const typesOf = (f: Firm) => f.types.map((t) => FIRM_TYPE_LABELS[t]).join(", ") || "No members yet"
 export const LEGAL_FORMS = ["company_private", "company_public", "llp", "partnership", "sole_proprietorship", "trust", "cooperative", "society", "nonprofit_company", "statutory_corporation", "government_entity", "foreign_branch"] as const
+// Licences waiting for review, as the list shows it: the number Mynt counted, or "Not available" when it gave none (never 0).
+export const awaitingReviewWords = (f: Pick<Firm, "awaitingReview">) => (typeof f.awaitingReview === "number" ? String(f.awaitingReview) : NOT_AVAILABLE)
 export function FirmStatus({ status }: { status: string }) {
   return <StatusDot tone={status === "active" ? "green" : status === "suspended" ? "amber" : "red"} label={words(status)} data-firm-status={status} />
 }
 
-/** Register firm: a legal entity added by hand, with no members yet. */
+/** Register regulated firm: a legal entity added by hand, with no members yet. */
 export function RegisterFirmSheet({ open, onClose, onDone, fetcher }: { open: boolean; onClose: () => void; onDone: () => void; fetcher?: typeof fetch }) {
   const { busy, error, result, run, reset } = useAdminAction(fetcher)
   const [name, setName] = useState("")
@@ -39,7 +49,7 @@ export function RegisterFirmSheet({ open, onClose, onDone, fetcher }: { open: bo
     if (open) reset()
   }, [open, reset])
   return (
-    <AdminSheet id="register-firm" open={open} onClose={onClose} title="Register firm" description="Adds a firm to Mynt by hand, with no members yet. Invite its people next, from the firm's page." error={error} result={result}>
+    <AdminSheet id="register-firm" open={open} onClose={onClose} title="Register regulated firm" description="Adds a firm to Mynt by hand, with no members yet. Invite its people next, from the firm's page." error={error} result={result}>
       <form
         className="flex flex-col gap-3"
         data-register-firm-form
@@ -80,7 +90,7 @@ export function RegisterFirmSheet({ open, onClose, onDone, fetcher }: { open: bo
         </Field>
         <div>
           <Button type="submit" disabled={busy || !name.trim()} data-register-firm-submit>
-            {busy ? "Registering…" : "Register firm"}
+            {busy ? "Registering…" : "Register regulated firm"}
           </Button>
         </div>
       </form>
@@ -150,14 +160,14 @@ export function FirmsListView({ firms, onOpen, onChanged = () => undefined, shee
   )
   const { page, pages, shown: onPage, setPage } = usePaged(shown)
   const exportCsv = () =>
-    downloadCsv("firms.csv", csvOf(["Firm", "Type", "Status", "Members", "Licences", "Country", "Created", "Id"], shown.map((f) => [f.name, typesOf(f), f.status, f.members.length, f.licences.length, f.country ?? "", dateOf(f.createdAt), f.id])))
+    downloadCsv("regulated-firms.csv", csvOf(["Firm", "Type", "Status", "Members", "Licences", "Awaiting review", "Country", "Created", "Id"], shown.map((f) => [f.name, typesOf(f), f.status, f.members.length, f.licences.length, awaitingReviewWords(f), f.country ?? "", dateOf(f.createdAt), f.id])))
   return (
     <>
       <AdminList
         id="firms"
         search={query}
         onSearch={(q) => (setQuery(q), setPage(1))}
-        searchLabel="Search firms by name, member email or id"
+        searchLabel="Search regulated firms by name, member email or id"
         facets={[
           { id: "type", label: "Type", options: [...FIRM_TYPES.map((t) => ({ value: t, label: FIRM_TYPE_LABELS[t] })), { value: "none", label: "No members yet" }], selected: type, onChange: (v) => (setType(v), setPage(1)) },
           { id: "status", label: "Status", options: ENTITY_STATUSES.map((s) => ({ value: s, label: words(s) })), selected: status, onChange: (v) => (setStatus(v), setPage(1)) },
@@ -168,7 +178,7 @@ export function FirmsListView({ firms, onOpen, onChanged = () => undefined, shee
         cta={
           <Button onClick={() => setRegistering(true)} data-register-firm>
             <Building2 />
-            Register firm
+            Register regulated firm
           </Button>
         }
         page={page}
@@ -177,7 +187,7 @@ export function FirmsListView({ firms, onOpen, onChanged = () => undefined, shee
         onPage={setPage}
       >
         <AdminTable
-          head={["Firm", "Type", "Status", "Members", "Licences", "Country", "Created", ""]}
+          head={["Firm", "Type", "Status", "Members", "Licences", "Awaiting review", "Country", "Created", ""]}
           rowKeys={onPage.map((f) => f.id)}
           rows={onPage.map((f) => [
             f.name,
@@ -185,13 +195,16 @@ export function FirmsListView({ firms, onOpen, onChanged = () => undefined, shee
             <FirmStatus key="s" status={f.status} />,
             String(f.members.length),
             String(f.licences.length),
+            <span key="w" data-awaiting-review={f.id}>
+              {awaitingReviewWords(f)}
+            </span>,
             f.country?.toUpperCase() ?? "—",
             dateOf(f.createdAt),
             <Button key="o" size="sm" variant="outline" onClick={() => onOpen(f.id)} data-open-firm={f.id}>
               Open
             </Button>,
           ])}
-          empty={firms.length ? "No firms match these filters." : "No firms yet. Register the first one."}
+          empty={firms.length ? "No regulated firms match these filters." : "No regulated firms yet. Register the first one."}
         />
       </AdminList>
       <RegisterFirmSheet
@@ -217,19 +230,22 @@ const DETAIL_TABS: { id: DetailTab; label: string }[] = [
 ]
 export type FirmDetail = { firm: Firm; offerings: AdminOffering[] | null; products: AdminProduct[] | null }
 
-export function FirmDetailView({ detail, onBack, onChanged = () => undefined, initialTab = "members", sheet = null }: { detail: FirmDetail; onBack: () => void; onChanged?: () => void; initialTab?: DetailTab; sheet?: "invite" | "status" | null }) {
+export function FirmDetailView({ detail, onBack, onChanged = () => undefined, initialTab = "members", sheet = null, fetcher }: { detail: FirmDetail; onBack: () => void; onChanged?: () => void; initialTab?: DetailTab; sheet?: "invite" | "status" | null; fetcher?: typeof fetch }) {
   const [tab, setTab] = useState<DetailTab>(initialTab)
   const [open, setOpen] = useState<"invite" | "status" | null>(sheet)
+  // The licence under review and what was picked for it (Verify licence, Reject licence or Suspend licence).
+  const [reviewing, setReviewing] = useState<{ licence: AdminLicence; decision: Decision } | null>(null)
   const [dirty, setDirty] = useState(false)
   const close = () => {
     setOpen(null)
+    setReviewing(null)
     if (dirty) onChanged()
   }
   const f = detail.firm
   return (
     <>
       <AdminDetail
-        backLabel="Back to firms"
+        backLabel="Back to regulated firms"
         onBack={onBack}
         title={f.name}
         subtitle={typesOf(f)}
@@ -240,6 +256,7 @@ export function FirmDetailView({ detail, onBack, onChanged = () => undefined, in
           ["Regions", f.regions.join(", ") || "—"],
           ["Members", String(f.members.length)],
           ["Licences", String(f.licences.length)],
+          ["Awaiting review", awaitingReviewWords(f)],
           ["Registered", dateOf(f.createdAt)],
           ["Id", <code key="i" className="text-xs">{f.id}</code>],
         ]}
@@ -264,9 +281,18 @@ export function FirmDetailView({ detail, onBack, onChanged = () => undefined, in
         )}
         {tab === "licences" && (
           <AdminTable
-            head={["Licence", "Regulator", "Region", "Jurisdiction", "Number", "Valid to", "Review"]}
+            head={["Licence", "Regulator", "Region", "Jurisdiction", "Number", "Valid to", "Review", ""]}
             rowKeys={f.licences.map((l) => l.id)}
-            rows={f.licences.map((l) => [l.licenceType, l.regulator, l.region, l.jurisdiction ?? "—", l.number ?? "—", dateOf(l.validTo), words(l.status)])}
+            rows={f.licences.map((l) => [
+              l.licenceType,
+              l.regulator,
+              l.region,
+              l.jurisdiction ?? "—",
+              l.number ?? "—",
+              dateOf(l.validTo),
+              <LicenceStatus key="s" status={l.status} />,
+              <LicenceActions key="a" licence={l} onAct={(decision) => setReviewing({ licence: l, decision })} />,
+            ])}
             empty="No licences registered."
           />
         )}
@@ -309,15 +335,49 @@ export function FirmDetailView({ detail, onBack, onChanged = () => undefined, in
       </AdminDetail>
       <InviteFirmMemberSheet firm={f} open={open === "invite"} onClose={close} onDone={() => setDirty(true)} />
       <FirmStatusSheet firm={f} open={open === "status"} onClose={close} onDone={() => setDirty(true)} />
+      <ReviewLicenceSheet licence={reviewing?.licence ?? null} decision={reviewing?.decision ?? null} onClose={close} onDone={() => setDirty(true)} fetcher={fetcher} />
     </>
   )
 }
 
-export function FirmsTab({ id, onOpen, onBack, initialTab }: { id: string | null; onOpen: (id: string) => void; onBack: () => void; initialTab?: FirmDetailTab }) {
+/** The section's tab bar, in the page's body: Regulated firms (the list) and Licences (every firm's licences, for review). */
+export function FirmsTabs({ tab, onTab }: { tab: FirmsTab; onTab: (t: FirmsTab) => void }) {
+  return (
+    <TabList aria-label="Regulated firms">
+      {FIRMS_TABS.map((t) => (
+        <Tab key={t} selected={tab === t} onClick={() => onTab(t)} data-firms-tab={t}>
+          {FIRMS_TAB_LABELS[t]}
+        </Tab>
+      ))}
+    </TabList>
+  )
+}
+
+export function FirmsTab({
+  id,
+  onOpen,
+  onBack,
+  initialTab,
+  tab = "firms",
+  onTab = () => undefined,
+}: {
+  id: string | null
+  onOpen: (id: string) => void
+  onBack: () => void
+  initialTab?: FirmDetailTab // a firm's page: the tab it opens on
+  tab?: FirmsTab // the section's page: Firms or Licences
+  onTab?: (t: FirmsTab) => void
+}) {
   const pickList = useCallback((b: Record<string, unknown>) => (Array.isArray(b.firms) ? (b.firms as Firm[]) : undefined), [])
   const pickOne = useCallback((b: Record<string, unknown>) => (b.firm ? ({ firm: b.firm, offerings: b.offerings ?? null, products: b.products ?? null } as FirmDetail) : undefined), [])
-  const list = useAdminData(id ? null : "/api/admin/firms", pickList)
+  // Only what's on screen is read: the firms list on the Firms tab, the licences on theirs (LicencesTab reads them).
+  const list = useAdminData(id || tab !== "firms" ? null : "/api/admin/firms", pickList)
   const one = useAdminData(id ? `/api/admin/firms/${encodeURIComponent(id)}` : null, pickOne)
   if (id) return one.state.kind === "ready" ? <FirmDetailView detail={one.state.data} onBack={onBack} onChanged={one.reload} initialTab={initialTab} /> : <AdminNotReady state={one.state} what="This firm" />
-  return list.state.kind === "ready" ? <FirmsListView firms={list.state.data} onOpen={onOpen} onChanged={list.reload} /> : <AdminNotReady state={list.state} what="Firms" />
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3" data-admin-firms data-view={tab}>
+      <FirmsTabs tab={tab} onTab={onTab} />
+      {tab === "licences" ? <LicencesTab /> : list.state.kind === "ready" ? <FirmsListView firms={list.state.data} onOpen={onOpen} onChanged={list.reload} /> : <AdminNotReady state={list.state} what="Regulated firms" />}
+    </div>
+  )
 }

@@ -457,7 +457,7 @@ The rules are in [Members and invitations](workspaces-and-sign-in.md#members-and
 
 ## Platform admin
 
-The platform admin (`/platform`) is for Mynt admins only. It has its own layout, not Studio's: its own sidebar with nine sections (Overview, Workspaces, Firms, Licences, Vendors, Audit trails, Risk models, Risk register and Platform settings) and **Back to Studio** at its foot.
+The platform admin (`/platform`) is for Mynt admins only. It has its own layout, not Studio's: its own sidebar with eight sections (Overview, Workspaces, Regulated firms, Vendors, Audit trails, Risk models, Risk register and Platform settings) and **Back to Studio** at its foot. Licences are reviewed inside Regulated firms, on its Licences tab (`/platform/firms?tab=licences`).
 
 In Studio, only accounts Mynt says hold the `admin` role get the **Platform admin** entry above their name in the sidebar. For everyone else `/platform` is a 404.
 

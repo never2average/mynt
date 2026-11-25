@@ -1,9 +1,12 @@
 "use client"
 
-// Admin → Licences: every licence firms registered (list_license_reviews), opening on the ones waiting for review.
-// Each row's labelled action opens a sheet: Verify licence, Reject licence or Suspend licence (review_license), after
-// checking it against the regulator's public register; a rejection or suspension says why. Only verified, in-date
-// licences let a firm publish products. Server-renderable.
+// Admin → Firms → Licences (/platform/firms?tab=licences; it was a section of its own): every licence firms
+// registered (list_license_reviews), opening on the ones waiting for review, each with its firm (a link to the firm's
+// page). Each row's labelled action opens a sheet: Verify licence, Reject licence or Suspend licence (review_license),
+// after checking it against the regulator's public register; a rejection or suspension says why. Only verified,
+// in-date licences let a firm publish products. The same actions and sheet are on each firm's own Licences tab
+// (components/admin-firms.tsx). Server-renderable.
+import Link from "next/link"
 import { useCallback, useEffect, useMemo, useState } from "react"
 
 import { AdminList, AdminNotReady, AdminSheet, AdminTable, Field, fieldClass, useAdminAction, useAdminData } from "@/components/admin-kit"
@@ -13,11 +16,11 @@ import { downloadCsv } from "@/components/licences-view"
 import { matches, usePaged } from "@/components/list-layout"
 import { StatusDot } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
-import { csvOf, dateOf, words, type AdminLicence } from "@/lib/admin"
+import { adminHref, adminIdOk, csvOf, dateOf, words, type AdminLicence } from "@/lib/admin"
 import type { Kpi } from "@/lib/dashboard-visual"
 
-type Decision = "verified" | "rejected" | "suspended"
-const DECISION_LABELS: Record<Decision, string> = { verified: "Verify licence", rejected: "Reject licence", suspended: "Suspend licence" }
+export type Decision = "verified" | "rejected" | "suspended"
+export const DECISION_LABELS: Record<Decision, string> = { verified: "Verify licence", rejected: "Reject licence", suspended: "Suspend licence" }
 // What a licence in each review status can be moved to.
 export const decisionsFor = (status: string): Decision[] => (status === "pending" ? ["verified", "rejected"] : status === "verified" ? ["suspended"] : status === "suspended" ? ["verified"] : [])
 const STATUSES = ["pending", "verified", "rejected", "suspended"] as const
@@ -25,6 +28,30 @@ const STATUSES = ["pending", "verified", "rejected", "suspended"] as const
 export function LicenceStatus({ status }: { status: string }) {
   const tone = status === "verified" ? "green" : status === "pending" ? "amber" : status === "rejected" ? "red" : "gray"
   return <StatusDot tone={tone} label={status === "pending" ? "Waiting for review" : words(status)} data-licence-status={status} />
+}
+
+/** A licence's review actions, each a labelled button that opens the review sheet; none when its status has no next step. */
+export function LicenceActions({ licence, onAct }: { licence: AdminLicence; onAct: (decision: Decision) => void }) {
+  return (
+    <span className="flex justify-end gap-2" data-licence-actions={licence.id}>
+      {decisionsFor(licence.status).map((d) => (
+        <Button key={d} size="sm" variant={d === "verified" ? "default" : "outline"} onClick={() => onAct(d)} data-review={d}>
+          {DECISION_LABELS[d]}
+        </Button>
+      ))}
+    </span>
+  )
+}
+
+/** The firm a licence belongs to, as a link to its page in Firms (on its Licences tab); its name alone when Mynt gave no id. */
+export function LicenceFirm({ licence }: { licence: AdminLicence }) {
+  const name = licence.firm ?? "—"
+  if (!adminIdOk("firms", licence.entityId)) return <>{name}</>
+  return (
+    <Link href={`${adminHref("firms", licence.entityId)}?tab=licences`} className="underline-offset-4 hover:underline" data-licence-firm={licence.entityId}>
+      {name}
+    </Link>
+  )
 }
 
 export function ReviewLicenceSheet({ licence, decision, onClose, onDone, fetcher }: { licence: AdminLicence | null; decision: Decision | null; onClose: () => void; onDone: () => void; fetcher?: typeof fetch }) {
@@ -137,20 +164,14 @@ export function LicencesAdminView({ licences, onChanged = () => undefined }: { l
           head={["Firm", "Licence", "Regulator", "Region", "Number", "Valid to", "Review", ""]}
           rowKeys={onPage.map((l) => l.id)}
           rows={onPage.map((l) => [
-            l.firm ?? "—",
+            <LicenceFirm key="f" licence={l} />,
             l.licenceType,
             l.regulator,
             `${l.region}${l.jurisdiction ? ` · ${l.jurisdiction.toUpperCase()}` : ""}`,
             l.number ?? "—",
             dateOf(l.validTo),
             <LicenceStatus key="s" status={l.status} />,
-            <span key="a" className="flex justify-end gap-2">
-              {decisionsFor(l.status).map((d) => (
-                <Button key={d} size="sm" variant={d === "verified" ? "default" : "outline"} onClick={() => setActing({ licence: l, decision: d })} data-review={d}>
-                  {DECISION_LABELS[d]}
-                </Button>
-              ))}
-            </span>,
+            <LicenceActions key="a" licence={l} onAct={(decision) => setActing({ licence: l, decision })} />,
           ])}
           empty={licences.length ? "No licences match these filters." : "No licences registered yet."}
         />

@@ -79,7 +79,7 @@ export type JoinTarget = { kind: "firm" | "workspace"; id: string; name: string;
 /** The firms and workspaces a person can join, for the Joins picker, filtered by what's typed. */
 export function joinTargets(firms: Pick<Firm, "id" | "name" | "types">[], workspaces: { id: string; name: string; personal: boolean; status: string }[], query = ""): JoinTarget[] {
   const all: JoinTarget[] = [
-    ...firms.map((f): JoinTarget => ({ kind: "firm", id: f.id, name: f.name, hint: "Firm" })),
+    ...firms.map((f): JoinTarget => ({ kind: "firm", id: f.id, name: f.name, hint: "Regulated firm" })),
     ...workspaces.filter((w) => !w.personal && w.status === "active").map((w): JoinTarget => ({ kind: "workspace", id: w.id, name: w.name, hint: "Workspace" })),
   ]
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)

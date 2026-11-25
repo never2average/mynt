@@ -15,8 +15,9 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   return route ? { title: ADMIN_TAB_LABELS[route.tab] } : {};
 }
 
-// A section of the platform admin (/platform/workspaces, /firms, /licences, /vendors, /audit, /risk-models, /risk-register, /settings).
-// Mynt admins only, else 404; so is a section that isn't one.
+// A section of the platform admin (/platform/workspaces, /firms, /vendors, /audit, /risk-models, /risk-register, /settings).
+// Mynt admins only, else 404; so is a section that isn't one. Firms has its own tabs in the page (?tab=firms or
+// ?tab=licences, read by components/platform-view.tsx); the old /platform/licences is sent there by proxy.ts.
 export default async function Page({ params }: Props) {
   await requireAdminPage();
   const route = await routeOf(params);
