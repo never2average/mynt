@@ -35,7 +35,7 @@ import { probeIdentityOffering } from "./vendors.js";
 // a new member can't register keys, confirm endpoints, upload a live file or switch to live; notices to every existing
 // member and the firm's webhooks on each of those; and, when the firm has another long-standing member, that member's
 // approval of a live key change or a switch to live. What's left is an insider who has been a member past the cool-off
-// in a firm with no other member to object: docs/reference.md says so plainly.
+// in a firm with no other member to object: docs/reference/licence-providers.md ("What is left") says so plainly.
 
 const T = "financial_products";
 const HOUR = 3_600_000;

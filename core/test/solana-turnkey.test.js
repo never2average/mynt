@@ -197,10 +197,10 @@ test("turnkey policy: the docs' policy allows Mynt's custody transactions and re
   const ix = (programId, tag, keys) => ({ programId, keys: keys.map(([pubkey, isSigner, isWritable]) => ({ pubkey, isSigner, isWritable })), data: Uint8Array.from([tag, 0, 0, 0]) });
 
   // The docs show exactly this policy.
-  const reference = readFileSync(new URL("../../docs/reference.md", import.meta.url), "utf8");
+  const reference = readFileSync(new URL("../../docs/reference/solana-programs.md", import.meta.url), "utf8");
   const shown = /```json\n([\s\S]*?)\n\s*```/g;
   const blocks = [...reference.matchAll(shown)].map((m) => m[1].replace(/^ {3}/gm, ""));
-  assert.ok(blocks.some((b) => { try { return JSON.stringify(JSON.parse(b)) === JSON.stringify(POLICY); } catch { return false; } }), "docs/reference.md shows docs/turnkey-solana-policy.json verbatim");
+  assert.ok(blocks.some((b) => { try { return JSON.stringify(JSON.parse(b)) === JSON.stringify(POLICY); } catch { return false; } }), "docs/reference/solana-programs.md shows docs/turnkey-solana-policy.json verbatim");
   parsePolicy(POLICY.condition); // it parses under the documented grammar
 
   // Mynt's own shapes (the integration test in solana.test.js checks the real ones Mynt sends).

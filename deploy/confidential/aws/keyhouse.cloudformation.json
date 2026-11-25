@@ -1,6 +1,6 @@
 {
   "AWSTemplateFormatVersion": "2010-09-09",
-  "Description": "Mynt's confidential service (keyhouse) in an AWS Nitro Enclave: one EC2 instance with enclaves enabled, the KMS key that wraps the service's root (usable only by an enclave attesting the release's PCR0), the instance's role, and a security group open to Mynt's server only. Creates nothing else. docs/reference.md, Confidential computing.",
+  "Description": "Mynt's confidential service (keyhouse) in an AWS Nitro Enclave: one EC2 instance with enclaves enabled, the KMS key that wraps the service's root (usable only by an enclave attesting the release's PCR0), the instance's role, and a security group open to Mynt's server only. Creates nothing else. docs/reference/confidential-computing.md.",
   "Parameters": {
     "ReleaseCommit": {
       "Type": "String",

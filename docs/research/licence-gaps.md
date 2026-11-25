@@ -1,5 +1,7 @@
 # Licence-type research gaps (India)
 
+**Status:** research input, not product documentation. None of this is entered in Mynt's regulatory model, and it is not launch scope: products run in the United States only. The file records no date for when the research was gathered; each source below should be checked again before it is used.
+
 The repository has no per-regulator data files. Regulators and licence types are entered through `define_regulator` and stored by the running server. This note collects public research on five licence types that are not modelled yet, so they can be entered that way.
 
 Every fact below cites its source inline. A fact without a source has been left out. Most sources are regulator or government sites. Where those blocked automated access, a copy that reproduces the official text is used, and the entry names it as a secondary source.

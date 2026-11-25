@@ -60,7 +60,7 @@ export async function bootVault(db: Db, host: ConfidentialHost): Promise<boolean
   return true;
 }
 
-// Step 1 of the migration (docs/reference.md, Confidential computing): the host adopts MYNT_VAULT_KEY, sealed with a
+// Step 1 of the migration (docs/reference/confidential-computing.md): the host adopts MYNT_VAULT_KEY, sealed with a
 // fresh data key, and the sealed bundle is stored. Once only.
 export async function adoptVault(db: Db, host: ConfidentialHost): Promise<{ adopted: boolean; host: string }> {
   const root = legacyVaultRoot();

@@ -1,30 +1,94 @@
 # Mynt chat (sample)
 
-Mynt is like Lovable for finance apps: you describe the financial product you need or want, in a chat, and Mynt finds it in its catalogue or, if nothing fits, files a product request for Mynt's product teams (innovators) to build.
+This folder is a sample app built on Mynt, for developers who want to see how an app of their own could use it. It contains two things: a mobile-first chat for customers, and a developer console at `/developer`.
 
-This is a sample **consumer app** for that: a mobile-first chat where you say what you need, in your own words. The assistant asks one question at a time, finds matching products through Mynt's MCP server, and shows each one as a **product card** with its terms, **Accept** and **Look for more options**. When nothing fits, it proposes a product request; if you tap **Send request**, it goes to Mynt with `request_product`, so Mynt's product teams can build options for you.
+## What this folder is
 
-It is a Next.js (App Router) app with plain CSS. It works from 320px wide up to desktop, follows light and dark mode, and can be installed as a PWA.
+Mynt is "Lovable for finance apps". This sample shows the customer's side of that: you say what financial product you need, in your own words, in a chat.
+
+- **The customer chat.** The assistant asks one question at a time, finds a published product through Mynt's MCP (Model Context Protocol) server, and shows each match as a **product card** with its terms, **Accept** and **Look for more options**. When nothing fits, it proposes a product request. If you tap **Send request**, it goes to Mynt with `request_product`, so that builders can offer a product for it.
+- **The developer console** (`/developer`). A builder's coding-agent builds and hosting, through the same signed-in session.
+
+It is a Next.js (App Router) app with plain CSS. It works from 320px wide up to desktop, follows light and dark mode, and can be installed as a progressive web app (PWA).
+
+Mynt shows products and their terms; it isn't financial advice.
+
+## Run locally
+
+```sh
+cd platform/chat
+npm ci -w .                  # the chat and @mynt/auth, from the repository's root lockfile
+cp .env.example .env.local   # then edit
+npm run dev
+```
+
+Open the address `npm run dev` prints. To try it on a phone on the same network, set `APP_URL` to the address the phone uses, and register that callback URL.
+
+Checks:
+
+```sh
+npm run typecheck   # tsc --noEmit
+npm test            # vitest: card/event parsing, transcript, the session store and OAuth provider, the agent loop, the developer console
+npm run build
+```
+
+`node scripts/make-icons.mjs` regenerates the PWA icons in `public/`.
 
 ## How it works
 
-```
-browser ──cookie (session id only)──▶ Next.js server ──OAuth tokens──▶ Mynt MCP (/mcp)
-                                          │
-                                          └──▶ Claude (Vertex AI or the Claude API)
+```text
+browser --cookie (session id only)--> Next.js server --OAuth tokens--> Mynt MCP (/mcp)
+                                          |
+                                          +--> Claude (Vertex AI or the Claude API)
 ```
 
-- **Sign-in.** The app is an MCP client of Mynt and signs in with the MCP TypeScript SDK's OAuth support. `/api/auth/login` lets the SDK read Mynt's OAuth metadata, find its authorization server, register this app (dynamic client registration, unless an operator registered it ahead of time: see *Sign in without a consent screen*), and start an authorization-code flow with PKCE. `/api/auth/callback` checks `state`, exchanges the code, and moves the tokens to a fresh session id with an empty chat. `/api/auth/logout` (POST, same origin only) ends the session. Someone already signed in who opens `/api/auth/login` just goes back to the chat.
-- **Sessions.** The browser holds only a random session id in an `httpOnly`, `SameSite=Lax` cookie, which is `Secure` and `__Host-`-prefixed everywhere except plain-http localhost. OAuth tokens, the PKCE verifier and the conversation stay in a server-side store and are never sent to the browser. The store is an in-memory `Map` (`lib/session-store.ts`; Mynt Studio has its own, Redis-backed store with the same methods), so sessions are lost on restart and aren't shared between instances. Sessions that never finish signing in expire after 10 minutes, and the store holds at most 10,000 sessions. For production, back it with Redis or a database and encrypt the tokens at rest. The sign-in code around the store (session cookie, OAuth provider, Mynt client and the `app/api/auth/*` handlers) is the `@mynt/auth` package in `platform/packages/auth`, shared with Mynt Studio; `lib/session.ts`, `lib/mynt-client.ts` and the route files hand it this app's settings, cookie name and store. Both apps' `lib/config.ts` must answer the same for the settings that code reads (a Mynt Studio test checks).
-- **Chat.** `/api/chat` runs Claude server-side with adaptive thinking and streams the reply to the browser as server-sent events. Claude's tools are the signed-in user's Mynt tools, listed through the MCP client and called through it. The app offers only a consumer allow-list of those tools (`CHAT_TOOLS` in `lib/mynt.ts`), plus two local tools, `show_product_card` and `propose_product_request`. Tools that act for the user (enrolling, sending a request) are never offered to Claude. If the phone locks mid-reply, the turn still finishes on the server, and a reload shows it.
-- **Cards.** Claude picks the product, a one-line summary and the terms to show. The server fetches the product with `get_product` and builds the card itself: the title and provider come from Mynt, the product must be published, and every term value must appear in Mynt's reply, or the card is refused. So text in a tool result (a product description, an innovator's note) can't put made-up terms on a real product.
-- **Accept.** Claude can't enrol anyone. Enrolment happens only when the user taps **Accept**: `/api/accept` calls `enroll_in_product` through MCP, only for a product shown in this chat and only once, passing the card's headline amount when it is one amount to borrow or invest. Accepted cards stay accepted after a reload. **Look for more options** sends that text as the next message.
-- **Requests.** Innovators read product requests, so Claude can only propose one. The user sees exactly what would be sent and taps **Send request** (`/api/request` then calls `request_product`) or **Not now**.
-- **App events.** Accepting or sending a request is told to Claude with the user's next message, never written into the history while a reply is running.
+### Sign-in
+
+The app is an MCP client of Mynt and signs in with the MCP TypeScript SDK's OAuth support.
+
+- `/api/auth/login` lets the SDK read Mynt's OAuth metadata, find its authorization server, register this app, and start an authorization-code flow with PKCE (Proof Key for Code Exchange). Registration is dynamic client registration, unless an operator registered the app ahead of time (see [Sign in without a consent screen](#sign-in-without-a-consent-screen)).
+- `/api/auth/callback` checks `state`, exchanges the code, and moves the tokens to a fresh session id with an empty chat.
+- `/api/auth/logout` (POST, same origin only) ends the session.
+- Someone already signed in who opens `/api/auth/login` goes back to the chat.
+
+### Sessions
+
+- The browser holds only a random session id in an `httpOnly`, `SameSite=Lax` cookie, which is `Secure` and `__Host-`-prefixed everywhere except plain-http localhost.
+- OAuth tokens, the PKCE verifier and the conversation stay in a server-side store and are never sent to the browser.
+- The store is an in-memory `Map` (`lib/session-store.ts`), so sessions are lost on restart and aren't shared between instances. Mynt Studio has its own, Redis-backed store with the same methods.
+- Sessions that never finish signing in expire after 10 minutes, and the store holds at most 10,000 sessions.
+- For production, back the store with Redis or a database and encrypt the tokens at rest.
+
+The sign-in code around the store (session cookie, OAuth provider, Mynt client and the `app/api/auth/*` handlers) is the `@mynt/auth` package in `platform/packages/auth`, shared with Mynt Studio. `lib/session.ts`, `lib/mynt-client.ts` and the route files hand it this app's settings, cookie name and store. Both apps' `lib/config.ts` must answer the same for the settings that code reads; a Mynt Studio test checks.
+
+### Chat
+
+`/api/chat` runs Claude on the server with adaptive thinking and streams the reply to the browser as server-sent events.
+
+- Claude's tools are the signed-in user's Mynt tools, listed through the MCP client and called through it.
+- The app offers only a consumer allow-list of those tools (`CHAT_TOOLS` in `lib/mynt.ts`), plus two local tools, `show_product_card` and `propose_product_request`.
+- Tools that act for the user (enrolling, sending a request) are never offered to Claude.
+- If the phone locks mid-reply, the turn still finishes on the server, and a reload shows it.
+
+### Cards
+
+Claude picks the product, a one-line summary and the terms to show. The server fetches the product with `get_product` and builds the card itself: the title and provider come from Mynt, the product must be published, and every term value must appear in Mynt's reply, or the card is refused. So text in a tool result (a product description, a builder's note) can't put made-up terms on a real product.
+
+### Accept
+
+Claude can't enrol anyone. Enrolment happens only when the user taps **Accept**: `/api/accept` calls `enroll_in_product` through MCP, only for a product shown in this chat and only once, passing the card's headline amount when it is one amount to borrow or invest. Accepted cards stay accepted after a reload. **Look for more options** sends that text as the next message.
+
+### Requests
+
+Builders read product requests, so Claude can only propose one. The user sees exactly what would be sent and taps **Send request** (`/api/request` then calls `request_product`) or **Not now**.
+
+### App events
+
+Accepting or sending a request is told to Claude with the user's next message, never written into the history while a reply is running.
 
 ## Developer console
 
-`/developer` is a console for developers: their coding-agent builds and their hosting, through the same signed-in MCP session as the chat (no extra credentials). It shows to signed-in users whose Mynt roles (from `whoami`) include developer; Mynt checks every call again.
+`/developer` is a console for builders: their coding-agent builds and their hosting, through the same signed-in MCP session as the chat (no extra credentials). It shows to signed-in users whose Mynt roles (from `whoami`) include `developer`; Mynt checks every call again.
 
 - **Builds.** A searchable table of `list_builds` (status, goal, cost against the cap, created) with this month's spend. A build opens with its facts on top (`get_build`), the actions **Open in VS Code**, **Steer** and **Stop build**, and tabs: **Activity** (`get_build_activity`), **Timeline**, **Files** (a folder browser over `sandbox_files`), **Diff** (`sandbox_diff`: changed files, then the full diff) and **Run** (a command box for `sandbox_run`, with each command's output).
 - **Hosting.** Your VM from `hosting_status` (or **Request hosting**), **Deploy an app** from a succeeded build, **SSH login** (`vm_access`), and a table of hosted apps with their URL, status and error. An app opens with **Restart** and **Undeploy** and tabs **Logs** (`app_logs`), **Status** (`app_status`) and **Run** (`app_run`).
@@ -37,7 +101,7 @@ All configuration is through environment variables. Copy `.env.example` to `.env
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
-| `MYNT_MCP_URL` | yes | Mynt's MCP endpoint, e.g. `https://<mynt host>/mcp` |
+| `MYNT_MCP_URL` | yes | Mynt's MCP endpoint, for example `https://mynt.example.com/mcp` |
 | `APP_URL` | in production | This app's public URL. OAuth redirects go to `$APP_URL/api/auth/callback`. Defaults to `http://localhost:3000`. |
 | `VERTEX_PROJECT_ID` | for Vertex | Google Cloud project with Claude enabled in Vertex AI |
 | `VERTEX_REGION` | no | Vertex region, default `global` |
@@ -50,63 +114,39 @@ All configuration is through environment variables. Copy `.env.example` to `.env
 | `MYNT_OAUTH_ISSUER` | no (only with the client) | The only authorization server the client's secret may be sent to. |
 | `CHAT_DAILY_MESSAGES` | no | Messages each Mynt user may send per day (UTC). Default `50`; `0` turns the cap off. Counted in memory, so run a single instance. |
 
-On Mynt's side, the authorization server (Clerk) must allow dynamic client registration, unless the app has a pre-registered client (below). Mynt itself needs no change: the user signs in as an ordinary Mynt user, and what they can do follows their Mynt roles.
+On Mynt's side, the authorization server must allow dynamic client registration, unless the app has a pre-registered client (below). Mynt itself needs no change: the user signs in as an ordinary Mynt user, and what they can do follows their Mynt roles.
 
-**Public use.** Open the chat to anyone by turning on Mynt's public sign-up (an admin runs `set_public_signup` with `enabled: true`). New people who sign in with a verified email become consumers. While sign-up is invite-only, someone Mynt doesn't let in sees Mynt's reason in the chat, not a generic error. The daily message cap keeps an open chat's model costs bounded.
+**Public use.** Open the chat to anyone by turning on Mynt's public sign-up (a Mynt admin runs `set_public_signup` with `enabled: true`). New people who sign in with a verified email become consumers. While sign-in is invite-only, someone Mynt doesn't let in sees Mynt's reason in the chat, not a generic error. The daily message cap keeps an open chat's model costs bounded.
 
 ## Sign in without a consent screen
 
-Out of the box the chat registers itself with Mynt's sign-in the first time someone signs in, and Clerk then shows each user a consent screen asking them to allow it access. Clerk doesn't let a self-registered app turn that screen off. An operator can instead register the chat once, ahead of time, as one of Mynt's own apps; then nobody sees the screen. It still signs in with PKCE, and Mynt still checks every call against the user's roles.
+Out of the box the chat registers itself with Mynt's sign-in the first time someone signs in, and the sign-in provider then shows each user a consent screen. An operator can instead register the chat once, ahead of time, as one of Mynt's own apps; then nobody sees the screen. Why, and what the server-side command does, is explained once in [Sign-in with Clerk](../../docs/reference/operations.md#sign-in-with-clerk). This section holds the chat's own settings and steps.
 
-**1. Register it, on Mynt's server** (a minute). In Mynt's folder there, run (the address is a placeholder for the chat's own):
+1. **Register it, on Mynt's server** (a minute). In the server's `core/` folder, run (the address is a placeholder for the chat's own):
 
-```bash
-node dist/index.js clerk first-party mynt-chat https://<chat address>/api/auth/callback --file ~/.mynt/oauth-mynt-chat.json
-```
-
-It prints the client id. The id and its secret are written to that file, which only you can read; the secret is never printed. The callback address must be exactly `$APP_URL/api/auth/callback`.
-
-**2. Give them to the chat** (a few minutes). Open the file (`cat ~/.mynt/oauth-mynt-chat.json`) and copy the two values yourself:
-
-1. On the server that runs the chat, open its settings file: `sudo nano /etc/mynt/chat.env`.
-2. Add these two lines, with the values from the file in place of the placeholders:
-
+   ```sh
+   node dist/index.js clerk first-party mynt-chat https://<chat address>/api/auth/callback --file ~/.mynt/oauth-mynt-chat.json
    ```
-   MYNT_OAUTH_CLIENT_ID=<client_id>
-   MYNT_OAUTH_CLIENT_SECRET=<client_secret>
-   ```
-3. Save and close (Ctrl+O, Enter, Ctrl+X). The file should be readable only by root and the chat's own user.
 
-**3. Restart the chat.** It reads the file only when it starts (for example `sudo systemctl restart <the chat's service>`). Sign out and in again to check: there's no consent screen. Then delete the registration file: `rm ~/.mynt/oauth-mynt-chat.json`.
+   It prints the client id. The id and its secret are written to that file, which only you can read; the secret is never printed. The callback address must be exactly `$APP_URL/api/auth/callback`.
+2. **Give them to the chat** (a few minutes). Open the file yourself (`cat ~/.mynt/oauth-mynt-chat.json`) and copy the two values into the chat's settings:
+   1. On the server that runs the chat, open its settings file. Where that file is depends on how you run the chat; `/etc/mynt/chat.env` is one example.
+   2. Add `MYNT_OAUTH_CLIENT_ID` with the `client_id` value, and `MYNT_OAUTH_CLIENT_SECRET` with the `client_secret` value.
+   3. Save and close. The file should be readable only by root and the chat's own user.
+3. **Restart the chat.** It reads its settings only when it starts (for example `sudo systemctl restart <the chat's service>`). Sign out and in again to check: there is no consent screen. Then delete the registration file: `rm ~/.mynt/oauth-mynt-chat.json`.
 
-The secret stays on the chat's server. It's sent only to the authorization server's token endpoint (HTTP Basic, or the form body if that's all the server accepts), and never to a browser or a log. Set both settings or neither: one without the other stops the chat from starting a sign-in. Without them, it registers itself as before. Also set `MYNT_OAUTH_ISSUER` to Clerk's address, exactly as Mynt's `/.well-known/oauth-protected-resource` lists it under `authorization_servers` (open that address on Mynt's domain to see it). The secret is then only ever sent there: if Mynt's settings ever named another sign-in server, sign-in and token refresh would stop rather than hand the secret to it. If `APP_URL` changes, register again under a new name with the new callback address, and replace both values. To replace the secret, rotate it in Clerk's dashboard.
+What the chat does with them:
 
-## Run locally
-
-```bash
-cd platform/chat
-npm ci -w .                  # the chat and @mynt/auth, from the repository's root lockfile
-cp .env.example .env.local   # then edit
-npm run dev                  # http://localhost:3000
-```
-
-To try it on a phone on the same network, set `APP_URL` to the address the phone uses, and register that callback URL.
-
-Checks:
-
-```bash
-npm run typecheck   # tsc --noEmit
-npm test            # vitest: card/event parsing, transcript, the session store and OAuth provider, the agent loop, the developer console
-npm run build
-```
-
-`node scripts/make-icons.mjs` regenerates the PWA icons in `public/`.
+- The secret stays on the chat's server. It is sent only to the authorization server's token endpoint (HTTP Basic, or the form body if that is all the server accepts), and never to a browser or a log.
+- Set both settings or neither. One without the other stops the chat from starting a sign-in. Without them, it registers itself.
+- Also set `MYNT_OAUTH_ISSUER` to the sign-in provider's address, exactly as Mynt's `/.well-known/oauth-protected-resource` lists it under `authorization_servers`. The secret is then only ever sent there: if Mynt's settings ever named another sign-in server, sign-in and token refresh would stop rather than hand the secret to it.
+- If `APP_URL` changes, register again under a new name with the new callback address, and replace both values. To replace the secret, rotate it in the sign-in provider's dashboard.
 
 ## Deploy behind a reverse proxy
 
-Build once and run the Node server, from `platform/chat` in a full checkout of the repository (it needs `platform/packages/auth` and the root lockfile, so the folder can't be copied out on its own):
+Build once and run the Node server, from `platform/chat` in a full checkout of the repository. It needs `platform/packages/auth` and the root lockfile, so the folder can't be copied out on its own.
 
-```bash
+```sh
 npm ci -w . && npm run build
 APP_URL=https://chat.example.com MYNT_MCP_URL=https://mynt.example.com/mcp VERTEX_PROJECT_ID=... \
   npm start -- -p 3000
@@ -120,7 +160,7 @@ Put any TLS-terminating reverse proxy in front of it, forwarding to `127.0.0.1:3
 
 For example, with Caddy (placeholders):
 
-```
+```text
 chat.example.com {
   reverse_proxy 127.0.0.1:3000 {
     flush_interval -1
@@ -148,5 +188,3 @@ location / {
 - Light and dark mode follow `prefers-color-scheme`. Hover styles apply only on devices with a real pointer, so nothing stays highlighted after a tap.
 - The chat stays pinned to the latest message when the keyboard opens.
 - The web manifest (`app/manifest.ts`) and its icons make the app installable. It has no service worker, so it needs a connection to work.
-
-Mynt shows products and their terms; it isn't financial advice.

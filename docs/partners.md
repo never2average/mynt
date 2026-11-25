@@ -12,7 +12,9 @@ Addresses in this guide are placeholders. `https://ledger.partner.example` stand
 | (b) | **The customer's verified home state**, from the identity checks you accept | A live money movement goes only by the US state a licensed partner verified | An identity service you offer, or one you approve, returns `residential_state` on a passed check |
 | (c) | **Money rails** | Money moves only through rails an admin approved, within your licences | A ramp adapter in front of your API, or Mynt's wire contract |
 
-(b) and (c) are already part of Mynt (see "Partner requirements" and "Approved money rails" in [reference.md](reference.md)). This kit adds (a) and one test, `run_partner_conformance`, that checks all three.
+(b) and (c) are already part of Mynt: see [Partner requirements](reference/money-rails.md#partner-requirements) and [Money rails](reference/money-rails.md). This kit adds (a) and one test, `run_partner_conformance`, that checks all three. What Mynt does on its side of the kit is in [Partner kit](reference/licence-providers.md#partner-kit).
+
+"Partner" in tool and setting names (`run_partner_conformance`, `PARTNER_LEDGER_TIMEOUT_MS`, the partner kit, the partner ledger) means the licence provider: your firm.
 
 **Until you connect (a), your products' health snapshots come from Mynt's sandbox ledger**: made-up figures marked `source: sandbox`, which never count as live, whatever else is true.
 
@@ -43,7 +45,7 @@ Mynt is the client. It calls your endpoint when it records a product's health (h
 
 ### The request
 
-```
+```http
 POST <your base URL>/v1/ledger
 Content-Type: application/json
 Mynt-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with your request secret>
@@ -184,7 +186,7 @@ function signStatement(unsigned, privateKey, publicKeyBase58) {
 
 For the request in the example above, the signed bytes start `mynt.partner_ledger.v1`, a zero byte, then:
 
-```
+```json
 {"as_of":"2026-11-10T13:58:12Z","environment":"live","products":[{"customer_obligations_cents":1000000,"product_id":"product-a","reason":null,"reserves_held_cents":1250000},{"customer_obligations_cents":420000,"product_id":"product-b","reason":"Reserve reconciliation for today is still running","reserves_held_cents":null}],"provider_entity_id":"<your firm id>","request_id":"8b0f3c2e-5d1a-4e7b-9c41-2f6a0d9e7b13","schema":"mynt.partner_ledger.v1"}
 ```
 
@@ -245,11 +247,11 @@ For the file source, the cases are `setup` and the statement checks above, run o
 
 ## Sealing your live statement to Mynt's confidential service
 
-Once Mynt runs its confidential service (an attested enclave on AWS Nitro Enclaves: [Confidential computing](reference.md#confidential-computing)), you can answer a **live** request with your signed statement sealed to that service, so Mynt's own server never sees your books: it carries the sealed statement to the service, which checks it exactly as above (your firm, `live`, the request's `request_id`, your registered live key, a fresh `as_of`, a reason for every null), computes the one product's snapshot, and signs its fingerprint. Only that product's figures and the signature leave the service. Test statements and conformance stay as they are, in the clear: test books aren't real money.
+Once Mynt runs its confidential service (an attested enclave on AWS Nitro Enclaves: [Confidential computing](reference/confidential-computing.md)), you can answer a **live** request with your signed statement sealed to that service, so Mynt's own server never sees your books: it carries the sealed statement to the service, which checks it exactly as above (your firm, `live`, the request's `request_id`, your registered live key, a fresh `as_of`, a reason for every null), computes the one product's snapshot, and signs its fingerprint. Only that product's figures and the signature leave the service. Test statements and conformance stay as they are, in the clear: test books aren't real money.
 
 1. Check the service yourself, from a checkout of the release you expect (after `cd core && npm ci && npm run build`), with the PCRs that release's CI published (they're also in `list_enclave_releases`):
 
-   ```
+   ```sh
    node scripts/verify-mynt-enclave.mjs --url https://<mynt>/confidential/attestation --expected-pcr0 <96 hex> --expected-pcr1 <96 hex> --expected-pcr2 <96 hex>
    ```
 
@@ -273,6 +275,9 @@ Once Mynt runs its confidential service (an attested enclave on AWS Nitro Enclav
 | `PARTNER_LEDGER_FILE_MAX_AGE_HOURS`: oldest daily file accepted or read | 36 |
 | `PARTNER_CONFORMANCE_MAX_AGE_DAYS`: how long a conformance pass counts | 30 |
 | `PARTNER_LEDGER_TIMEOUT_MS`: time limit per request (one request per firm per round) | 10000 |
+| `PARTNER_CONFORMANCE_WARN_DAYS`: how long before a conformance pass runs out you are warned | 7 |
+| `PARTNER_MEMBER_COOLOFF_HOURS`: how long a member waits, after becoming a licence provider at your firm, before changing what Mynt reads as your books | 72 |
+| How long a request for a second member's approval (a live key change, a switch to live) stays open before it lapses | 7 days |
 | Clock skew allowed on `as_of` and on Mynt's request timestamp | 300 s |
 | Largest answer | 1 MiB |
 | Products per statement | 1000 |

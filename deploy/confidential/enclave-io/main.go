@@ -1,7 +1,8 @@
-// mynt-enclave-io: the keyhouse's only native piece inside an AWS Nitro enclave (docs/reference.md, Confidential
-// computing). An enclave has no network, no disk and no console in production: only vsock to its parent instance and
-// the Nitro Secure Module. The service is Node, which can use neither, so this helper, started as the enclave's entry
-// point, does exactly three things and then runs the service as an unprivileged user:
+// mynt-enclave-io: the keyhouse's only native piece inside an AWS Nitro enclave
+// (docs/reference/confidential-computing.md). An enclave has no network, no disk and no console in production: only
+// vsock to its parent instance and the Nitro Secure Module. The service is Node, which can use neither, so this
+// helper, started as the enclave's entry point, does exactly three things and then runs the service as an
+// unprivileged user:
 //
 //   - relays bytes between vsock ports and Unix sockets in /run/keyhouse (TLS runs end to end inside the service, so the
 //     relays and the parent see ciphertext only);

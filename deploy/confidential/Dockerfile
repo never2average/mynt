@@ -1,4 +1,4 @@
-# Mynt's confidential service (keyhouse), in two forms from one build (docs/reference.md, Confidential computing):
+# Mynt's confidential service (keyhouse), in two forms from one build (docs/reference/confidential-computing.md):
 #
 #   --target nitro                 the AWS Nitro enclave image, which nitro-cli turns into an enclave image file (EIF)
 #                                  whose PCR0/PCR1/PCR2 the hardware measures (the documented deployment)

@@ -1,10 +1,29 @@
 # Plan: connecting Mynt to crypto liquidity
 
-**Status:** decided: the Mynt Ramp, operated by a licensed partner (model R1). The ramp's platform side is built (section 3.2); the partner and the rest are not.
-**Reads with:** [`docs/architecture.md`](../architecture.md).
-**Scope:** the United States only. Other countries are out of scope for this plan.
-**Scope (decided 2026-11-07): USDC only, for now.** Every digital-asset product on Mynt is USDC-based: no other tokens, no crypto trading, no tokenised funds, no third-party bridges. The ramp converts US dollars to and from USDC only, and Circle's CCTP (USDC-only on Solana) covers every cross-chain need (section 3.3). Items below that need anything else are kept, marked "out of scope while Mynt is USDC-only".
-**Scope (decided 2026-11-07): developers' customers never see or touch crypto.** No wallets, tokens, chain addresses or "USDC" in any app screen, device SDK result or customer-facing copy: customers see US dollars only. USDC is at most an invisible back-end settlement rail, held by a licensed custodial partner (the Mynt Ramp partner, model R1). Route D (the customer's own wallet signs) is rejected.
+**This is a plan, not product documentation.** It records what was decided and what was planned. For what Mynt does today, read the [technical reference](../reference.md).
+
+**Status (2026-11-25):** these parts of the plan are built, and each is documented in the reference (the table below, and a link in each built section): the Mynt Ramp's platform side with its sandbox and a ramp partner adapter, coverage per state, the money-transmission base product, params and quotes, and builders' Solana programs. Liquidity pools and on-chain treasuries were built after this plan and are in the reference too. The items marked out of scope are not built. The sections below describe things as they stood when each was written; where the reference differs, the reference is right.
+
+**Decided:**
+
+- **United States only.** Other countries are out of scope for this plan.
+- **USDC only, for now** (decided 2026-11-07). Every digital-asset product on Mynt is USDC-based: no other tokens, no crypto trading, no tokenised funds, no third-party bridges. The ramp converts US dollars to and from USDC only, and Circle's CCTP (USDC-only on Solana) covers every cross-chain need (section 3.3). Items below that need anything else are kept, marked "out of scope while Mynt is USDC-only".
+- **Customers see dollars** (decided 2026-11-07). Builders' customers never see or touch crypto: no wallets, tokens, chain addresses or "USDC" in any app screen, device SDK result or customer-facing copy. USDC is at most an invisible back-end settlement rail. Route D (the customer's own wallet signs) is rejected.
+- **The ramp runs through a licensed partner** (model R1). The Mynt Ramp is operated by a licensed custodial partner, which holds funds in transit under its own licences.
+
+**Where the built parts are documented:**
+
+| Part | Reference |
+|---|---|
+| The Mynt Ramp, its sandbox and the ramp partner's adapter | [The Mynt Ramp](../reference/vendors-and-marketplace.md#the-mynt-ramp) |
+| The vendor wire contract, params and quotes | [The wire contract](../reference/vendors-and-marketplace.md#the-wire-contract) |
+| Coverage per state | [Coverage per state](../reference/products.md#coverage-per-state) |
+| The money-transmission base product | [Base products](../reference/products.md#base-products) |
+| Money rails | [Money rails](../reference/money-rails.md) |
+| Liquidity pools and on-chain treasuries | [Liquidity pools and on-chain treasuries](../reference/liquidity-and-treasury.md) |
+| Builders' Solana programs and the mainnet gate | [Solana programs](../reference/solana-programs.md) |
+
+**Reads with:** [docs/architecture.md](../architecture.md).
 
 ## 1. What we want
 
@@ -43,7 +62,7 @@ Every dollar that enters or leaves digital-asset liquidity on Mynt goes through 
 - **For liquidity providers:** they settle with the ramp in stablecoins and never touch a customer's bank account. A new provider plugs into one counterparty instead of every app.
 - **For Mynt:** one place to price fiat conversion (a ramp fee on top of the take rate), and one place to apply sanctions screening, the Travel Rule and transaction limits.
 
-```
+```text
  customer's bank ──fiat──► Mynt Ramp ──stablecoin──► liquidity provider (exchange, broker, issuer)
                  ◄──fiat──           ◄──stablecoin──
                               │
@@ -67,6 +86,8 @@ R1 can move to R2 later without changing the API developers and providers use: o
 
 ### 3.2 What's built
 
+The ramp as built is documented in [The Mynt Ramp](../reference/vendors-and-marketplace.md#the-mynt-ramp). The table below is the plan's own record of where each part went.
+
 | Part | Where | Tests |
 |---|---|---|
 | The `ramp` service category, the `set_mynt_ramp` admin tool, and the rule that only the designated firm may offer, list or be called for ramp services | `core/src/vendors.ts` | `core/test/ramp.test.js` |
@@ -83,7 +104,7 @@ R1 can move to R2 later without changing the API developers and providers use: o
 | Coverage per state: state regulators and their licences scoped to a state, products listing the states they're offered in, publishing blocked per component × state, drift naming the state (section 4.2) | `core/src/regulatory.ts`, `core/src/regime.ts`, `core/src/derived.ts`, `core/src/pins.ts`, `core/schemas/regulatory/us.json` | `core/test/state-coverage.test.js` |
 
 **Not built yet:**
-- **The partner's live endpoint.** The partner either implements Mynt's vendor wire contract (`docs/reference.md`) or Mynt runs a small adapter in front of its API. Which one depends on the partner, so it waits for the partner. Sandbox already works without it.
+- **The partner's live endpoint.** The partner either implements Mynt's vendor wire contract ([The wire contract](../reference/vendors-and-marketplace.md#the-wire-contract)) or Mynt runs a small adapter in front of its API. Which one depends on the partner, so it waits for the partner. Sandbox already works without it.
 - **Journeys.** A journey step that shows a quote with its expiry before accept.
 - **The stablecoin leg** with liquidity providers, and the price and liquidity services behind the exchange component (routes A and B).
 - **Ops views:** expired quotes, stuck transfers and returned bank transfers in `ops_status`.
@@ -93,7 +114,7 @@ R1 can move to R2 later without changing the API developers and providers use: o
 - **USDC only, for now** (see Scope). The ramp converts US dollars to and from USDC; no other token, no crypto trading, no tokenised funds.
 - **Solana is the primary chain** for Mynt's digital-asset products. **Base is not used.**
 - **Cross-chain moves are USDC through Circle's CCTP V2 only**: native burn-and-mint between Solana (CCTP domain 5) and EVM chains, with no wrapped tokens and no bridge pools ([supported chains and domains](https://developers.circle.com/cctp/expanded-assets/concepts/supported-chains-and-domains), [Solana programs](https://developers.circle.com/cctp/references/solana-programs)). CCTP on Solana carries USDC only (its non-USDC "expanded assets" are EVM-only), which is enough while Mynt is USDC-only. Other assets would cross only by their issuer's native Solana issuance; third-party bridges are avoided, and one is used only if a product needs it, with that decision recorded here.
-- **Contract templates are Anchor (Rust) programs.** Developers build and deploy their own Solana programs through Mynt (built, see [Solana programs](../reference.md#solana-programs-developers)): the coding agents scaffold an Anchor program from `core/workspaces/coding-build/templates/solana-program/`, Mynt rebuilds it itself with Anchor's verifiable build in its clean verify sandbox, tests it there on a local validator, and deploys only what it built, recording the hash in its program registry. An indexer forwards each program's events to the owning firm's webhooks.
+- **Contract templates are Anchor (Rust) programs.** Developers build and deploy their own Solana programs through Mynt (built, see [Solana programs](../reference/solana-programs.md)): the coding agents scaffold an Anchor program from `core/workspaces/coding-build/templates/solana-program/`, Mynt rebuilds it itself with Anchor's verifiable build in its clean verify sandbox, tests it there on a local validator, and deploys only what it built, recording the hash in its program registry. An indexer forwards each program's events to the owning firm's webhooks.
 - **Who signs (decided 2026-11-08).** Customers' money and assets still move only in the licensed partners' accounts, signed by their own custody; nothing below changes that. For developers' programs:
   - **Devnet: Mynt signs**, with Mynt-generated keys sealed in its vault (`devnet-vault`), funded from the devnet faucet.
   - **Mainnet: the configured signer**, behind one signer interface, refused until the operator supplies a mainnet RPC and funding and an admin chooses and enables a backend: `mainnet-vault` (a key in Mynt's vault, generated there or imported on the server, and only with `SOLANA_MAINNET_VAULT_SIGNER=enabled`), `custody-service` (Turnkey: the service signs without Mynt seeing the key, under a Turnkey policy, and Mynt verifies every signature) or `multisig` (Squads style: members approve each deploy as a proposal). The multisig is a typed interface that refuses until a multisig client is connected.
@@ -127,7 +148,7 @@ The regime check then does what it does for any product: it finds the regulated 
 | Nothing settles out of an exchange into another exchange component, and `discovers_price_for` can't target one, so a crypto venue or a two-leg swap can't be composed | Schema `x-from` / `x-to` | Extend the allowed ends only if a first product needs it |
 | ~~A payment can't fund an exchange component~~ (done) | Schema `conn_funds` `x-to` | `exchange:sale\|purchase` is now an allowed end of `funds` |
 | Vendor categories are data services only | `SERVICE_CATEGORIES` in `core/src/vendors.ts` | Add `liquidity` (quote, execute), `ramp` (on/off), `custody` (balance, withdrawal), `chain_compliance` (address screening, Travel Rule) |
-| ~~The vendor contract is a single request and answer, with no notion of a firm price~~ (done: params and quotes) | `core/src/vendor-call.ts`, the wire contract in `docs/reference.md` | A two-step **quote → accept** pattern: a quote carries a price, size, expiry (seconds) and quote id; accept is idempotent on the quote id and refused after expiry. Built on the existing async callback for settlement status |
+| ~~The vendor contract is a single request and answer, with no notion of a firm price~~ (done: params and quotes) | `core/src/vendor-call.ts`, [the wire contract](../reference/vendors-and-marketplace.md#the-wire-contract) | A two-step **quote → accept** pattern: a quote carries a price, size, expiry (seconds) and quote id; accept is idempotent on the quote id and refused after expiry. Built on the existing async callback for settlement status |
 | Price changes between showing and accepting | Developer contract, journeys | A `quote` step type in journeys and a device-visible `client_result` for quotes (price, size, expiry, fees: never the provider's internal data) |
 | No wallet address or chain data field | `core/src/data-dictionary.ts` | Add `wallet_address`, `chain_network`, `destination_tag`, with validation per network. Since customers never touch crypto, these are not customer fields: only firm- or partner-side, if ever needed |
 | Wallet address validation doesn't cover Solana | `core/src/data-dictionary.ts` (planned fields above) | If `wallet_address` / `chain_network` are added, validate Solana addresses (base58 public keys) as well as EVM ones, since Solana is the primary chain (section 3.3) |
@@ -138,6 +159,8 @@ The regime check then does what it does for any product: it finds the regulated 
 | Sandbox liquidity | Vendor test endpoints | Providers' test endpoints (testnet or paper trading) are the sandbox; conformance fixtures include a quote that expires and an accept after expiry that must be refused |
 
 #### Coverage per state (built)
+
+Documented in [Coverage per state](../reference/products.md#coverage-per-state). The notes below are the plan's record of what was built.
 
 - **Jurisdiction codes** are ISO 3166-2, lowercase like entities' incorporation codes: `us-ny`, `us-ca`. A country code alone (`us`) means the whole country.
 - **Regulators**: a state regulator carries `jurisdiction` (NYDFS `us-ny`, DFPI `us-ca`); a federal one (FinCEN, OCC) has none and is country-wide.
@@ -150,6 +173,8 @@ The regime check then does what it does for any product: it finds the regulated 
 - **Prerequisites** (`requires` on a licence type): a held licence counts only when its holder also holds each required licence type verified and in force; an entry may list several ids, any one of which will do (the same registration under different ids). The covering licence's `by` entry lists the prerequisite held licences, which are pinned at publish with the states they back, and their mandated stakeholders (the FinCEN registration's AML compliance officer) are checked like the covering licence's. To add a state, add its regulator with `jurisdiction: "us-xx"`, its licence types and the law they cite, from the state's own sources.
 
 #### Money transmission first: the base product (built)
+
+Documented in [Base products](../reference/products.md#base-products). The notes below are the plan's record of what was built.
 
 Money transmission is the first foundational product, registered on the regulatory framework like any other, and the rest of the dollar products are built on it.
 

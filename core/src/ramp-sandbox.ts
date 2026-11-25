@@ -8,7 +8,7 @@ import { vendorCallback } from "./vendors.js";
 // The Mynt Ramp's sandbox: a test endpoint Mynt serves itself, so developers can build and test on- and off-ramp
 // before the ramp partner's live endpoint exists. The ramp firm points its offerings' test_base_url at
 // <PUBLIC_URL>/ramp-sandbox; the live_base_url is the partner's. It speaks exactly the vendor wire contract
-// (docs/reference.md): signed requests only (a subscription's secret, or an offering's conformance secret), test
+// (docs/reference/vendors-and-marketplace.md, The wire contract): signed requests only (a subscription's secret, or an offering's conformance secret), test
 // environment only, and it never moves money.
 //
 // Prices: in US dollars only (the device never sees the USDC leg, which the sandbox settles 1:1), and a fee of 0.5%

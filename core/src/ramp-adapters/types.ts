@@ -1,6 +1,6 @@
 // The ramp adapter interface. The Mynt Ramp's licensed partner plugs in one of two ways:
 //
-// 1. It implements Mynt's vendor wire contract itself (docs/reference.md): its offerings' base URLs are its own
+// 1. It implements Mynt's vendor wire contract itself (docs/reference/vendors-and-marketplace.md, The wire contract): its offerings' base URLs are its own
 //    endpoints, and nothing here is used.
 // 2. Mynt runs an adapter in front of the partner's own API. The offering names the adapter (set_ramp_adapter),
 //    its base URLs are the partner's API, and the partner's credential sits sealed in the ramp firm's key vault.

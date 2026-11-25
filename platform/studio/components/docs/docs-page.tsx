@@ -132,7 +132,7 @@ function body(route: DocsRoute): React.ReactNode {
         <>
           <H2 id="roles">Roles</H2>
           <p>
-            You sign in with OAuth from any MCP client (see <Link href={pageHref("connect")}>Connect your agent</Link>), and Mynt registers only the tools your roles allow. Roles nest: admin holds every role, and innovator and developer are two names for the builder role.
+            You sign in with OAuth from any MCP client (see <Link href={pageHref("connect")}>Connect your agent</Link>), and Mynt registers only the tools your roles allow. Roles nest: an admin also holds the builder, vendor and licence-provider roles, but not the liquidity-provider role, and innovator and developer are two names for the builder role.
           </p>
           <RolesTable />
           {md}
