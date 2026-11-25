@@ -76,7 +76,7 @@ const OFFERING = v.fromMyOfferings([
     sla_notes: "",
     licence_ids: [LIC],
     requires_credential: true,
-    terms: { version: 2, document_url: "https://example.com/terms.pdf", document_sha256: "a".repeat(64), summary: "Our standard terms.", pricing_summary: "$0.40 per check" },
+    terms: { version: 2, document_url: "https://example.com/terms.pdf", document_sha256: "a".repeat(64), summary: "Our standard terms.", pricing_summary: "$0.40 per check", scopes: ["technology", "manpower"] },
     last_conformance: { passed: true, at: "2026-11-20T10:00:00Z" },
     subscribers: 3,
   },
@@ -195,8 +195,8 @@ describe("the services list and a service's details", () => {
       offering: OFFERING,
       runs: [{ runId: "r1", passed: false, at: "2026-11-19T09:00:00Z", runBy: "Vera", failures: [{ case: "fixture_1", problems: ["output /status must be string"] }] }],
       termsVersions: [
-        { version: 2, current: true, documentUrl: "https://example.com/terms.pdf", documentSha256: "a".repeat(64), summary: "Ours.", pricing: "$0.40 per check", setAt: "2026-11-21T00:00:00Z", setBy: "Vera", agreements: 1 },
-        { version: 1, current: false, documentUrl: null, documentSha256: "b".repeat(64), summary: null, pricing: null, setAt: null, setBy: null, agreements: 0 },
+        { version: 2, current: true, documentUrl: "https://example.com/terms.pdf", documentSha256: "a".repeat(64), summary: "Ours.", pricing: "$0.40 per check", scopes: ["technology" as const], setAt: "2026-11-21T00:00:00Z", setBy: "Vera", agreements: 1 },
+        { version: 1, current: false, documentUrl: null, documentSha256: "b".repeat(64), summary: null, pricing: null, scopes: null, setAt: null, setBy: null, agreements: 0 },
       ],
       subscribers: [{ subscriptionId: "s1", subscriber: "Ines Bank", status: "active", live: false, since: "2026-11-22T00:00:00Z", termsVersions: [1, 2], calls: null }],
     };
@@ -209,6 +209,9 @@ describe("the services list and a service's details", () => {
     const terms = renderToStaticMarkup(<OfferingDetailView detail={detail} data={DATA} onBack={() => undefined} initialTab="terms" />);
     expect(terms).toContain(">v1<");
     expect(terms).toContain("Not kept"); // an earlier version's summary Mynt doesn't have: said so, never made up
+    expect(terms).toContain(">Scope<");
+    expect(terms).toContain('data-terms-version-scope="true">Technology<');
+    expect(runs).toContain("Technology, Manpower"); // the card's Terms scope
     const subs = renderToStaticMarkup(<OfferingDetailView detail={detail} data={DATA} onBack={() => undefined} initialTab="subscribers" />);
     expect(subs).toContain("Ines Bank");
     expect(subs).toContain("v1, v2");
@@ -266,12 +269,19 @@ describe("each sheet posts to its route with what was typed", () => {
     expect(sha).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"); // SHA-256("abc")
     type("[data-terms-summary]", "Our standard terms for identity checks.");
     type("[data-terms-pricing]", "$0.40 per check, invoiced monthly");
+    // The Scope is required: nothing is sent until one is ticked.
+    expect((document.querySelector("[data-terms-submit]") as HTMLButtonElement).disabled).toBe(true);
+    await submit("[data-terms-form]");
+    expect(calls).toEqual([]);
+    expect(document.querySelector("[data-sheet-error]")?.textContent).toBe("Choose what your terms cover: at least one scope.");
+    fireEvent.click(document.querySelector("[data-terms-scopes] [data-propose-scope=financial_regulatory_operations]")!);
+    fireEvent.click(document.querySelector("[data-terms-scopes] [data-propose-scope=technology]")!);
     await submit("[data-terms-form]");
     expect(calls).toEqual([
       {
         url: `/api/vendor/offerings/${OFF}/terms`,
         method: "POST",
-        body: { standard_terms: { document_url: "https://example.com/terms.pdf", document_sha256: sha, summary: "Our standard terms for identity checks.", pricing_summary: "$0.40 per check, invoiced monthly" } },
+        body: { standard_terms: { document_url: "https://example.com/terms.pdf", document_sha256: sha, summary: "Our standard terms for identity checks.", pricing_summary: "$0.40 per check, invoiced monthly", scopes: ["technology", "financial_regulatory_operations"] } },
       },
     ]);
     // Pasted: upper case is accepted and sent lower case; anything else is refused before it's sent.
@@ -284,6 +294,15 @@ describe("each sheet posts to its route with what was typed", () => {
     render(<TermsSheet offering={OFFERING} onClose={() => undefined} onDone={() => undefined} />);
     expect(document.querySelector('[data-admin-sheet="set-terms"]')?.textContent).toContain("makes version 3");
     expect((document.querySelector("[data-terms-sha]") as HTMLInputElement).value).toBe("a".repeat(64));
+    // The current version's scope, ticked.
+    const ticked = [...document.querySelectorAll<HTMLInputElement>("[data-terms-scopes] [data-propose-scope]")].filter((c) => c.checked).map((c) => c.dataset.proposeScope);
+    expect(ticked).toEqual(["technology", "manpower"]);
+  });
+
+  it("Set standard terms on terms from before scopes: none ticked, chosen for the new version", () => {
+    render(<TermsSheet offering={{ ...OFFERING, terms: { ...OFFERING.terms!, scopes: [], scopeLabel: "Not set" } }} onClose={() => undefined} onDone={() => undefined} />);
+    expect([...document.querySelectorAll<HTMLInputElement>("[data-terms-scopes] [data-propose-scope]")].some((c) => c.checked)).toBe(false);
+    expect((document.querySelector("[data-terms-submit]") as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("Run conformance: the test credential sent once and cleared, then the result and each failure", async () => {

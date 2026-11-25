@@ -3,7 +3,8 @@
 // The Marketplace's Subscribe sheet: subscribing to a service provider's standard service by accepting its standard
 // terms (no negotiation). Choose the apps it's for and, optionally, those apps' products it's used for; enter the test
 // credential the provider issued you if the service needs one (it goes to your firm's key vault on Mynt, is never
-// shown again and is cleared from this form once sent); tick "I accept <provider>'s standard terms v<version>"; then
+// shown again and is cleared from this form once sent); read what's accepted ("You accept <provider>'s standard terms
+// v<version> — Scope: <scopes>", the scope every agreement made records); tick "I accept <provider>'s standard terms v<version>"; then
 // Subscribe. Mynt checks everything again (the current version, that you're an owner or admin of each app's
 // workspace, your firm's prerequisites) and may refuse; its reason is shown in its own words. Server-renderable.
 import { useEffect, useMemo, useState } from "react"
@@ -115,8 +116,8 @@ export function SubscribeView({
         </div>
       )}
       <section className="flex flex-col gap-2 rounded-lg border p-3 text-sm" data-subscribe-terms={terms.version}>
-        <p className="font-medium">
-          {o.provider}&apos;s standard terms v{terms.version}
+        <p className="font-medium" data-subscribe-terms-scope>
+          You accept {o.provider}&apos;s standard terms v{terms.version} — Scope: {terms.scopeLabel}
         </p>
         <p className="text-muted-foreground">{terms.summary}</p>
         <p>Pricing: {terms.pricing || o.pricing}. The provider bills you directly; Mynt never bills or holds money for it.</p>

@@ -59,7 +59,7 @@ const CKYC = {
   innovator_licences: ["rbi_bank"],
   vendor_licences: ["rbi_pa"],
 };
-const TERMS = { document_url: "https://kycworks.example.com/terms-v1.pdf", document_sha256: "a".repeat(64), summary: "Standard terms for CKYC lookups.", pricing_summary: "INR 3.50 per lookup, invoiced monthly" };
+const TERMS = { document_url: "https://kycworks.example.com/terms-v1.pdf", document_sha256: "a".repeat(64), summary: "Standard terms for CKYC lookups.", pricing_summary: "INR 3.50 per lookup, invoiced monthly", scopes: ["technology"] };
 
 async function world() {
   const ctx = await setup();
@@ -190,7 +190,8 @@ test("each step's states, from a firm with nothing to a listed service with a su
   o = await ok(vera, "get_vendor_onboarding");
   steps = o.offerings[0].steps;
   assert.equal(stepOf(steps, "terms").status, "done");
-  assert.match(stepOf(steps, "terms").detail, /^Version 2, set on \d{4}-\d{2}-\d{2}\.$/);
+  assert.match(stepOf(steps, "terms").detail, /^Version 2, set on \d{4}-\d{2}-\d{2}\. Scope: Technology\.$/);
+  assert.deepEqual(stepOf(steps, "terms").facts.scopes, ["technology"]);
   assert.equal(o.offerings[0].progress.complete, true);
   assert.equal(o.offerings[0].progress.next, null);
   assert.deepEqual({ done: o.progress.done, total: o.progress.total, complete: o.progress.complete, next: o.progress.next }, { done: 8, total: 8, complete: true, next: null });
@@ -208,6 +209,14 @@ test("each step's states, from a firm with nothing to a listed service with a su
   assert.equal(h.terms_versions[1].document_sha256, "a".repeat(64), "an earlier version keeps its SHA-256 from the audit log");
   assert.equal(h.terms_versions[1].summary, null, "not kept for an earlier version nobody accepted: null, not made up");
   assert.equal(h.terms_versions[0].agreements, 0);
+  assert.deepEqual(h.terms_versions.map((v) => v.scopes), [["technology"], ["technology"]], "each version's scopes, the earlier one from the audit log");
+
+  // ---- terms from before scopes were recorded (an older server's): the step asks for new terms naming their scope ----
+  await w.store.db.query(`UPDATE financial_products.vendor_offerings SET terms_scopes = '{}' WHERE id = $1`, [created.id]);
+  steps = (await ok(vera, "get_vendor_onboarding")).offerings[0].steps;
+  assert.equal(stepOf(steps, "terms").status, "next");
+  assert.match(stepOf(steps, "terms").detail, /^Version 2 doesn't say what it covers\. Set new terms with their scope/);
+  await w.store.db.query(`UPDATE financial_products.vendor_offerings SET terms_scopes = '{technology}' WHERE id = $1`, [created.id]);
 
   // ---- suspended by Mynt: the offering's steps wait on Mynt ----
   await ok(admin, "suspend_vendor_offering", { offering_id: created.id, suspended: true, note: "Endpoint down for a week" });

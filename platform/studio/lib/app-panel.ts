@@ -192,7 +192,9 @@ export type AgreementRow = {
 };
 // termsVersion: the provider's standard terms accepted for this app (the Marketplace's click-through); noStandardTerms:
 // subscribed with none on file (or before the provider had any).
-export type VendorContractRow = { id: string; vendor: string; offering: string; environment: string; since: string | null; termsVersion: number | null; noStandardTerms: boolean };
+// scopes: what this app's click-through agreement covers, from the terms version accepted ([] for one from before
+// scopes: "Not set"); null when no agreement for this app records them.
+export type VendorContractRow = { id: string; vendor: string; offering: string; environment: string; since: string | null; termsVersion: number | null; noStandardTerms: boolean; scopes: AgreementScope[] | null; scopeLabel: string | null };
 export type IntroRow = { id: string; counterparty: string | null; status: string; since: string | null };
 export type AppAgreements = {
   available: true;
@@ -312,6 +314,8 @@ export function fromAgreements(reply: unknown): AppAgreements | null {
             since: str(v.since),
             termsVersion: typeof v.terms_version === "number" ? v.terms_version : null,
             noStandardTerms: v.no_standard_terms === true,
+            scopes: Array.isArray(v.scopes) ? scopesOf(v.scopes) : null,
+            scopeLabel: Array.isArray(v.scopes) ? scopeLabelOf(scopesOf(v.scopes)) : null,
           },
         ];
       }),

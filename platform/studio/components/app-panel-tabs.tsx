@@ -486,6 +486,7 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
                   <TableHead>Status</TableHead>
                   <TableHead>Service</TableHead>
                   <TableHead>Terms</TableHead>
+                  <TableHead>Scope</TableHead>
                   <TableHead>Since</TableHead>
                   {data.canManage && <TableHead>Actions</TableHead>}
                 </TableRow>
@@ -499,6 +500,9 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
                     <TableCell className="whitespace-normal">{v.offering}</TableCell>
                     <TableCell className="whitespace-normal" data-vendor-terms={v.termsVersion ?? (v.noStandardTerms ? "none" : "other-app")}>
                       {v.termsVersion !== null ? `Standard terms v${v.termsVersion}` : v.noStandardTerms ? "No standard terms on file" : "Accepted for another app"}
+                    </TableCell>
+                    <TableCell className={`whitespace-normal${v.scopes?.length ? "" : " text-muted-foreground"}`} data-vendor-scope={v.id}>
+                      {v.scopeLabel ?? "—"}
                     </TableCell>
                     <TableCell className="text-xs whitespace-nowrap tabular-nums">{when(v.since)}</TableCell>
                     {data.canManage && (

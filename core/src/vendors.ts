@@ -39,6 +39,7 @@ import {
 import { callVendor, resolveVendorUrl, signBody, type VendorCallOptions, type VendorResult } from "./vendor-call.js";
 import { inTransaction } from "./db.js";
 import { noticeFirm } from "./firm-notices.js";
+import { agreementScopeLabel } from "./app-agreements-schema.js";
 import { endSubscriptionAgreements, openSubscriptionAgreements, recordClickThrough, setOfferingTerms, StandardTermsSchema, termsOfRow, type StandardTerms, type TermsApp } from "./vendor-terms.js";
 import { appRole, memberApp } from "./workspaces.js";
 
@@ -1719,7 +1720,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
     {
       title: "Offer a standard service",
       description:
-        "Vendor: offer a standard service type in a region from your test (and live) HTTPS endpoint, with your per-call price and the licences you hold for it, and your standard terms (standard_terms: the document link (https) and its SHA-256, a short summary and your pricing in words; you bill subscribers directly). Listing an offering with terms is your standing acceptance of them: app workspaces subscribe by accepting them in the marketplace, with no negotiation. It starts as a draft: run_conformance, then update_vendor_offering { listed: true }. The conformance signing secret is shown once.",
+        "Vendor: offer a standard service type in a region from your test (and live) HTTPS endpoint, with your per-call price and the licences you hold for it, and your standard terms (standard_terms: the document link (https) and its SHA-256, a short summary, your pricing in words, and scopes: what they cover, one or more of technology, manpower, financial_regulatory_operations, recorded on every agreement made on them; you bill subscribers directly). Listing an offering with terms is your standing acceptance of them: app workspaces subscribe by accepting them in the marketplace, with no negotiation. It starts as a draft: run_conformance, then update_vendor_offering { listed: true }. The conformance signing secret is shown once.",
       inputSchema: { region: z.string().regex(/^[A-Z]{2}$/), service_type: Key, ...OfferingFields, standard_terms: StandardTermsSchema.optional() },
     },
     async ({ standard_terms, ...o }) => {
@@ -1756,7 +1757,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
       await audit("create_vendor_offering", offering.id, { region: o.region, service_type: o.service_type });
       if (standard_terms) {
         const set = await setOfferingTerms(store.db, offering.id, standard_terms, user.id);
-        await audit("set_vendor_terms", offering.id, { version: set.terms.version, document_sha256: set.terms.document_sha256 });
+        await audit("set_vendor_terms", offering.id, { version: set.terms.version, document_sha256: set.terms.document_sha256, scopes: set.terms.scopes });
         offering = (await getOffering(store.db, offering.id))!;
       }
       return json({
@@ -1773,7 +1774,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
     {
       title: "Change or list an offering",
       description:
-        "Vendor: change an offering (changing an endpoint or licences sends it back to draft, to pass conformance again), or list it (listed: true, once conformance passed) or take it off the list (listed: false; current subscribers keep it). standard_terms sets your standard terms: any change is a new version, which new subscribers accept; agreements already made keep the version they accepted. Only your firm's own members set its terms.",
+        "Vendor: change an offering (changing an endpoint or licences sends it back to draft, to pass conformance again), or list it (listed: true, once conformance passed) or take it off the list (listed: false; current subscribers keep it). standard_terms sets your standard terms, with their scopes (one or more of technology, manpower, financial_regulatory_operations): any change, scopes included, is a new version, which new subscribers accept; agreements already made keep the version (and scopes) they accepted. Only your firm's own members set its terms.",
       // No defaults here: a field left out keeps its value.
       inputSchema: {
         offering_id: z.string(),
@@ -1830,7 +1831,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
       await auditOffering("update_vendor_offering", o, { status: next.status, reverify, fields: Object.keys(a).filter((k) => k !== "offering_id") });
       if (standard_terms) {
         const set = await setOfferingTerms(store.db, o.id, standard_terms, user.id);
-        if (set.changed) await audit("set_vendor_terms", o.id, { version: set.terms.version, document_sha256: set.terms.document_sha256 });
+        if (set.changed) await audit("set_vendor_terms", o.id, { version: set.terms.version, document_sha256: set.terms.document_sha256, scopes: set.terms.scopes });
         return json((await getOffering(store.db, o.id))!);
       }
       return json(toOffering(rows[0]));
@@ -1901,7 +1902,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
         const s = toSubscription(r);
         const agreements = (
           await store.db.query(
-            `SELECT a.id, a.app_id, a.status, a.terms_version, a.document_sha256, a.app_signed_at, p.name AS app_name FROM ${T}.app_agreements a LEFT JOIN ${T}.apps p ON p.id = a.app_id
+            `SELECT a.id, a.app_id, a.status, a.terms_version, a.document_sha256, a.scopes, a.app_signed_at, p.name AS app_name FROM ${T}.app_agreements a LEFT JOIN ${T}.apps p ON p.id = a.app_id
               WHERE a.vendor_subscription_id = $1 ORDER BY a.created_at`,
             [s.id],
           )
@@ -1916,7 +1917,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
           created_at: s.created_at,
           secret_revealed: s.secret_shown,
           terms_accepted: agreements.length
-            ? agreements.map((a) => ({ agreement_id: a.id, app: { id: a.app_id, name: a.app_name ?? null }, status: a.status, terms_version: a.terms_version, document_sha256: a.document_sha256, accepted_at: iso(a.app_signed_at) }))
+            ? agreements.map((a) => ({ agreement_id: a.id, app: { id: a.app_id, name: a.app_name ?? null }, status: a.status, terms_version: a.terms_version, document_sha256: a.document_sha256, scopes: (a.scopes as string[] | null) ?? [], accepted_at: iso(a.app_signed_at) }))
             : null,
           usage: usageFor(usage, s.id),
         });
@@ -1993,7 +1994,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
       return k ? { key_id: k.id, label: k.label, set_at: iso(k.created_at) } : null;
     };
     const agreements = (
-      await store.db.query(`SELECT id, app_id, status, terms_version, document_sha256, app_signed_at FROM ${T}.app_agreements WHERE vendor_subscription_id = $1 ORDER BY created_at`, [s.id])
+      await store.db.query(`SELECT id, app_id, status, terms_version, document_sha256, scopes, app_signed_at FROM ${T}.app_agreements WHERE vendor_subscription_id = $1 ORDER BY created_at`, [s.id])
     ).rows;
     return {
       subscription_id: s.id,
@@ -2010,7 +2011,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
       credentials: { test: await keyView(s.test_credential_key_id), live: await keyView(s.live_credential_key_id) },
       // The standard terms accepted, per app (click-through agreements); null: subscribed with no standard terms on file.
       terms_accepted: agreements.length
-        ? agreements.map((a) => ({ agreement_id: a.id, app_id: a.app_id, status: a.status, terms_version: a.terms_version, document_sha256: a.document_sha256, accepted_at: iso(a.app_signed_at) }))
+        ? agreements.map((a) => ({ agreement_id: a.id, app_id: a.app_id, status: a.status, terms_version: a.terms_version, document_sha256: a.document_sha256, scopes: (a.scopes as string[] | null) ?? [], accepted_at: iso(a.app_signed_at) }))
         : null,
       current_terms_version: o.terms?.version ?? null,
       created_at: s.created_at,
@@ -2029,10 +2030,11 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
         vendor_subscription_id: subscriptionId,
         terms_version: o.terms!.version,
         document_sha256: o.terms!.document_sha256,
+        scopes: o.terms!.scopes,
         vendor_accepted_by: o.terms!.set_by,
         vendor_accepted_at: o.terms!.set_at,
       });
-      await noticeFirm(store, o.entity_id, "app_agreement.signed", { agreement_id: a.id, app_id: a.app_id, kind: "vendor", status: "signed", offering_id: o.id, vendor_subscription_id: subscriptionId, terms_version: o.terms!.version, via: "standard_terms" }).catch(() => null);
+      await noticeFirm(store, o.entity_id, "app_agreement.signed", { agreement_id: a.id, app_id: a.app_id, kind: "vendor", status: "signed", offering_id: o.id, vendor_subscription_id: subscriptionId, terms_version: o.terms!.version, scopes: o.terms!.scopes, via: "standard_terms" }).catch(() => null);
     }
   };
 
@@ -2041,7 +2043,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
     {
       title: "Standard services you can plug in",
       description:
-        "Innovator (the vendor marketplace): listed vendors' offerings of standard services, by region, service type or category: the vendor's standard terms (document link, SHA-256, summary, pricing and version; null when none are on file), price per call, SLA notes, the vendor's licences, its last conformance result, whether your firm meets the licence prerequisites to subscribe, and your firm's subscription to it, if any. Subscribe with subscribe_vendor_service, accepting the terms' version.",
+        "Innovator (the vendor marketplace): listed vendors' offerings of standard services, by region, service type or category: the vendor's standard terms (document link, SHA-256, summary, pricing, scopes with scope_labels (what they cover; empty on a terms version from before scopes were recorded) and version; null when none are on file), price per call, SLA notes, the vendor's licences, its last conformance result, whether your firm meets the licence prerequisites to subscribe, and your firm's subscription to it, if any. Subscribe with subscribe_vendor_service, accepting the terms' version.",
       inputSchema: {
         region: z.string().optional(),
         service_type: z.string().optional(),
@@ -2073,7 +2075,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
           vendor_entity_id: o.entity_id,
           region: o.region,
           service_type: { key: t.key, name: t.name, category: t.category, consent_purpose: t.consent_purpose, fills: t.fills, innovator_licences: t.innovator_licences },
-          standard_terms: o.terms ? { version: o.terms.version, document_url: o.terms.document_url, document_sha256: o.terms.document_sha256, summary: o.terms.summary, pricing_summary: o.terms.pricing_summary, set_at: o.terms.set_at } : null,
+          standard_terms: o.terms ? { version: o.terms.version, document_url: o.terms.document_url, document_sha256: o.terms.document_sha256, summary: o.terms.summary, pricing_summary: o.terms.pricing_summary, scopes: o.terms.scopes, scope_labels: o.terms.scopes.map(agreementScopeLabel), set_at: o.terms.set_at } : null,
           price: o.price,
           sla_notes: o.sla_notes,
           live_available: Boolean(o.live_base_url),
@@ -2095,7 +2097,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
     {
       title: "Subscribe to a vendor's service",
       description:
-        "Innovator: subscribe your firm to a listed offering (in the sandbox first). When the vendor has standard terms on file (list_vendor_offerings' standard_terms), subscribing is click-through: pass accept_terms_version (the current version: you accept those terms) and app_ids, the apps it's for (your workspace's owners and admins only), optionally with products (ids of those apps' products it's used for); Mynt records one vendor agreement per app with the vendor's firm, signed by both sides (the vendor through its listing, you through this call), with the terms' version and SHA-256. Already subscribed: naming more apps adds their agreements. Checks the licences the service needs your firm to hold, keeps the test (and live) credentials the vendor gave you, if it needs them, in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id. The vendor bills you directly; Mynt never bills or holds money for it.",
+        "Innovator: subscribe your firm to a listed offering (in the sandbox first). When the vendor has standard terms on file (list_vendor_offerings' standard_terms), subscribing is click-through: pass accept_terms_version (the current version: you accept those terms) and app_ids, the apps it's for (your workspace's owners and admins only), optionally with products (ids of those apps' products it's used for); Mynt records one vendor agreement per app with the vendor's firm, signed by both sides (the vendor through its listing, you through this call), with the terms' version, SHA-256 and scopes (what they cover; none when that version names none). Already subscribed: naming more apps adds their agreements. Checks the licences the service needs your firm to hold, keeps the test (and live) credentials the vendor gave you, if it needs them, in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id. The vendor bills you directly; Mynt never bills or holds money for it.",
       inputSchema: {
         offering_id: z.string(),
         accept_terms_version: z.number().int().min(1).optional().describe("The version of the vendor's standard terms you accept; must be the current one"),
