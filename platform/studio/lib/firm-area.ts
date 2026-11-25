@@ -148,7 +148,8 @@ export function progressWords(p: Progress): string {
 export function checkLine(c: RealCompanyCheck | null): string {
   if (!c) return "Real-company check: Mynt didn't say where it stands.";
   const head = c.passes === true ? "Passed" : c.passes === null && c.status === "done" ? "Not required on this Mynt" : c.status === "blocked" && !c.lastRunAt ? "Not run yet" : c.passes === false && !c.lastAnswerAt && c.lastRunAt ? "Not known yet" : "Not passed";
-  return `Real-company check: ${head}. ${c.detail}`;
+  // Mynt's own words often open with the result ("Passed. …", "Not passed. …"): it's said once.
+  return c.detail.startsWith(`${head}.`) ? `Real-company check: ${c.detail}` : `Real-company check: ${head}. ${c.detail}`;
 }
 
 // ---- the firm's record: facts, people, roster (get_my_entity) ----

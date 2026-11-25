@@ -177,7 +177,7 @@ describe("the firm's card and the real-company check", () => {
     expect(html).toContain(FIRM);
     expect(html).toMatch(/Can sponsor now<\/dt><dd[^>]*>Not yet</);
     expect(html).toContain('data-real-company-check="not_passed"');
-    expect(html).toContain("Real-company check: Not passed. Not passed. GLEIF&#x27;s LEI record: not found (2026-11-20). Last asked 2026-11-20.");
+    expect(html).toContain("Real-company check: Not passed. GLEIF&#x27;s LEI record: not found (2026-11-20). Last asked 2026-11-20.");
     expect(html).toMatch(/data-step-status="blocked"[^>]*><svg[\s\S]*?<\/svg>Waiting<\/span>/);
     expect(html).toMatch(/data-set-firm-facts[\s\S]*?Set firm facts/);
   });
@@ -187,7 +187,7 @@ describe("the firm's card and the real-company check", () => {
       const o = f.fromOnboarding(reply())!;
       return f.checkLine({ ...o.check!, ...check, ...extra } as typeof o.check);
     };
-    expect(line({ passes: true, status: "done", detail: "Passed." })).toBe("Real-company check: Passed. Passed.");
+    expect(line({ passes: true, status: "done", detail: "Passed. GLEIF's LEI record: matches (2026-11-20)." })).toBe("Real-company check: Passed. GLEIF's LEI record: matches (2026-11-20).");
     expect(line({ lastRunAt: null, lastAnswerAt: null, detail: "Mynt hasn't run it yet." })).toBe("Real-company check: Not run yet. Mynt hasn't run it yet.");
     expect(line({ lastAnswerAt: null, detail: "The registers couldn't be reached." })).toBe("Real-company check: Not known yet. The registers couldn't be reached.");
     expect(line({ passes: null, status: "done", detail: "This server doesn't require it." })).toBe("Real-company check: Not required on this Mynt. This server doesn't require it.");
