@@ -152,15 +152,27 @@ describe("Risk register: one risk area at a time", () => {
     const tech = await get("technology");
     expect(ids(tech)).toEqual(["security", "backups"]);
     expect(tech.signals[0].signal.rows.map((r: { key: string }) => r.key)).toEqual(["a1"]); // the security class, the last 30 days only
-    expect(tech.signals[1].signal.rows.find((r: { key: string }) => r.key === "offsite").cells[1]).toBe("On this server only");
+    // Backups: one row under Last run, Result, Off-site, Last success, Last restore test.
+    expect(tech.signals[1].columns).toEqual(["Last run", "Result", "Off-site", "Last success", "Last restore test"]);
+    expect(tech.signals[1].signal.rows).toHaveLength(1);
+    expect(tech.signals[1].signal.rows[0].cells.slice(1, 3)).toEqual(["Succeeded", "On this server only"]);
+    expect(tech.signals[1].signal.rows[0].cells[4]).toBe("Not recorded");
     expect(called("audit_log")).toEqual([{ limit: 500 }]); // only Technology reads the audit log
     expect((await get("third_party")).signals[0].signal.rows[0].cells[0]).toBe("Fast KYC");
-    expect((await get("compliance")).signals[0].signal.rows.map((r: { cells: string[] }) => r.cells[0])).toEqual(["Saver", "Oversight audits"]);
-    expect((await get("operations")).signals[0].signal.rows.map((r: { cells: string[] }) => r.cells[0])).toEqual(["hosting: 2 app(s) stopped", "builds: 1 failed in the last 24h"]);
-    expect((await get("financial")).signals[0].signal.rows.map((r: { cells: string[] }) => r.cells[0])).toEqual([expect.stringMatching(/^liquidity pools:/)]);
+    // Compliance: the apps missing an agreement and the overdue audits are a table each.
+    const comp = await get("compliance");
+    expect(ids(comp)).toEqual(["agreements", "audits"]);
+    expect(comp.signals[0].signal.rows.map((r: { cells: string[] }) => r.cells)).toEqual([["Saver", "1 signed program agreement missing"]]);
+    expect(comp.signals[1].signal.rows.map((r: { cells: string[] }) => r.cells)).toEqual([["2", "1"]]);
+    // Operations: Area, Item, Since. ops_status has no list behind these lines here, so Since isn't recorded.
+    expect((await get("operations")).signals[0].signal.rows.map((r: { cells: string[] }) => r.cells)).toEqual([
+      ["Hosting", "2 app(s) stopped", "Not recorded"],
+      ["Builds", "1 failed in the last 24h", "Not recorded"],
+    ]);
+    expect((await get("financial")).signals[0].signal.rows.map((r: { cells: string[] }) => r.cells)).toEqual([["Liquidity pools", expect.stringMatching(/^1 open over_withdrawal flag/)]]);
     const bp = await get("business_process");
     expect(ids(bp)).toEqual(["covenants", "drift"]);
-    expect(bp.signals[0].signal.rows.map((r: { cells: string[] }) => r.cells[0])).toEqual([expect.stringMatching(/^covenants:/)]);
+    expect(bp.signals[0].signal.rows.map((r: { cells: string[] }) => r.cells)).toEqual([["Covenants", expect.stringMatching(/^1 open breach/)]]);
     expect(bp.signals[1].signal).toMatchObject({ available: false });
     expect(ids(await get("regulated_product"))).toEqual(["covenants", "product-health", "drift"]);
   });
