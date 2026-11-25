@@ -205,12 +205,13 @@ export function FirmMembersTable({ firm, onChanged = () => undefined, fetcher }:
     <>
       <AdminTable
         head={["Name", "Email", "Role", "Status", "Actions"]}
-        rowKeys={firm.members.map((m) => m.id)}
-        rows={firm.members.map((m) => [
+        rowKeys={[...firm.members.map((m) => m.id), ...(firm.invited ?? []).map((m) => `invited:${m.email}`)]}
+        rows={[
+          ...firm.members.map((m) => [
           m.name ?? "—",
           m.email ?? "—",
           firmRolesWords(m.roles),
-          // A firm's members are accounts that have signed in: add_entity_member takes nobody else.
+          // The firm's members are accounts that have signed in; people added before that follow, as invited.
           <MemberStatusMark key="s" status="signed_in" />,
           <span key="a" className="flex flex-wrap gap-2">
             <Button size="sm" variant="outline" onClick={() => setChanging(m)} disabled={!m.email} title={m.email ? undefined : "Mynt has no email for this account"} data-change-role={m.id}>
@@ -222,7 +223,21 @@ export function FirmMembersTable({ firm, onChanged = () => undefined, fetcher }:
               Remove
             </Button>
           </span>,
-        ])}
+          ]),
+          // Added before they signed in: they join the firm when they first do. Remove cancels that.
+          ...(firm.invited ?? []).map((m) => [
+            "—",
+            m.email,
+            firmRolesWords(m.roles),
+            <MemberStatusMark key="s" status="invited" />,
+            <span key="a" className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={() => setRemoving({ id: `invited:${m.email}`, name: null, email: m.email, roles: m.roles })} data-remove-member={`invited:${m.email}`}>
+                <UserMinus />
+                Remove
+              </Button>
+            </span>,
+          ]),
+        ]}
         empty="No members yet. Invite its people."
       />
       <ChangeFirmRoleSheet firm={firm} member={changing} onClose={close} onDone={() => setDirty(true)} fetcher={fetcher} />

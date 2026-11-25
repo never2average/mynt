@@ -267,6 +267,17 @@ describe("each action", () => {
     expect(called("invite_user").at(-1)).toEqual({ email: "boss@example.com", roles: ["admin", "vendor"] });
   });
 
+  it("a firm's Invite member for someone not signed in yet: Mynt keeps the membership for their first sign-in, and Remove cancels it", async () => {
+    fake.reply.add_entity_member = { entity_id: FIRM, member: "new@example.com", status: "pending_sign_in", note: "new@example.com hasn't signed in to Mynt yet: they join Acme Trust when they first sign in" };
+    const invited = await (await members.POST(req("/x", { action: "invite", email: "new@example.com", roles: ["vendor"] }), p({ firmId: FIRM }))).json();
+    expect(invited).toMatchObject({ ok: true, added: false, pending_sign_in: true });
+    expect(invited.message).toContain("joins the firm when they first do");
+    expect(invited.message).not.toContain("Invite member again");
+    fake.reply.remove_entity_member = { entity_id: FIRM, removed: "new@example.com", was: "pending_sign_in" };
+    const removed = await (await members.POST(req("/x", { action: "remove", email: "new@example.com", confirm_email: "new@example.com" }), p({ firmId: FIRM }))).json();
+    expect(removed.message).toContain("won't join the firm when they sign in");
+  });
+
   it("a firm's Change role → invite_user with the firm's roles replaced and every other role kept; nothing sent when nothing changes", async () => {
     const res = await (await members.POST(req("/x", { action: "change_role", email: "lee@example.com", roles: ["vendor"] }), p({ firmId: FIRM }))).json();
     expect(called("invite_user")).toEqual([{ email: "lee@example.com", roles: ["consumer", "vendor"] }]);

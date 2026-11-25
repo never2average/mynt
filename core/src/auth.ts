@@ -7,6 +7,7 @@ import { ROLES, type Role, type Store, type User } from "./store.js";
 import { admitWorkspaceInvitee, openWorkspaceInvite } from "./workspaces.js";
 import { chainOf, type IdentityProvider, type LinkedAccounts } from "./linked-accounts.js";
 import { reconcileAtSignIn } from "./workspace-sync.js";
+import { joinPendingFirm } from "./firm-notices.js";
 
 // The parts of Clerk's backend client this server uses, so tests can provide a stand-in.
 export interface ClerkLike {
@@ -218,7 +219,9 @@ export class ClerkAuth {
         message: email ? "Your account is not on this server's whitelist" : "Verify your email address with the sign-in provider, then sign in again",
       };
     }
-    const user = linked && (linked.held_roles ?? linked.roles).join() === invite.roles.join() ? linked : await this.store.upsertClerkUser(subject, email, name, invite.roles);
+    // A new or changed account: an admin may have added this email to a firm before it had an account (firm-notices.ts).
+    const user =
+      linked && (linked.held_roles ?? linked.roles).join() === invite.roles.join() ? linked : await joinPendingFirm(this.store, await this.store.upsertClerkUser(subject, email, name, invite.roles));
     // Their workspaces follow their organizations: reconciled at sign-in, at most every few minutes (workspace-sync.ts).
     reconcileAtSignIn(user.id, subject);
     return { ok: true, user };
