@@ -14,20 +14,23 @@ type Params = { params: Promise<{ agreementId: string }> };
 // An agreement's row actions on the Licences page, from either side: Accept and Decline a proposal the other side
 // made (respond_to_app_agreement, with an optional note), Sign an accepted one (sign_app_agreement), and Withdraw a
 // proposal of one's own or End agreement (terminate_app_agreement, with the reason). Each tells the other side.
+// Change scope (update_agreement_scopes): what a proposal of one's own covers, while it's still proposed.
 const note = STUDIO_TOOLS.respond_to_app_agreement.shape.note;
 const Body = z.discriminatedUnion("action", [
   z.object({ action: z.literal("accept"), note }).strict(),
   z.object({ action: z.literal("decline"), note }).strict(),
   z.object({ action: z.literal("sign") }).strict(),
   z.object({ action: z.literal("terminate"), reason: STUDIO_TOOLS.terminate_app_agreement.shape.reason }).strict(),
+  z.object({ action: z.literal("scopes"), scopes: STUDIO_TOOLS.update_agreement_scopes.shape.scopes }).strict(),
 ]);
 
-const TOOL = { accept: "respond_to_app_agreement", decline: "respond_to_app_agreement", sign: "sign_app_agreement", terminate: "terminate_app_agreement" } as const;
+const TOOL = { accept: "respond_to_app_agreement", decline: "respond_to_app_agreement", sign: "sign_app_agreement", terminate: "terminate_app_agreement", scopes: "update_agreement_scopes" } as const;
 const DONE = {
   accept: "Accepted. Both sides sign it next; the other side is told.",
   decline: "Declined. The other side is told.",
   sign: "Signed for your side. It's signed once the other side has signed too.",
   terminate: "Ended. The other side is told, with your reason.",
+  scopes: "Scope changed. The other side answers the proposal with it.",
 } as const;
 
 const ids = (reply: unknown): string[] => {
@@ -75,7 +78,9 @@ export async function POST(req: Request, { params }: Params) {
           ? { agreement_id: agreementId, decision: body.action, ...(body.note ? { note: body.note } : {}) }
           : body.action === "terminate"
             ? { agreement_id: agreementId, reason: body.reason }
-            : { agreement_id: agreementId };
+            : body.action === "scopes"
+              ? { agreement_id: agreementId, scopes: body.scopes }
+              : { agreement_id: agreementId };
       await callStudioTool(mynt, tool, args);
       return json({ ok: true, message: DONE[body.action] });
     },

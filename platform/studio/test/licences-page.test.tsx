@@ -232,8 +232,13 @@ describe("either side proposes; the other answers", () => {
     expect((document.querySelector("[data-propose-submit]") as HTMLButtonElement).disabled).toBe(true);
     expect(document.querySelector("[data-propose-app]")?.textContent).not.toContain("whole workspace");
     fireEvent.change(document.querySelector("[data-propose-app]")!, { target: { value: "a1" } });
+    // The scope is required as well: a labelled checkbox group, at least one ticked.
+    expect([...document.querySelectorAll("[data-propose-scopes] label")].map((l) => l.textContent)).toEqual(["Technology", "Manpower", "Financial regulatory operations"]);
+    expect((document.querySelector("[data-propose-submit]") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(document.querySelector('[data-propose-scope="financial_regulatory_operations"]')!);
+    fireEvent.click(document.querySelector('[data-propose-scope="technology"]')!);
     await click(document.querySelector("[data-propose-submit]"));
-    expect(sent).toEqual([{ side: "counterparty", target_id: "w1", app_id: "a1", kind: "msa", products: [], terms_summary: "Master services terms for both" }]);
+    expect(sent).toEqual([{ side: "counterparty", target_id: "w1", app_id: "a1", kind: "msa", scopes: ["technology", "financial_regulatory_operations"], products: [], terms_summary: "Master services terms for both" }]);
   });
 
   it("the app's own Agreements tab lists its MSAs and SLAs too", () => {
@@ -250,27 +255,34 @@ describe("either side proposes; the other answers", () => {
     fireEvent.click(document.querySelector('[data-propose-products] input[type="checkbox"]')!);
     fireEvent.change(document.querySelector("[data-propose-terms]")!, { target: { value: "Lead Bank's card program terms" } });
     fireEvent.change(document.querySelector("[data-propose-template]")!, { target: { value: templates[0].id } });
+    fireEvent.click(document.querySelector('[data-propose-scope="technology"]')!);
     await click(document.querySelector("[data-propose-submit]"));
-    expect(sent).toEqual([{ side: "counterparty", target_id: "w1", app_id: "a1", kind: "program", products: ["p1"], terms_summary: "Lead Bank's card program terms", template_id: templates[0].id }]);
+    expect(sent).toEqual([{ side: "counterparty", target_id: "w1", app_id: "a1", kind: "program", scopes: ["technology"], products: ["p1"], terms_summary: "Lead Bank's card program terms", template_id: templates[0].id }]);
   });
 
   it("the route: a licence provider's proposal is propose_workspace_agreement; a developer's is propose_app_agreement; nobody proposes from a side they don't hold", async () => {
     const post = (body: unknown) => agreementsRoute.POST(new Request("http://localhost:3000/api/agreements", { method: "POST", body: JSON.stringify(body) }));
-    const base = { kind: "msa", products: [], terms_summary: "Master services terms for both" };
+    const base = { kind: "msa", scopes: ["technology"], products: [], terms_summary: "Master services terms for both" };
+    // The scope is required: at least one, from the fixed list, each once.
+    for (const scopes of [undefined, [], ["catering"], ["technology", "technology"]]) {
+      const res = await post({ ...base, scopes, side: "counterparty", target_id: "w1", app_id: "a1" });
+      expect(res.status, JSON.stringify(scopes)).toBe(400);
+    }
+    expect(((await (await post({ ...base, scopes: [], side: "counterparty", target_id: "w1", app_id: "a1" })).json()) as { message: string }).message).toBe("Choose at least one scope.");
     // An MSA or SLA names its app, as every agreement does.
     expect((await post({ ...base, side: "counterparty", target_id: "w1", template_id: "88888888-8888-4888-8888-888888888888" })).status).toBe(400);
     expect((await post({ ...base, kind: "sla", side: "counterparty", target_id: "w1" })).status).toBe(400);
     expect(fake.calls.filter((c) => c.name.startsWith("propose"))).toEqual([]);
     expect((await post({ ...base, side: "counterparty", target_id: "w1", app_id: "a1", template_id: "88888888-8888-4888-8888-888888888888" })).status).toBe(200);
-    expect(fake.calls.at(-1)).toEqual({ name: "propose_workspace_agreement", args: { workspace_id: "w1", app_id: "a1", kind: "msa", terms_summary: "Master services terms for both", template_id: "88888888-8888-4888-8888-888888888888" } });
+    expect(fake.calls.at(-1)).toEqual({ name: "propose_workspace_agreement", args: { workspace_id: "w1", app_id: "a1", kind: "msa", scopes: ["technology"], terms_summary: "Master services terms for both", template_id: "88888888-8888-4888-8888-888888888888" } });
     expect((await post({ ...base, side: "app", target_id: FIRM, app_id: "a1" })).status).toBe(403);
     fake.session = session(["developer"]);
     expect((await post({ ...base, kind: "sla", side: "app", target_id: FIRM })).status).toBe(400);
     expect((await post({ ...base, kind: "sla", side: "app", target_id: FIRM, app_id: "a1" })).status).toBe(200);
-    expect(fake.calls.at(-1)).toEqual({ name: "propose_app_agreement", args: { app_id: "a1", counterparty_entity_id: FIRM, kind: "sla", products: [], terms_summary: "Master services terms for both" } });
+    expect(fake.calls.at(-1)).toEqual({ name: "propose_app_agreement", args: { app_id: "a1", counterparty_entity_id: FIRM, kind: "sla", scopes: ["technology"], products: [], terms_summary: "Master services terms for both" } });
     fake.session = session(["developer"]);
     expect((await post({ ...base, side: "app", target_id: FIRM, app_id: "a1", kind: "program", products: ["p1"] })).status).toBe(200);
-    expect(fake.calls.at(-1)).toEqual({ name: "propose_app_agreement", args: { app_id: "a1", counterparty_entity_id: FIRM, kind: "program", products: ["p1"], terms_summary: "Master services terms for both" } });
+    expect(fake.calls.at(-1)).toEqual({ name: "propose_app_agreement", args: { app_id: "a1", counterparty_entity_id: FIRM, kind: "program", scopes: ["technology"], products: ["p1"], terms_summary: "Master services terms for both" } });
     // A program agreement names its app; templates are the licence provider's.
     expect((await post({ ...base, kind: "program", side: "app", target_id: FIRM })).status).toBe(400);
     expect((await post({ ...base, side: "app", target_id: FIRM, app_id: "a1", template_id: "88888888-8888-4888-8888-888888888888" })).status).toBe(400);

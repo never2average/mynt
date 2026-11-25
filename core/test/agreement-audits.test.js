@@ -67,7 +67,7 @@ async function setup() {
     assert.equal(r.isError, false, JSON.stringify(r.data));
     return r.data;
   };
-  const agreement = ok(await dev.call("propose_app_agreement", { app_id: app.id, counterparty_entity_id: lpFirm.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" }));
+  const agreement = ok(await dev.call("propose_app_agreement", { app_id: app.id, counterparty_entity_id: lpFirm.id, scopes: ["technology"], kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" }));
   const sign = async () => {
     ok(await lp.call("respond_to_app_agreement", { agreement_id: agreement.id, decision: "accept" }));
     ok(await dev.call("sign_app_agreement", { agreement_id: agreement.id }));
@@ -307,6 +307,6 @@ test("only program agreements with the sponsor's firm take requirements, and onl
   const { ok } = w;
   ok(await w.dev.call("terminate_app_agreement", { agreement_id: w.agreement.id, reason: "Changed plans" }));
   refused(await w.lp.call("add_agreement_audit_requirement", { agreement_id: w.agreement.id, name: "Annual review", kind: "compliance_review", cadence: "annual", first_due: "2027-01-31" }), /terminated/);
-  const ds = ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, kind: "data_sharing", products: ["savings-account"], terms_summary: "Sharing complaint records with the sponsor" }));
+  const ds = ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, scopes: ["technology"], kind: "data_sharing", products: ["savings-account"], terms_summary: "Sharing complaint records with the sponsor" }));
   refused(await w.lp.call("add_agreement_audit_requirement", { agreement_id: ds.id, name: "Annual review", kind: "compliance_review", cadence: "annual", first_due: "2027-01-31" }), /program agreements/);
 });

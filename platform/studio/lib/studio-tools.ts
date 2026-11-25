@@ -5,6 +5,7 @@ import { HORIZONS, LIQUIDITY, PRODUCT_ACTIONS, PRODUCT_LINES, ProductId, RETURN_
 import { RISK_AREAS, RISK_CATEGORIES, RISK_STATUSES } from "./risk-register";
 import { CLUSTER, SIGNATURE, SOLANA_ADDRESS } from "./wallets";
 import { AGREEMENT_FILE_MAX_BYTES } from "./agreement-esign";
+import { AGREEMENT_SCOPE_KEYS } from "./app-panel";
 
 // Which of Mynt's tools the studio may call for the signed-in user, with what arguments. Mynt
 // checks everything again (who owns what, roles, limits); these keep junk off the wire and keep
@@ -30,6 +31,12 @@ const promotionStage = z.enum(["staging", "production"]);
 const demotionStage = z.enum(["idea", "staging"]);
 // Liquidity: Mynt's pool ids, integer cents, a US state as ISO 3166-2 and an idempotency key.
 const uuid = z.string().uuid();
+// What an agreement covers: one or more of Mynt's fixed list (AGREEMENT_SCOPES), each once.
+const agreementScopes = z
+  .array(z.enum(AGREEMENT_SCOPE_KEYS), { error: "Choose at least one scope." })
+  .min(1, "Choose at least one scope.")
+  .max(AGREEMENT_SCOPE_KEYS.length)
+  .refine((s) => new Set(s).size === s.length, "Each scope once");
 const cents = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const usState = z.string().regex(/^us-[a-z]{2}$/);
 const idempotencyKey = z.string().regex(/^[A-Za-z0-9_-]{8,200}$/);
@@ -188,11 +195,15 @@ export const STUDIO_TOOLS = {
   // An app's Products, Agreements and Customers tabs: its products with their sponsors, its agreements with the firms
   // behind them (Propose agreement), and the personas it targets (Choose personas). Apps hold no licences themselves.
   // Without app_id: the Licences page's Agreements tab, a licence provider's list of what apps proposed to its firm.
-  list_app_agreements: z.object({ app_id: id.optional(), workspace_id: workspaceId.optional(), status: z.enum(["proposed", "accepted", "signed", "declined", "terminated"]).optional() }).strict(),
+  list_app_agreements: z
+    .object({ app_id: id.optional(), workspace_id: workspaceId.optional(), status: z.enum(["proposed", "accepted", "signed", "declined", "terminated"]).optional(), scope: z.enum(AGREEMENT_SCOPE_KEYS).optional() })
+    .strict(),
   // Each side's row actions: the licence provider accepts or declines (Accept / Decline), either side signs (Sign) and
   // either side ends one with a reason (End agreement; Withdraw for the app's own proposal). Mynt decides who may.
   respond_to_app_agreement: z.object({ agreement_id: uuid, decision: z.enum(["accept", "decline"]), note: z.string().trim().max(2000).optional() }).strict(),
   sign_app_agreement: z.object({ agreement_id: uuid }).strict(),
+  // What a proposed agreement covers (Change scope): only the side that proposed it, only while it's proposed.
+  update_agreement_scopes: z.object({ agreement_id: uuid, scopes: agreementScopes }).strict(),
   terminate_app_agreement: z.object({ agreement_id: uuid, reason: z.string().trim().min(3).max(2000) }).strict(),
   // Either side proposes; the other accepts or declines, then both sign. Every agreement names its app: program, data
   // sharing, MSA and SLA alike.
@@ -201,6 +212,7 @@ export const STUDIO_TOOLS = {
       workspace_id: workspaceId,
       app_id: id,
       kind: z.enum(["program", "data_sharing", "msa", "sla"]),
+      scopes: agreementScopes,
       products: z.array(id).max(20).optional(),
       terms_summary: z.string().trim().min(10).max(4000),
       document_url: z.string().url().max(2000).refine((u) => u.startsWith("https://"), "an https link").optional(),
@@ -215,6 +227,7 @@ export const STUDIO_TOOLS = {
       app_id: id,
       counterparty_entity_id: uuid,
       kind: z.enum(["program", "vendor", "data_sharing", "msa", "sla"]),
+      scopes: agreementScopes,
       products: z.array(id).max(20),
       terms_summary: z.string().trim().min(10).max(4000),
       document_url: z.string().url().max(2000).refine((u) => u.startsWith("https://"), "an https link").optional(),

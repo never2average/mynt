@@ -187,7 +187,7 @@ test("templates: the licence provider's own firm only, never an admin for it; ve
 test("accept → document from the active template with Mynt's schedule → each signer signs inside Mynt → completed → signed, sealed, both parties read it", async () => {
   const w = await setup();
   const tpl = ok(await w.lp.call("upload_agreement_template", { ...upload, sponsorship_id: w.sponsorshipId }));
-  const a = ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product", effective_from: "2026-12-01" }));
+  const a = ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, scopes: ["technology", "financial_regulatory_operations"], kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product", effective_from: "2026-12-01" }));
   assert.equal(a.signed_by_esignature, true);
   assert.equal(a.signature_document, null);
   refused(await w.dev.call("get_agreement_signing_link", { agreement_id: a.id }), /hasn't accepted/);
@@ -204,7 +204,7 @@ test("accept → document from the active template with Mynt's schedule → each
   assert.deepEqual(created.body.files.map((f) => f.name), ["program.pdf", "program-schedule.pdf"]);
   assert.equal(Buffer.from(created.body.files[0].file_base64, "base64").toString(), PDF.toString(), "the licence provider's file as uploaded");
   const schedule = Buffer.from(created.body.files[1].file_base64, "base64").toString("latin1");
-  for (const s of ["Sponsor Bank", "Pay app", "savings-account", "US-CA, US-NY", "2026-12-01", a.id, sha(PDF)]) assert.ok(schedule.includes(s), `the schedule states ${s}`);
+  for (const s of ["Sponsor Bank", "Pay app", "savings-account", "US-CA, US-NY", "2026-12-01", a.id, sha(PDF), "Scope of the agreement", "Technology; Financial regulatory operations"]) assert.ok(schedule.includes(s), `the schedule states ${s}`);
   assert.equal(created.body.metadata.mynt_agreement_id, a.id);
   const docId = w.service.docs.keys().next().value;
 
@@ -270,7 +270,7 @@ test("accept → document from the active template with Mynt's schedule → each
 
 test("no template yet: accepted waits, the document is made on first signing; declined at signing, and ending one cancels its document", async () => {
   const w = await setup();
-  const proposal = { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" };
+  const proposal = { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, scopes: ["technology"], kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" };
   const a = ok(await w.dev.call("propose_app_agreement", proposal));
   const accepted = ok(await w.lp.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }));
   assert.equal(accepted.signing.ready, false);
@@ -299,7 +299,7 @@ test("no template yet: accepted waits, the document is made on first signing; de
 
 test("without e-signature configured: the feature says so and the manual flow still signs", async () => {
   const w = await setup({ esign: false });
-  const a = ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" }));
+  const a = ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, scopes: ["technology"], kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" }));
   assert.equal(a.signed_by_esignature, false);
   const accepted = ok(await w.lp.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }));
   assert.equal(accepted.signing, undefined);
@@ -318,7 +318,7 @@ test("with e-signature, the production check names whose signature is missing, a
   const attention = async () => ok(await w.dev.call("get_workspace_attention", { workspace_id: workspace })).items.filter((i) => i.kind === "app_agreement_update");
   const note = async () => ok(await w.dev.call("list_app_agreements", { app_id: w.app.id })).program_coverage.find((c) => c.product_id === "savings-account").note;
   ok(await w.lp.call("upload_agreement_template", upload));
-  const proposal = { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" };
+  const proposal = { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, scopes: ["technology"], kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" };
   const a = ok(await w.dev.call("propose_app_agreement", proposal));
   ok(await w.lp.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }));
   const docA = [...w.service.docs.keys()][0];
@@ -375,9 +375,9 @@ test("a licence provider proposes on its own template: the document is made from
   // The firm's most specific template (attached to the sponsorship), and a default one it chooses to propose on.
   const specific = ok(await w.lp.call("upload_agreement_template", { ...upload, sponsorship_id: w.sponsorshipId }));
   const chosen = ok(await w.lp.call("upload_agreement_template", { ...upload, name: "Sponsor Bank short-form agreement" }));
-  refused(await w.otherLp.call("propose_workspace_agreement", { workspace_id: w.app.workspace_id, app_id: w.app.id, kind: "program", products: ["savings-account"], terms_summary: "Not their sponsorship to offer", template_id: chosen.id }), /sponsor|template/);
+  refused(await w.otherLp.call("propose_workspace_agreement", { workspace_id: w.app.workspace_id, app_id: w.app.id, scopes: ["technology"], kind: "program", products: ["savings-account"], terms_summary: "Not their sponsorship to offer", template_id: chosen.id }), /sponsor|template/);
   // Lars proposes (not Lena), so Lars signs for the firm.
-  const a = ok(await w.lp2.call("propose_workspace_agreement", { workspace_id: w.app.workspace_id, app_id: w.app.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product", template_id: chosen.id }));
+  const a = ok(await w.lp2.call("propose_workspace_agreement", { workspace_id: w.app.workspace_id, app_id: w.app.id, scopes: ["technology"], kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product", template_id: chosen.id }));
   assert.equal(a.proposed_by_side, "counterparty");
   assert.deepEqual(a.template, { id: chosen.id, name: "Sponsor Bank short-form agreement", version: 1 });
   assert.equal(w.service.calls.filter((c) => c.method === "POST").length, 0, "no document before it's accepted");

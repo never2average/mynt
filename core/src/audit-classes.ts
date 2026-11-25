@@ -171,6 +171,7 @@ const OBLIGATIONS = [
   // app agreements: an app's program agreements with the licence providers sponsoring its products, vendor contracts
   // and data sharing (app-agreements.ts)
   "propose_app_agreement",
+  "update_agreement_scopes",
   "accept_app_agreement",
   "decline_app_agreement",
   "sign_app_agreement",

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { APP_AGREEMENT_KINDS, APP_AGREEMENT_STATUSES } from "./app-agreements-schema.js";
+import { AGREEMENT_SCOPE_KEYS, APP_AGREEMENT_KINDS, APP_AGREEMENT_STATUSES, agreementScopeLabel, type AgreementScope } from "./app-agreements-schema.js";
 import { cancelSigning, signatureDocumentOf, startSigning } from "./agreement-esign.js";
 import { inTransaction } from "./db.js";
 import type { ESign } from "./esign/provider.js";
@@ -53,6 +53,13 @@ const iso = (v: unknown) => (v == null ? null : new Date(v as string).toISOStrin
 const day = (v: unknown) => (v == null ? null : typeof v === "string" ? v.slice(0, 10) : new Date(v as Date).toISOString().slice(0, 10));
 const DATE = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "A date as YYYY-MM-DD");
 const UUID = z.string().uuid();
+// What an agreement covers: one or more of AGREEMENT_SCOPES, each once.
+export const SCOPES = z
+  .array(z.enum(AGREEMENT_SCOPE_KEYS))
+  .min(1, "Name at least one scope: technology, manpower or financial_regulatory_operations")
+  .max(AGREEMENT_SCOPE_KEYS.length)
+  .refine((s) => new Set(s).size === s.length, "Name each scope once")
+  .describe("What the agreement covers, one or more of: technology (a platform or software licence), manpower (people and staffing), financial_regulatory_operations (compliance and regulatory operations)");
 
 export interface AppAgreement {
   id: string;
@@ -62,6 +69,8 @@ export interface AppAgreement {
   kind: Kind;
   status: (typeof APP_AGREEMENT_STATUSES)[number];
   products: string[];
+  // What it covers (AGREEMENT_SCOPES); empty only on agreements from before scopes were recorded ("Not set").
+  scopes: AgreementScope[];
   terms_summary: string;
   document_url: string | null;
   document_sha256: string | null;
@@ -101,6 +110,7 @@ const toAgreement = (r: Row): AppAgreement => ({
   kind: r.kind as Kind,
   status: r.status as AppAgreement["status"],
   products: Array.isArray(r.products) ? (r.products as string[]) : [],
+  scopes: Array.isArray(r.scopes) ? (r.scopes as AgreementScope[]) : [],
   terms_summary: r.terms_summary as string,
   document_url: (r.document_url as string | null) ?? null,
   document_sha256: (r.document_sha256 as string | null) ?? null,
@@ -352,6 +362,8 @@ async function describe(store: Store, esign: ESign | null, a: AppAgreement) {
     workspace: a.workspace_id ? { id: a.workspace_id, name: (workspace?.name as string | undefined) ?? null } : null,
     counterparty: { entity_id: a.counterparty_entity_id, name: counterparty?.name ?? null },
     products: products,
+    // In words, for people (an empty list shows as "Not set": an agreement from before scopes were recorded).
+    scope_labels: a.scopes.map(agreementScopeLabel),
     signatures: { app_side: a.app_signed_at !== null, counterparty_side: a.counterparty_signed_at !== null },
     // Program agreements are signed by e-signature where it's configured (agreement-esign.ts).
     signed_by_esignature: esign !== null && a.kind === "program",
@@ -436,7 +448,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
   };
   // Tell the other firm (the counterparty).
   const tell = async (a: AppAgreement, type: FirmWebhookEvent, extra: Record<string, unknown> = {}) => {
-    const told = await noticeFirm(store, a.counterparty_entity_id, type, { agreement_id: a.id, app_id: a.app_id, workspace_id: a.workspace_id, kind: a.kind, status: a.status, products: a.products, ...extra }).catch(() => null);
+    const told = await noticeFirm(store, a.counterparty_entity_id, type, { agreement_id: a.id, app_id: a.app_id, workspace_id: a.workspace_id, kind: a.kind, status: a.status, products: a.products, scopes: a.scopes, ...extra }).catch(() => null);
     return told ? told.webhooks + told.members : 0;
   };
   // Tell the app's side: the firms of its workspace's members (or the app owner's).
@@ -446,18 +458,18 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
     let told = 0;
     for (const f of new Set(firms)) {
       if (f === a.counterparty_entity_id) continue;
-      const r = await noticeFirm(store, f, type, { agreement_id: a.id, app_id: a.app_id, workspace_id: a.workspace_id, kind: a.kind, status: a.status, products: a.products, ...extra }).catch(() => null);
+      const r = await noticeFirm(store, f, type, { agreement_id: a.id, app_id: a.app_id, workspace_id: a.workspace_id, kind: a.kind, status: a.status, products: a.products, scopes: a.scopes, ...extra }).catch(() => null);
       told += r ? r.webhooks + r.members : 0;
     }
     return told;
   };
-  const insert = async (o: { workspace_id: string | null; app_id: string | null; counterparty: string; kind: Kind; products: string[]; terms_summary: string; document_url?: string; document_sha256?: string; effective_from?: string; effective_to?: string; side: "app" | "counterparty"; template_id?: string | null }) =>
+  const insert = async (o: { workspace_id: string | null; app_id: string | null; counterparty: string; kind: Kind; products: string[]; scopes: AgreementScope[]; terms_summary: string; document_url?: string; document_sha256?: string; effective_from?: string; effective_to?: string; side: "app" | "counterparty"; template_id?: string | null }) =>
     toAgreement(
       (
         await store.db.query(
-          `INSERT INTO ${T}.app_agreements (id, workspace_id, app_id, counterparty_entity_id, kind, products, terms_summary, document_url, document_sha256, effective_from, effective_to, proposed_by, proposed_by_side, template_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
-          [randomUUID(), o.workspace_id, o.app_id, o.counterparty, o.kind, JSON.stringify(o.products), o.terms_summary, o.document_url ?? null, o.document_sha256 ?? null, o.effective_from ?? null, o.effective_to ?? null, user.id, o.side, o.template_id ?? null],
+          `INSERT INTO ${T}.app_agreements (id, workspace_id, app_id, counterparty_entity_id, kind, products, terms_summary, document_url, document_sha256, effective_from, effective_to, proposed_by, proposed_by_side, template_id, scopes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::text[]) RETURNING *`,
+          [randomUUID(), o.workspace_id, o.app_id, o.counterparty, o.kind, JSON.stringify(o.products), o.terms_summary, o.document_url ?? null, o.document_sha256 ?? null, o.effective_from ?? null, o.effective_to ?? null, user.id, o.side, o.template_id ?? null, o.scopes],
         )
       ).rows[0],
     );
@@ -475,12 +487,13 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
       {
         title: "Propose an agreement for an app",
         description:
-          "Developer (the app's workspace owners and admins): propose a business agreement between the app's workspace and another firm, for that app: 'program' with a licence provider that sponsors every product named (see list_app_agreements' products and their sponsors), 'vendor' with a firm that lists vendor services on Mynt, 'data_sharing' with either, 'msa' (a master services agreement) or 'sla' (service levels, set with add_agreement_sla) with either. Name the products it covers (from the app's own), a short summary of the terms, and optionally a link to the document (https) with its SHA-256 and the dates it runs between. The other firm is told and accepts or declines it (respond_to_app_agreement); then both sides sign (sign_app_agreement). Apps hold no licences themselves: licence coverage is the products'. Audited.",
+          "Developer (the app's workspace owners and admins): propose a business agreement between the app's workspace and another firm, for that app: 'program' with a licence provider that sponsors every product named (see list_app_agreements' products and their sponsors), 'vendor' with a firm that lists vendor services on Mynt, 'data_sharing' with either, 'msa' (a master services agreement) or 'sla' (service levels, set with add_agreement_sla) with either. Name the products it covers (from the app's own), its scopes (one or more of technology, manpower, financial_regulatory_operations: what it covers, part of what the other side accepts and what's signed; change them with update_agreement_scopes while it's proposed), a short summary of the terms, and optionally a link to the document (https) with its SHA-256 and the dates it runs between. The other firm is told and accepts or declines it (respond_to_app_agreement); then both sides sign (sign_app_agreement). Apps hold no licences themselves: licence coverage is the products'. Audited.",
         inputSchema: {
           app_id: UUID,
           counterparty_entity_id: UUID.describe("The other firm's id: a sponsor of the app's products, or a vendor"),
           kind: z.enum(APP_AGREEMENT_KINDS),
           products: z.array(z.string().min(1).max(200)).max(20).default([]).describe("Ids of the app's products the agreement covers; at least one for a program agreement"),
+          scopes: SCOPES,
           terms_summary: z.string().trim().min(10).max(4000),
           document_url: DOC_URL.optional(),
           document_sha256: SHA.optional(),
@@ -488,7 +501,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
           effective_to: DATE.optional(),
         },
       },
-      async ({ app_id, counterparty_entity_id, kind, products, terms_summary, document_url, document_sha256, effective_from, effective_to }) => {
+      async ({ app_id, counterparty_entity_id, kind, products, scopes, terms_summary, document_url, document_sha256, effective_from, effective_to }) => {
         const { app, error } = await managedApp(app_id);
         if (!app) return fail(error!);
         const covered = [...new Set(products)];
@@ -513,8 +526,8 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
         }
         const open = await openOne(app.id, counterparty_entity_id, kind);
         if (open) return fail(`There's already an open ${kind} agreement with ${firm.name} for this app (${open.id}); terminate it first`);
-        const a = await insert({ workspace_id: app.workspace_id, app_id: app.id, counterparty: counterparty_entity_id, kind, products: covered, terms_summary, document_url, document_sha256, effective_from, effective_to, side: "app" });
-        await store.audit(user.id, "propose_app_agreement", a.id, { app_id: a.app_id, workspace_id: a.workspace_id, counterparty_entity_id, kind, products: covered, document_sha256: document_sha256 ?? null, side: "app" });
+        const a = await insert({ workspace_id: app.workspace_id, app_id: app.id, counterparty: counterparty_entity_id, kind, products: covered, scopes, terms_summary, document_url, document_sha256, effective_from, effective_to, side: "app" });
+        await store.audit(user.id, "propose_app_agreement", a.id, { app_id: a.app_id, workspace_id: a.workspace_id, counterparty_entity_id, kind, products: covered, scopes, document_sha256: document_sha256 ?? null, side: "app" });
         const told = await tell(a, "app_agreement.proposed", { app_name: app.name, terms_summary, respond_with: "respond_to_app_agreement { agreement_id, decision }" });
         return json({ ...(await view(a)), counterparty_told: told > 0 });
       },
@@ -528,12 +541,13 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
       {
         title: "Propose an agreement to a workspace's app",
         description:
-          "Licence provider (for your own firm): propose a business agreement for one app (app_id) of a developer workspace whose apps use products your firm sponsors (see list_app_agreements without app_id: proposable_workspaces): 'program' covering products you sponsor for it, 'data_sharing', 'msa' (a master services agreement) or 'sla' (service levels, set with add_agreement_sla). Optionally name one of your firm's active agreement templates (template_id: a program agreement signed by e-signature is made from it), a link to the document (https) with its SHA-256, and the dates it runs between. The workspace's owners and admins accept or decline it (respond_to_app_agreement); then both sides sign. Audited; the workspace is told.",
+          "Licence provider (for your own firm): propose a business agreement for one app (app_id) of a developer workspace whose apps use products your firm sponsors (see list_app_agreements without app_id: proposable_workspaces): 'program' covering products you sponsor for it, 'data_sharing', 'msa' (a master services agreement) or 'sla' (service levels, set with add_agreement_sla), with its scopes (one or more of technology, manpower, financial_regulatory_operations). Optionally name one of your firm's active agreement templates (template_id: a program agreement signed by e-signature is made from it), a link to the document (https) with its SHA-256, and the dates it runs between. The workspace's owners and admins accept or decline it (respond_to_app_agreement); then both sides sign. Audited; the workspace is told.",
         inputSchema: {
           workspace_id: UUID.describe("The app's workspace"),
           app_id: UUID,
           kind: z.enum(["program", "data_sharing", "msa", "sla"]),
           products: z.array(z.string().min(1).max(200)).max(20).default([]),
+          scopes: SCOPES,
           terms_summary: z.string().trim().min(10).max(4000),
           document_url: DOC_URL.optional(),
           document_sha256: SHA.optional(),
@@ -542,7 +556,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
           effective_to: DATE.optional(),
         },
       },
-      async ({ workspace_id, app_id, kind, products, terms_summary, document_url, document_sha256, template_id, effective_from, effective_to }) => {
+      async ({ workspace_id, app_id, kind, products, scopes, terms_summary, document_url, document_sha256, template_id, effective_from, effective_to }) => {
         const firm = await myFirm(true);
         if (!firm) return fail("You don't act for a firm as a licence provider; its licence providers propose agreements");
         const app = await store.getApp(app_id);
@@ -569,8 +583,8 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
         }
         const open = await openOne(app.id, firm, kind);
         if (open) return fail(`There's already an open ${kind} agreement with ${app.name} (${open.id}); terminate it first`);
-        const a = await insert({ workspace_id, app_id: app.id, counterparty: firm, kind, products: covered, terms_summary, document_url, document_sha256, effective_from, effective_to, side: "counterparty", template_id: template_id ?? null });
-        await store.audit(user.id, "propose_app_agreement", a.id, { app_id: a.app_id, workspace_id, counterparty_entity_id: firm, kind, products: covered, document_sha256: document_sha256 ?? null, template_id: template_id ?? null, side: "counterparty" });
+        const a = await insert({ workspace_id, app_id: app.id, counterparty: firm, kind, products: covered, scopes, terms_summary, document_url, document_sha256, effective_from, effective_to, side: "counterparty", template_id: template_id ?? null });
+        await store.audit(user.id, "propose_app_agreement", a.id, { app_id: a.app_id, workspace_id, counterparty_entity_id: firm, kind, products: covered, scopes, document_sha256: document_sha256 ?? null, template_id: template_id ?? null, side: "counterparty" });
         const told = await tellAppSide(a, "app_agreement.proposed", { counterparty_name: (await store.getEntity(firm))?.name ?? null, terms_summary, respond_with: "respond_to_app_agreement { agreement_id, decision }" });
         return json({ ...(await view(a)), workspace_told: told > 0 });
       },
@@ -611,6 +625,30 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
       // (no template, the service unreachable) it's made when someone first asks to sign (get_agreement_signing_link).
       const signing = esign() && done.kind === "program" && status === "accepted" ? await startSigning(store, esign(), done.id, user.id) : null;
       return json({ ...(await view(done)), ...(signing ? { signing: signing.ok ? { ready: true } : { ready: false, reason: signing.error } } : {}) });
+    },
+  );
+
+  server.registerTool(
+    "update_agreement_scopes",
+    {
+      title: "Change what a proposed agreement covers",
+      description:
+        "The side that proposed an agreement changes its scopes (what it covers: technology, manpower, financial_regulatory_operations; one or more, each once) while it's still proposed, before the other side answers: the app's workspace owners and admins for one their side proposed, a licence provider for one its firm proposed. Nothing else about it changes. Audited (the scopes before and after), and the other side is told.",
+      inputSchema: { agreement_id: UUID, scopes: SCOPES },
+    },
+    async ({ agreement_id, scopes }) => {
+      const a = await getAgreement(store, agreement_id);
+      const p = a ? await partyOf(a) : null;
+      if (!a || !p || (!p.counterparty && !p.app)) return fail(`No agreement '${agreement_id}' of yours`);
+      const proposer = a.proposed_by_side === "app" ? p.manager : p.counterparty;
+      if (!proposer) return fail(a.proposed_by_side === "app" && p.app ? "Only the workspace's owners and admins change its proposals" : "The other side proposed it: only the side that proposed an agreement changes its scopes");
+      if (a.status !== "proposed") return fail(`That agreement is ${a.status}: scopes change only while it's proposed`);
+      const r = (await store.db.query(`UPDATE ${T}.app_agreements SET scopes = $2::text[], updated_at = now() WHERE id = $1 AND status = 'proposed' RETURNING *`, [a.id, scopes])).rows[0];
+      if (!r) return fail("That agreement changed meanwhile; read it again");
+      const done = toAgreement(r);
+      await store.audit(user.id, "update_agreement_scopes", done.id, { app_id: done.app_id, workspace_id: done.workspace_id, counterparty_entity_id: done.counterparty_entity_id, kind: done.kind, from_scopes: a.scopes, scopes: done.scopes, side: a.proposed_by_side });
+      const told = a.proposed_by_side === "app" ? await tell(done, "app_agreement.proposed", { updated: "scopes" }) : await tellAppSide(done, "app_agreement.proposed", { updated: "scopes" });
+      return json({ ...(await view(done)), other_side_told: told > 0 });
     },
   );
 
@@ -729,15 +767,15 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
     {
       title: "App agreements",
       description:
-        "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, program_coverage (each product and the licence provider sponsoring it where the app serves, and whether a signed program agreement in force covers it: production needs every one; production_gate says what's missing, and flagged when the app is already in production without one), the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on (each with the version of the vendor's standard terms accepted for this app, or no_standard_terms when none were), and introductions the business-development agent has in progress for its members (null when that agent isn't running here). With workspace_id (developer, any member): every agreement of the workspace's apps (all kinds), can_manage, and proposable_counterparties (the sponsors of its apps' products). Without either (licence provider or vendor): the agreements made with your firm, both those apps' workspaces proposed and those your firm proposed, and proposable_workspaces (those whose apps use products your firm sponsors, or that already have an agreement with it). Each agreement says which side proposed it (proposed_by_side), the template it was made on, your_side and what you may do now (actions: accept, decline, sign, withdraw, end). status filters any list.",
-      inputSchema: { app_id: UUID.optional(), workspace_id: UUID.optional(), status: z.enum(APP_AGREEMENT_STATUSES).optional() },
+        "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, program_coverage (each product and the licence provider sponsoring it where the app serves, and whether a signed program agreement in force covers it: production needs every one; production_gate says what's missing, and flagged when the app is already in production without one), the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on (each with the version of the vendor's standard terms accepted for this app, or no_standard_terms when none were), and introductions the business-development agent has in progress for its members (null when that agent isn't running here). With workspace_id (developer, any member): every agreement of the workspace's apps (all kinds), can_manage, and proposable_counterparties (the sponsors of its apps' products). Without either (licence provider or vendor): the agreements made with your firm, both those apps' workspaces proposed and those your firm proposed, and proposable_workspaces (those whose apps use products your firm sponsors, or that already have an agreement with it). Each agreement says which side proposed it (proposed_by_side), the template it was made on, your_side and what you may do now (actions: accept, decline, sign, withdraw, end). Each agreement carries its scopes (what it covers: technology, manpower, financial_regulatory_operations; empty on one from before scopes were recorded) and scope_labels. status and scope filter any list.",
+      inputSchema: { app_id: UUID.optional(), workspace_id: UUID.optional(), status: z.enum(APP_AGREEMENT_STATUSES).optional(), scope: z.enum(AGREEMENT_SCOPE_KEYS).optional().describe("Only agreements covering this scope") },
       annotations: { readOnlyHint: true },
     },
-    async ({ app_id, workspace_id, status }) => {
+    async ({ app_id, workspace_id, status, scope }) => {
       if (app_id) {
         const app = sides.app ? await memberApp(store, user, app_id) : undefined;
         if (!app) return fail(`No app '${app_id}' of yours`);
-        const { rows } = await store.db.query(`SELECT * FROM ${T}.app_agreements WHERE app_id = $1 AND ($2::text IS NULL OR status = $2) ORDER BY created_at DESC`, [app.id, status ?? null]);
+        const { rows } = await store.db.query(`SELECT * FROM ${T}.app_agreements WHERE app_id = $1 AND ($2::text IS NULL OR status = $2) AND ($3::text IS NULL OR $3 = ANY(scopes)) ORDER BY created_at DESC`, [app.id, status ?? null, scope ?? null]);
         const stage = ((await store.db.query(`SELECT stage FROM ${T}.app_promotions WHERE app_id = $1`, [app.id])).rows[0]?.stage as string | undefined) ?? "idea";
         const coverage = await programAgreementCoverage(store.db, store, app);
         const missing = coverage.filter((c) => !c.covered);
@@ -763,8 +801,8 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
         if (!role) return fail(`No workspace '${workspace_id}' of yours`);
         const apps = await workspaceApps(store, workspace_id);
         const { rows } = await store.db.query(
-          `SELECT * FROM ${T}.app_agreements WHERE app_id = ANY($1::uuid[]) AND ($2::text IS NULL OR status = $2) ORDER BY created_at DESC`,
-          [apps.map((x) => x.id), status ?? null],
+          `SELECT * FROM ${T}.app_agreements WHERE app_id = ANY($1::uuid[]) AND ($2::text IS NULL OR status = $2) AND ($3::text IS NULL OR $3 = ANY(scopes)) ORDER BY created_at DESC`,
+          [apps.map((x) => x.id), status ?? null, scope ?? null],
         );
         const ws = (await store.db.query(`SELECT name FROM ${T}.workspaces WHERE id = $1`, [workspace_id])).rows[0];
         return json({
@@ -777,7 +815,7 @@ export function registerAppAgreementTools(server: McpServer, store: Store, user:
       }
       const firm = await myFirm();
       if (!firm) return fail(sides.app ? "Name the app (app_id) or the workspace (workspace_id) whose agreements you want" : "You don't belong to a firm as a licence provider or vendor yet");
-      const { rows } = await store.db.query(`SELECT * FROM ${T}.app_agreements WHERE counterparty_entity_id = $1 AND ($2::text IS NULL OR status = $2) ORDER BY created_at DESC`, [firm, status ?? null]);
+      const { rows } = await store.db.query(`SELECT * FROM ${T}.app_agreements WHERE counterparty_entity_id = $1 AND ($2::text IS NULL OR status = $2) AND ($3::text IS NULL OR $3 = ANY(scopes)) ORDER BY created_at DESC`, [firm, status ?? null, scope ?? null]);
       return json({
         entity_id: firm,
         agreements: await Promise.all(rows.map((r) => view(toAgreement(r)))),

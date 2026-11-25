@@ -18,9 +18,9 @@ const NOT_OURS = "55555555-5555-4555-8555-555555555555";
 const REPLY = {
   entity_id: "e1",
   agreements: [
-    { id: PROPOSED, kind: "program", status: "proposed", app: { id: "a1", name: "Cards" }, workspace: { id: "w1", name: "Acme Labs" }, products: [{ id: "p1", name: "Card" }], terms_summary: "Lead Bank's card program, standard terms", document_url: "https://docs.example.com/p.pdf", effective_from: "2026-12-01", effective_to: null, signatures: { app_side: false, counterparty_side: false } },
+    { id: PROPOSED, kind: "program", status: "proposed", app: { id: "a1", name: "Cards" }, workspace: { id: "w1", name: "Acme Labs" }, products: [{ id: "p1", name: "Card" }], scopes: ["technology", "financial_regulatory_operations"], terms_summary: "Lead Bank's card program, standard terms", document_url: "https://docs.example.com/p.pdf", effective_from: "2026-12-01", effective_to: null, signatures: { app_side: false, counterparty_side: false } },
     { id: ACCEPTED, kind: "program", status: "accepted", app: { id: "a2", name: "Savings" }, workspace: { id: "w2", name: "Beta Co" }, products: [{ id: "p2", name: "Savings" }], terms_summary: "Savings program", document_url: "http://docs.example.com/plain.pdf", effective_from: null, effective_to: null, signatures: { app_side: true, counterparty_side: false } },
-    { id: SIGNED, kind: "data_sharing", status: "signed", app: { id: "a1", name: "Cards" }, workspace: { id: "w1", name: "Acme Labs" }, products: [], terms_summary: "Data sharing", signatures: { app_side: true, counterparty_side: true } },
+    { id: SIGNED, kind: "data_sharing", status: "signed", app: { id: "a1", name: "Cards" }, workspace: { id: "w1", name: "Acme Labs" }, products: [], scopes: ["manpower"], terms_summary: "Data sharing", signatures: { app_side: true, counterparty_side: true } },
     { id: ENDED, kind: "program", status: "terminated", app: { id: "a3", name: "Old" }, workspace: null, products: [], terms_summary: "Old program", termination_reason: "Program wound down", signatures: { app_side: true, counterparty_side: true } },
   ],
 };
@@ -81,7 +81,7 @@ describe("the provider's agreements", () => {
   it("the tab: one table with labelled actions per row (Review agreement, Accept, Decline, Sign, End agreement), never icon-only", () => {
     const html = renderToStaticMarkup(<view.LpAgreementsView rows={ROWS} />);
     const doc = new DOMParser().parseFromString(html, "text/html");
-    expect([...doc.querySelectorAll("th")].map((h) => h.textContent)).toEqual(["App", "Other party", "Products", "Kind", "Status", "Effective", "Document", "Actions"]);
+    expect([...doc.querySelectorAll("th")].map((h) => h.textContent)).toEqual(["App", "Other party", "Products", "Kind", "Scope", "Status", "Effective", "Document", "Actions"]);
     const labels = (id: string) => [...doc.querySelectorAll(`[data-agreement-actions="${id}"] [data-agreement-action]`)].map((b) => b.textContent);
     expect(labels(PROPOSED)).toEqual(["Accept", "Decline"]);
     expect(labels(ACCEPTED)).toEqual(["Sign", "End agreement"]);
@@ -102,7 +102,7 @@ describe("the provider's agreements", () => {
     expect(view.filterLpAgreements(ROWS, { status: ["signed"] }).map((r) => r.id)).toEqual([SIGNED]);
     expect(view.filterLpAgreements(ROWS, { query: "card", status: ["proposed"] }).map((r) => r.id)).toEqual([PROPOSED]);
     expect(view.filterLpAgreements(ROWS, { kind: ["data_sharing"] }).map((r) => r.id)).toEqual([SIGNED]);
-    expect(view.lpAgreementsCsv([ROWS[0]]).split("\n")[1]).toContain("Cards,Acme Labs,Your firm's side,Them,Card,Program agreement,Proposed,2026-12-01");
+    expect(view.lpAgreementsCsv([ROWS[0]]).split("\n")[1]).toContain("Cards,Acme Labs,Your firm's side,Them,Card,Program agreement,\"Technology, Financial regulatory operations\",Proposed,2026-12-01");
   });
 
   it("Review agreement shows the terms in full, with the same actions; Accept opens a sheet that posts to the firm's route", async () => {
@@ -142,6 +142,65 @@ describe("the provider's agreements", () => {
   });
 });
 
+describe("each agreement's scope", () => {
+  it("reads the scopes in the list's order, in words, and an agreement from before scopes as Not set (never invented)", () => {
+    expect(ROWS.map((r) => [r.scopes, r.scopeLabel])).toEqual([
+      [["technology", "financial_regulatory_operations"], "Technology, Financial regulatory operations"],
+      [[], "Not set"],
+      [["manpower"], "Manpower"],
+      [[], "Not set"],
+    ]);
+    // Unknown keys are dropped, and the order is the fixed list's.
+    expect(lpAgreementsFrom({ agreements: [{ id: PROPOSED, scopes: ["financial_regulatory_operations", "bogus", "technology"] }] })![0].scopes).toEqual(["technology", "financial_regulatory_operations"]);
+  });
+
+  it("the table's Scope column, the Filters popover's Scope facet (with Not set), search, and the Review agreement card", async () => {
+    const doc = new DOMParser().parseFromString(renderToStaticMarkup(<view.LpAgreementsView rows={ROWS} />), "text/html");
+    expect(doc.querySelector(`[data-lp-scope="${PROPOSED}"]`)?.textContent).toBe("Technology, Financial regulatory operations");
+    expect(doc.querySelector(`[data-lp-scope="${ACCEPTED}"]`)?.textContent).toBe("Not set");
+    expect(view.SCOPE_FILTERS.map((o) => o.label)).toEqual(["Technology", "Manpower", "Financial regulatory operations", "Not set"]);
+    expect(view.filterLpAgreements(ROWS, { scope: ["manpower"] }).map((r) => r.id)).toEqual([SIGNED]);
+    expect(view.filterLpAgreements(ROWS, { scope: ["technology", "manpower"] }).map((r) => r.id)).toEqual([PROPOSED, SIGNED]);
+    expect(view.filterLpAgreements(ROWS, { scope: [view.SCOPE_NONE] }).map((r) => r.id)).toEqual([ACCEPTED, ENDED]);
+    expect(view.filterLpAgreements(ROWS, { query: "regulatory" }).map((r) => r.id)).toEqual([PROPOSED]);
+    render(<view.LpAgreementsView rows={ROWS} />);
+    await act(async () => void fireEvent.click(screen.getByRole("button", { name: /Filters/ })));
+    const facet = document.querySelector('[data-filters-menu] [data-facet="scope"]')!;
+    expect(facet.querySelector("[data-facet-heading]")?.textContent).toBe("Scope");
+    expect(facet.textContent).toContain("Financial regulatory operations");
+    expect(facet.textContent).toContain("Not set");
+    cleanup();
+    render(<view.LpAgreementsView rows={ROWS} />);
+    await act(async () => void fireEvent.click(document.querySelector(`[data-review="${SIGNED}"]`)!));
+    expect(document.querySelector(`[data-review-agreement="${SIGNED}"] [data-agreement-scope]`)?.textContent).toBe("Manpower");
+  });
+
+  it("Change scope: only on one's own proposal, a labelled button opening a sheet that needs at least one scope and posts to the route", async () => {
+    const mine = { ...ROWS[0], side: "app" as const, proposedBy: "app" as const, actions: ["withdraw" as const] };
+    expect(view.canChangeScope(mine)).toBe(true);
+    expect(view.canChangeScope(ROWS[0])).toBe(false); // the other side proposed it: they answer it
+    expect(view.canChangeScope({ ...mine, statusKey: "accepted" })).toBe(false);
+    const requests: unknown[] = [];
+    const fetcher = (async (url: string, init: RequestInit) => {
+      requests.push({ url, body: JSON.parse(String(init.body)) });
+      return new Response(JSON.stringify({ ok: true, message: "Scope changed." }), { status: 200 });
+    }) as unknown as typeof fetch;
+    render(<view.LpAgreementsView rows={[mine]} fetcher={fetcher} />);
+    await act(async () => void fireEvent.click(document.querySelector(`[data-review="${PROPOSED}"]`)!));
+    const change = document.querySelector(`[data-change-scope="${PROPOSED}"]`) as HTMLButtonElement;
+    expect(change.textContent).toBe("Change scope");
+    await act(async () => void fireEvent.click(change));
+    expect(screen.getByRole("heading", { name: "Change scope" })).toBeTruthy();
+    const submit = document.querySelector("[data-change-scope-submit]") as HTMLButtonElement;
+    fireEvent.click(document.querySelector('[data-propose-scope="technology"]')!);
+    fireEvent.click(document.querySelector('[data-propose-scope="financial_regulatory_operations"]')!);
+    expect(submit.disabled).toBe(true); // none ticked
+    fireEvent.click(document.querySelector('[data-propose-scope="manpower"]')!);
+    await act(async () => void fireEvent.click(submit));
+    expect(requests).toEqual([{ url: `/api/agreements/${PROPOSED}`, body: { action: "scopes", scopes: ["manpower"] } }]);
+  });
+});
+
 describe("the routes", () => {
   const get = () => listRoute.GET(new Request("http://localhost:3000/api/agreements"));
   const post = (body: unknown, id = PROPOSED) =>
@@ -172,11 +231,17 @@ describe("the routes", () => {
     expect((await post({ action: "decline" })).status).toBe(200);
     expect((await post({ action: "sign" }, ACCEPTED)).status).toBe(200);
     expect((await post({ action: "terminate", reason: "Program wound down" }, SIGNED)).status).toBe(200);
+    expect((await post({ action: "scopes", scopes: [] })).status).toBe(400);
+    expect((await post({ action: "scopes", scopes: ["catering"] })).status).toBe(400);
+    expect((await post({ action: "scopes", scopes: ["manpower", "manpower"] })).status).toBe(400);
+    fake.tools.push({ name: "update_agreement_scopes" });
+    expect((await post({ action: "scopes", scopes: ["manpower", "technology"] })).status).toBe(200);
     expect(fake.calls.filter((c) => c.name !== "list_app_agreements")).toEqual([
       { name: "respond_to_app_agreement", args: { agreement_id: PROPOSED, decision: "accept", note: "Happy to" } },
       { name: "respond_to_app_agreement", args: { agreement_id: PROPOSED, decision: "decline" } },
       { name: "sign_app_agreement", args: { agreement_id: ACCEPTED } },
       { name: "terminate_app_agreement", args: { agreement_id: SIGNED, reason: "Program wound down" } },
+      { name: "update_agreement_scopes", args: { agreement_id: PROPOSED, scopes: ["manpower", "technology"] } },
     ]);
 
     fake.refuse = "That agreement is accepted, not waiting for an answer";

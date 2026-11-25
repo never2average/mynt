@@ -178,3 +178,39 @@ describe("My services (service providers) on the allow-list", () => {
     for (const t of ["reveal_subscription_secret", "rotate_subscription_secret", "suspend_vendor_offering", "define_service_type"]) expect(parseStudioCall(t, {})).toHaveProperty("error");
   });
 });
+
+describe("agreement scopes", () => {
+  const AG = "11111111-1111-4111-8111-111111111111";
+  const FIRM = "22222222-2222-4222-8222-222222222222";
+  const app = { app_id: "a1", counterparty_entity_id: FIRM, kind: "msa", products: [], terms_summary: "Master services terms" };
+  const ws = { workspace_id: "33333333-3333-4333-8333-333333333333", app_id: "a1", kind: "sla", terms_summary: "Service levels for the app" };
+
+  it("both propose tools require one or more scopes from the fixed list, each once", () => {
+    for (const [tool, base] of [["propose_app_agreement", app], ["propose_workspace_agreement", ws]] as const) {
+      expect(parseStudioCall(tool, { ...base, scopes: ["technology", "financial_regulatory_operations"] }), tool).toHaveProperty("tool");
+      expect(parseStudioCall(tool, base), tool).toHaveProperty("error"); // missing
+      expect(parseStudioCall(tool, { ...base, scopes: [] }), tool).toHaveProperty("error");
+      expect(parseStudioCall(tool, { ...base, scopes: ["catering"] }), tool).toHaveProperty("error");
+      expect(parseStudioCall(tool, { ...base, scopes: ["manpower", "manpower"] }), tool).toHaveProperty("error");
+    }
+  });
+
+  it("Change scope (update_agreement_scopes) is strict, and the list takes a scope filter", () => {
+    expect(parseStudioCall("update_agreement_scopes", { agreement_id: AG, scopes: ["manpower"] })).toEqual({ tool: "update_agreement_scopes", args: { agreement_id: AG, scopes: ["manpower"] } });
+    expect(parseStudioCall("update_agreement_scopes", { agreement_id: "g1", scopes: ["manpower"] })).toHaveProperty("error");
+    expect(parseStudioCall("update_agreement_scopes", { agreement_id: AG, scopes: [] })).toHaveProperty("error");
+    expect(parseStudioCall("update_agreement_scopes", { agreement_id: AG, scopes: ["manpower"], status: "signed" })).toHaveProperty("error");
+    expect(parseStudioCall("list_app_agreements", { scope: "technology" })).toHaveProperty("tool");
+    expect(parseStudioCall("list_app_agreements", { scope: "catering" })).toHaveProperty("error");
+  });
+
+  it("the studio's list is Mynt's (AGREEMENT_SCOPES in the server's app-agreements-schema.ts), keys and labels", async () => {
+    const { AGREEMENT_SCOPES } = await import("@/lib/app-panel");
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const core = readFileSync(join(process.cwd(), "..", "..", "core", "src", "app-agreements-schema.ts"), "utf8");
+    const block = /export const AGREEMENT_SCOPES = \[([^]*?)\] as const;/.exec(core)![1];
+    const pairs = [...block.matchAll(/\{ key: "([a-z_]+)", label: "([^"]+)" \}/g)].map((m) => ({ key: m[1], label: m[2] }));
+    expect(pairs).toEqual(AGREEMENT_SCOPES.map((s) => ({ key: s.key, label: s.label })));
+  });
+});

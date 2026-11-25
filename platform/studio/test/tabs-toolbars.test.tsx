@@ -29,14 +29,14 @@ beforeAll(() => {
 afterEach(cleanup);
 
 describe("page-level tab bars", () => {
-  it("use the shared line variant: one bottom border, a 2px foreground underline on the active tab, muted otherwise, no pill and no accent", () => {
+  it("use the shared line variant: one bottom line, a 2px foreground underline on the active tab, muted otherwise, no pill and no accent", () => {
     const html = renderToStaticMarkup(
       <TabList aria-label="Demo">
         <Tab selected>One</Tab>
         <Tab selected={false}>Two</Tab>
       </TabList>,
     );
-    expect(html).toMatch(/role="tablist" aria-label="Demo" data-slot="tabs-list" data-variant="line" class="[^"]*border-b/);
+    expect(html).toMatch(/role="tablist" aria-label="Demo" data-slot="tabs-list" data-variant="line" class="[^"]*shadow-\[inset_0_-1px_0_var\(--color-border\)\]/);
     expect(html).not.toMatch(/bg-muted|rounded-lg|[\s"]p-1[\s"]|primary|mint/);
     const active = /<button[^>]*data-state="active"[^>]*class="([^"]*)"/.exec(html)![1];
     for (const c of ["border-b-2", "data-[state=active]:border-foreground", "data-[state=active]:text-foreground", "text-muted-foreground"]) expect(active).toContain(c);
@@ -53,6 +53,34 @@ describe("page-level tab bars", () => {
       const src = readFileSync(join(root, f), "utf8");
       expect(src, f).toMatch(/<TabList /);
       expect(src, f).not.toMatch(/role="tablist"/);
+    }
+  });
+
+  it("scroll sideways without a visible scrollbar, never vertically, and keep the focus ring inside the bar", () => {
+    const html = renderToStaticMarkup(
+      <TabList aria-label="Demo">
+        <Tab selected>One</Tab>
+        <Tab selected={false}>Two</Tab>
+      </TabList>,
+    );
+    const list = /role="tablist"[^>]*class="([^"]*)"/.exec(html)![1].split(" ");
+    for (const c of ["scrollbar-none", "overflow-x-auto", "overflow-y-hidden", "shrink-0"]) expect(list).toContain(c);
+    // The underline no longer hangs 1px below the bar (what made a scrollbar appear), and focus stays visible.
+    const tab = /<button[^>]*class="([^"]*)"/.exec(html)![1].split(" ");
+    expect(tab).not.toContain("-mb-px");
+    expect(tab).toEqual(expect.arrayContaining(["focus-visible:ring-2", "focus-visible:ring-inset"]));
+    // The utility is defined once, in the studio's global CSS, for every engine.
+    const css = readFileSync(join(root, "app/globals.css"), "utf8");
+    expect(css).toMatch(/@utility scrollbar-none \{[^}]*scrollbar-width: none;[^}]*-ms-overflow-style: none;[^]*?::-webkit-scrollbar \{\s*display: none;/);
+    // Every page's tab row carries it: Licences, the app and Earn panels, Audits, Settings and the admin areas' tabs
+    // all render the shared TabList.
+    const panel = renderToStaticMarkup(<PanelTabStrip tabs={[{ id: "a", label: "Preview", content: null }]} tab="a" onTab={() => undefined} />);
+    expect(panel).toMatch(/role="tablist"[^>]*class="[^"]*scrollbar-none/);
+    expect(renderToStaticMarkup(<AuditTabs tab="security" onTab={() => undefined} />)).toMatch(/role="tablist"[^>]*class="[^"]*scrollbar-none/);
+    for (const f of ["app/(studio)/licences/licences-page.tsx", "components/admin-kit.tsx", "components/risk-area-tabs.tsx", "components/licences-kit.tsx"]) {
+      const src = readFileSync(join(root, f), "utf8");
+      expect(src, f).toMatch(/<TabList /);
+      expect(src, f).not.toMatch(/<TabList [^>]*className="[^"]*overflow-y-(auto|scroll)/);
     }
   });
 

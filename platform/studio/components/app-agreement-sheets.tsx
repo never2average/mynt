@@ -2,8 +2,8 @@
 
 // The two actions of an app's information tabs, each a labelled button opening a sheet (tabs only show):
 // - Propose agreement (Agreements tab): an agreement between the app's workspace and another firm. The
-//   counterparty is picked from the licence providers sponsoring the app's products; then the kind, the
-//   products it covers, a summary of the terms, and optionally a link to the document and the dates it
+//   counterparty is picked from the licence providers sponsoring the app's products; then the kind, its scope
+//   (one or more, required), the products it covers, a summary of the terms, and optionally a link to the document and the dates it
 //   runs between. Mynt tells the other firm, which accepts or declines; then both sign.
 // - Choose personas (Customers tab): which of its products' customer segments the app targets.
 // Mynt checks everything again and may refuse; its reason is shown in its own words. The views are
@@ -11,9 +11,10 @@
 import { useEffect, useMemo, useState } from "react"
 import { FilePlus2 } from "lucide-react"
 
+import { ScopeField } from "@/components/agreement-scope-field"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
-import { AGREEMENT_ACTION_LABELS, AGREEMENT_KIND_LABELS, sponsorsFromCoverage, type AgreementAction, type AppAgreements, type AppCustomers } from "@/lib/app-panel"
+import { AGREEMENT_ACTION_LABELS, AGREEMENT_KIND_LABELS, sponsorsFromCoverage, type AgreementAction, type AgreementScope, type AppAgreements, type AppCustomers } from "@/lib/app-panel"
 import { coverageText, type AgreementCoverage } from "@/lib/promotions"
 
 const field = "rounded-md border border-input bg-background px-2 py-1.5 text-sm"
@@ -30,6 +31,7 @@ async function post(url: string, body: unknown, fetcher: typeof fetch): Promise<
 export type Proposal = {
   counterparty_entity_id: string
   kind: "program" | "vendor" | "data_sharing"
+  scopes: AgreementScope[] // what it covers: one or more of AGREEMENT_SCOPES
   products: string[]
   terms_summary: string
   document_url?: string
@@ -60,6 +62,7 @@ export function ProposeAgreementView({
   const [kind, setKind] = useState<Proposal["kind"]>("program")
   const sponsor = data.sponsors.find((s) => s.entityId === counterparty)
   const [products, setProducts] = useState<string[]>(start ? start.products.filter((p) => sponsor?.productIds.includes(p)) : (sponsor?.productIds ?? []))
+  const [scopes, setScopes] = useState<AgreementScope[]>([])
   const [terms, setTerms] = useState("")
   const [doc, setDoc] = useState("")
   const [from, setFrom] = useState("")
@@ -82,6 +85,7 @@ export function ProposeAgreementView({
         onSubmit({
           counterparty_entity_id: counterparty,
           kind,
+          scopes,
           products: products.filter((p) => offered.some((o) => o.id === p)),
           terms_summary: terms.trim(),
           ...(doc.trim() ? { document_url: doc.trim() } : {}),
@@ -118,6 +122,7 @@ export function ProposeAgreementView({
           ))}
         </select>
       </label>
+      <ScopeField value={scopes} onChange={setScopes} />
       <fieldset className="flex flex-col gap-1 text-sm" data-agreement-products>
         <legend className="mb-1">Products it covers</legend>
         {offered.map((p) => (
@@ -147,7 +152,7 @@ export function ProposeAgreementView({
       </div>
       {!done && (
         <div>
-          <Button type="submit" disabled={busy || !counterparty || terms.trim().length < 10 || (kind === "program" && !products.length)} data-propose-agreement-submit>
+          <Button type="submit" disabled={busy || !counterparty || !scopes.length || terms.trim().length < 10 || (kind === "program" && !products.length)} data-propose-agreement-submit>
             {busy ? "Proposing…" : "Propose agreement"}
           </Button>
         </div>
