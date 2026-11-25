@@ -52,16 +52,17 @@ const withSidebar = (ui: React.ReactNode, open = true) => (
 const openFolders = (c: HTMLElement) => [...c.querySelectorAll("[data-active-folder=true]")].map((e) => e.getAttribute("data-folder"));
 
 describe("the collapsed sidebar", () => {
-  it("fits its buttons to the rail: 32px (the 3rem rail less the group's padding), the leading icon 20px, nothing pushed off-centre", () => {
+  it("fits its buttons to the rail: 40px (the 3.5rem rail less the group's padding), the leading icon 24px (bigger when collapsed), nothing pushed off-centre", () => {
     const html = renderToStaticMarkup(<UiSidebarProvider defaultOpen={false}><SidebarMenu><SidebarMenuItem><SidebarMenuButton isActive>x</SidebarMenuButton></SidebarMenuItem></SidebarMenu></UiSidebarProvider>);
-    for (const c of ["group-data-[collapsible=icon]:size-8!", "group-data-[collapsible=icon]:p-1.5!", "group-data-[collapsible=icon]:[&amp;&gt;svg:first-child]:size-5"]) expect(html).toContain(c);
-    // A 36px button overflowed the 32px column, and centring the whole row (icon, label, count, chevron)
+    for (const c of ["group-data-[collapsible=icon]:size-10!", "group-data-[collapsible=icon]:p-2!", "group-data-[collapsible=icon]:[&amp;&gt;svg:first-child]:size-6"]) expect(html).toContain(c);
+    expect(html).toContain("--sidebar-width-icon:3.5rem");
+    // A button wider than the 40px column overflows it, and centring the whole row (icon, label, count, chevron)
     // pushed the icon out of view; neither again.
-    expect(html).not.toContain("group-data-[collapsible=icon]:size-9!");
+    expect(html).not.toContain("group-data-[collapsible=icon]:size-11!");
     expect(html).not.toContain("group-data-[collapsible=icon]:justify-center");
   });
 
-  it("is exactly the icon width (3rem) for the inset variant, with no side padding, so icons are centred", () => {
+  it("is exactly the icon width (3.5rem) for the inset variant, with no side padding, so icons are centred", () => {
     const { container } = render(withSidebar(<p>x</p>, false));
     const gap = container.querySelector("[data-slot=sidebar-gap]")!.className;
     const rail = container.querySelector("[data-slot=sidebar-container]")!.className;
@@ -70,7 +71,7 @@ describe("the collapsed sidebar", () => {
     expect(rail).toContain("group-data-[collapsible=icon]:w-(--sidebar-width-icon)");
     expect(rail).toContain("group-data-[collapsible=icon]:px-0");
     expect(rail).not.toContain("+2px");
-    expect((container.querySelector("[data-slot=sidebar-wrapper]") as HTMLElement).style.getPropertyValue("--sidebar-width-icon")).toBe("3rem");
+    expect((container.querySelector("[data-slot=sidebar-wrapper]") as HTMLElement).style.getPropertyValue("--sidebar-width-icon")).toBe("3.5rem");
   });
 });
 

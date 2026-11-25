@@ -11,7 +11,7 @@
 // sections with headings, tables in a bordered box, and a View all row under a preview of a list.
 import { useCallback, useEffect, useRef, useState } from "react"
 import Link from "next/link"
-import { Blocks, ChevronRight, FilePlus2, RefreshCw, Users } from "lucide-react"
+import { ChevronRight, FilePlus2, Handshake, RefreshCw, Users } from "lucide-react"
 
 import { KpiRow } from "@/components/charts"
 import { Panel, Section } from "@/components/dashboard-panels"
@@ -471,7 +471,7 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
         action={
           <Button size="sm" variant="outline" asChild data-browse-vendors>
             <Link href={marketplaceHref(appId)}>
-              <Blocks /> Browse vendors
+              <Handshake /> Browse vendors
             </Link>
           </Button>
         }
