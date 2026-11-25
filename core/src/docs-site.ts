@@ -1,5 +1,5 @@
 // The data behind Mynt Studio's docs (/docs): the tool catalogue from the live registry (tool-catalogue.ts) and the
-// pages, cut from the repository's own Markdown (README.md, docs/*.md) by the headings a manifest names. One source
+// pages, cut from the repository's own Markdown (README.md, docs/*.md, docs/reference/*.md) by the headings a manifest names. One source
 // of truth each: scripts/docs-data.mjs writes the files, and test/tool-catalogue.test.js fails when the committed
 // ones differ from what this generates, so the docs never drift from the server or the Markdown.
 import { readFileSync } from "node:fs";

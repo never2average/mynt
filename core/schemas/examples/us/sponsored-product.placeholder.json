@@ -1,5 +1,5 @@
 {
-  "$comment": "The reference flow for a sponsored US product (scripts/sponsored-product.mjs, test/sponsored-product-e2e.test.js): an unlicensed builder's dollar-transfer product, composed on money transmission, sponsored by a licence provider. The licence provider here is a PLACEHOLDER: not a real firm, with fake licence numbers. For staging and tests only. To go live, copy this file, set placeholder to false, and replace licence_provider with the real partner's firm and its real licences (see docs/reference.md, 'A sponsored US product').",
+  "$comment": "The reference flow for a sponsored US product (scripts/sponsored-product.mjs, test/sponsored-product-e2e.test.js): an unlicensed builder's dollar-transfer product, composed on money transmission, sponsored by a licence provider. The licence provider here is a PLACEHOLDER: not a real firm, with fake licence numbers. For staging and tests only. To go live, copy this file, set placeholder to false, and replace licence_provider with the real partner's firm and its real licences (see docs/reference/licence-providers.md, 'A sponsored US product, end to end').",
   "placeholder": true,
   "placeholder_note": "Staging and tests only. 'Example Money Transmitter (placeholder)' is not a real firm and every registration number below is fake. Never run this file against production.",
   "region": "US",

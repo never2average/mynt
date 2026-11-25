@@ -11,8 +11,8 @@ import type { EnclavePcrs } from "./host.js";
 // measures for that build: an enclave image's PCRs (pcr0, pcr1, pcr2, as CI's confidential-image job prints them for an
 // enclave host) or a container image digest (for a confidential-VM container host).
 //
-// The cloud account's key policy is what really decides which image can use the keys (docs/reference.md, Confidential
-// computing), and only the operator can change it. This record is what Mynt holds itself to, and what partners check
+// The cloud account's key policy is what really decides which image can use the keys (docs/reference/confidential-computing.md,
+// The key policy), and only the operator can change it. This record is what Mynt holds itself to, and what partners check
 // against: Mynt's server refuses to talk to a service whose attested digest isn't in effect here, and every
 // announcement is audited, told to every licence-provider firm (a notice to each member and the
 // confidential.release_announced event on its webhooks), and in effect only after the same 48 hours a mainnet program
@@ -200,7 +200,7 @@ export function registerConfidentialAdminTools(server: McpServer, store: Store, 
     {
       title: "Announce a confidential service release",
       description:
-        "Admin: announce a build of the confidential service by what the hardware measures, as CI's confidential-image job printed it for that commit: pcr0, pcr1 and pcr2 for the enclave image (the default host), or image_digest for a confidential-VM container. It takes effect 48 hours later (the first ever at once); until then Mynt's server won't talk to a service running it. Audited, and told to every licence-provider firm (a notice to each member and confidential.release_announced on its webhooks). The cloud key policy must name the same measurement (an enclave's pcr0) before the service can use its keys: the operator changes that, and docs/reference.md says how.",
+        "Admin: announce a build of the confidential service by what the hardware measures, as CI's confidential-image job printed it for that commit: pcr0, pcr1 and pcr2 for the enclave image (the default host), or image_digest for a confidential-VM container. It takes effect 48 hours later (the first ever at once); until then Mynt's server won't talk to a service running it. Audited, and told to every licence-provider firm (a notice to each member and confidential.release_announced on its webhooks). The cloud key policy must name the same measurement (an enclave's pcr0) before the service can use its keys: the operator changes that, and docs/reference/confidential-computing.md (The key policy) says how.",
       inputSchema: {
         pcr0: z.string().regex(PCR_PATTERN).optional().describe("Enclave image: 96 lowercase hex digits, as CI printed it"),
         pcr1: z.string().regex(PCR_PATTERN).optional().describe("Enclave kernel and boot ramdisk"),

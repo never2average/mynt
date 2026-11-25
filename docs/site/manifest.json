@@ -12,7 +12,7 @@
             { "file": "README.md", "heading": "The problem Mynt removes" },
             { "file": "README.md", "heading": "Two ideas behind everything" },
             { "file": "README.md", "heading": "How it works, end to end" },
-            { "file": "README.md", "heading": "Who Mynt is for", "title": "Who Mynt is for" },
+            { "file": "README.md", "heading": "Who Mynt is for" },
             { "file": "README.md", "heading": "Ground rules Mynt enforces for you", "title": "Ground rules" }
           ]
         },
@@ -22,8 +22,12 @@
           "title": "Authentication & roles",
           "kind": "roles",
           "sources": [
-            { "file": "docs/architecture.md", "heading": "2. The three front doors", "title": "Front doors and their credentials" },
-            { "file": "docs/architecture.md", "heading": "3. Roles and tool registration", "title": "How tools are registered per role" }
+            { "file": "docs/reference/roles-and-tools.md", "heading": "Who does what" },
+            { "file": "docs/reference/roles-and-tools.md", "heading": "How roles nest" },
+            { "file": "docs/reference/roles-and-tools.md", "heading": "Tools everyone gets" },
+            { "file": "docs/reference/workspaces-and-sign-in.md", "heading": "Invite-only sign-in" },
+            { "file": "docs/architecture.md", "heading": "The HTTP front door", "title": "Front doors and their credentials" },
+            { "file": "docs/architecture.md", "heading": "Roles and tool registration", "title": "How tools are registered per role" }
           ]
         },
         {
@@ -31,8 +35,10 @@
           "title": "Your first app",
           "kind": "first-app",
           "sources": [
-            { "file": "docs/reference.md", "heading": "Innovator workflow: idea → staging → production", "title": "Compose, test, promote" },
-            { "file": "README.md", "heading": "What a developer ships" }
+            { "file": "docs/reference/products.md", "heading": "Product stages", "title": "Compose, test, promote" },
+            { "file": "README.md", "heading": "What a developer ships" },
+            { "file": "docs/reference/workspaces-and-sign-in.md", "heading": "Stages and promotion", "title": "Promote the app" },
+            { "file": "docs/reference/agreements.md", "heading": "Production needs program agreements" }
           ]
         }
       ]
@@ -45,112 +51,189 @@
           "slug": "concepts/products",
           "title": "Products & primitives",
           "sources": [
-            { "file": "README.md", "heading": "1. A financial product is a composition", "title": "A product is a composition" },
-            {
-              "file": "docs/reference.md",
-              "heading": "Product lines, actions and primitives",
-              "skip": ["Legal entities: facts, parties and GRC folders", "Run it yourself: check the seed definitions against a Mynt server", "Set up a region's regulatory model: the United States"]
-            },
-            { "file": "docs/reference.md", "heading": "Versioning (innovators)", "title": "Versioning" },
-            { "file": "docs/reference.md", "heading": "The product desk (innovators)", "title": "The product desk" }
+            { "file": "README.md", "heading": "A financial product is a composition", "title": "A product is a composition" },
+            { "file": "docs/reference/products.md", "heading": "Product lines, actions and primitives" },
+            { "file": "docs/reference/products.md", "heading": "Product definitions" },
+            { "file": "docs/reference/products.md", "heading": "Base products" },
+            { "file": "docs/reference/products.md", "heading": "Coverage per state" },
+            { "file": "docs/reference/products.md", "heading": "What Mynt stores on each product" },
+            { "file": "docs/reference/products.md", "heading": "The reference catalogue" },
+            { "file": "docs/reference/products.md", "heading": "Product stages" },
+            { "file": "docs/reference/products.md", "heading": "Archiving a product" },
+            { "file": "docs/reference/products.md", "heading": "Versioning" },
+            { "file": "docs/reference/products.md", "heading": "Product requests" },
+            { "file": "docs/reference/products.md", "heading": "Product ideas" },
+            { "file": "docs/reference/products.md", "heading": "The product desk" },
+            { "file": "docs/reference/products.md", "heading": "The product workspace in Studio" }
           ]
         },
         {
           "slug": "concepts/apps",
           "title": "Apps",
           "sources": [
-            { "file": "docs/reference.md", "heading": "Who does what: licensed innovators, software developers", "title": "Who does what" },
-            { "file": "docs/reference.md", "heading": "SDKs and experiences (developers)", "title": "SDKs and experiences" },
-            { "file": "docs/reference.md", "heading": "GTM engineering (campaigns)", "title": "Campaigns" }
+            { "file": "docs/reference/apps-and-builds.md", "heading": "Apps" },
+            { "file": "docs/reference/apps-and-builds.md", "heading": "Building on a product" },
+            { "file": "docs/reference/runtime-api.md", "heading": "SDKs and experiences" },
+            { "file": "docs/reference/apps-and-builds.md", "heading": "Campaigns" },
+            { "file": "docs/reference/studio.md", "heading": "The app workspace", "title": "The app in Studio" }
           ]
         },
         {
           "slug": "concepts/builds",
           "title": "Builds & verification",
           "sources": [
-            { "file": "README.md", "heading": "2. Agents build; Mynt verifies", "title": "Agents build; Mynt verifies" },
-            { "file": "docs/reference.md", "heading": "Coding-agent builds (developers)", "title": "Coding-agent builds" },
-            { "file": "docs/architecture.md", "heading": "6. The agent harness", "title": "The agent harness" },
-            { "file": "docs/reference.md", "heading": "Agent workspaces" }
+            { "file": "README.md", "heading": "Agents build; Mynt verifies" },
+            { "file": "docs/reference/apps-and-builds.md", "heading": "Coding-agent builds" },
+            { "file": "docs/reference/apps-and-builds.md", "heading": "Repositories" },
+            { "file": "docs/architecture.md", "heading": "The agent harness" },
+            { "file": "docs/reference/apps-and-builds.md", "heading": "Agent workspaces" }
           ]
         },
         {
           "slug": "concepts/hosting",
           "title": "Hosting",
-          "sources": [{ "file": "docs/architecture.md", "heading": "7. Hosting" }]
+          "sources": [
+            { "file": "docs/architecture.md", "heading": "Hosting", "title": "How hosting works" },
+            { "file": "docs/reference/apps-and-builds.md", "heading": "Hosting", "title": "Hosting an app" }
+          ]
         },
         {
           "slug": "concepts/runtime",
           "title": "Runtime API & client sessions",
           "kind": "runtime",
           "sources": [
-            { "file": "docs/architecture.md", "heading": "5. The runtime path: from a customer's device to a provider", "title": "From a customer's device to a provider" },
-            { "file": "docs/reference.md", "heading": "Runtime API, webhooks and sandbox (developers)", "title": "Runtime API, webhooks and sandbox" }
+            { "file": "docs/architecture.md", "heading": "The runtime path", "title": "From a customer's device to a provider" },
+            { "file": "docs/reference/runtime-api.md", "heading": "Keys" },
+            { "file": "docs/reference/runtime-api.md", "heading": "Calling the API" },
+            { "file": "docs/reference/runtime-api.md", "heading": "Hand-offs" },
+            { "file": "docs/reference/runtime-api.md", "heading": "Webhooks" },
+            { "file": "docs/reference/runtime-api.md", "heading": "Sandbox and releases" },
+            { "file": "docs/reference/runtime-api.md", "heading": "Client sessions" },
+            { "file": "docs/reference/runtime-api.md", "heading": "Journeys" },
+            { "file": "docs/reference/runtime-api.md", "heading": "The customer vault" },
+            { "file": "docs/reference/runtime-api.md", "heading": "Developer modules" },
+            { "file": "docs/reference/runtime-api.md", "heading": "Analytics" }
           ]
         },
         {
-          "slug": "concepts/earn",
-          "title": "Earn & liquidity",
+          "slug": "concepts/workspaces",
+          "title": "Workspaces",
           "sources": [
-            { "file": "docs/reference.md", "heading": "Liquidity pools", "skip": ["On-chain treasuries (devnet; mainnet behind an admin switch)"] },
-            { "file": "docs/reference.md", "heading": "Product health: an on-chain record licence providers can trust", "title": "Product health" }
+            { "file": "docs/reference/workspaces-and-sign-in.md", "heading": "Workspaces" },
+            { "file": "docs/reference/workspaces-and-sign-in.md", "heading": "Members and invitations" },
+            { "file": "docs/reference/workspaces-and-sign-in.md", "heading": "What a workspace owns" },
+            { "file": "docs/reference/workspaces-and-sign-in.md", "heading": "Stages and promotion" },
+            { "file": "docs/reference/workspaces-and-sign-in.md", "heading": "Attention" },
+            { "file": "docs/reference/workspaces-and-sign-in.md", "heading": "Profit and loss" },
+            { "file": "docs/reference/workspaces-and-sign-in.md", "heading": "Workspaces are the identity provider's organizations" },
+            { "file": "docs/reference/workspaces-and-sign-in.md", "heading": "Linked accounts" },
+            { "file": "docs/reference/workspaces-and-sign-in.md", "heading": "Chat sessions" }
           ]
         },
         {
-          "slug": "concepts/treasury",
-          "title": "Treasury & Solana",
+          "slug": "concepts/studio",
+          "title": "Mynt Studio",
           "sources": [
-            { "file": "docs/reference.md", "heading": "On-chain treasuries (devnet; mainnet behind an admin switch)", "title": "On-chain treasuries" },
-            { "file": "docs/reference.md", "heading": "Solana programs (developers)", "title": "Solana programs", "skip": ["Turnkey custody for the mainnet deploy authority"] }
+            { "file": "docs/reference/studio.md", "heading": "Mynt Studio" }
           ]
         },
         {
           "slug": "concepts/licences",
           "title": "Licences & partners",
           "sources": [
-            { "file": "docs/reference.md", "heading": "Licence providers: sponsoring builders' products", "title": "Licence providers", "skip": ["A sponsored US product, end to end"] },
-            { "file": "docs/reference.md", "heading": "Approved money rails", "title": "Money rails" },
-            { "file": "docs/reference.md", "heading": "Partner kit: connecting a licence provider's ledger", "title": "Partner kit" },
-            { "file": "docs/reference.md", "heading": "Confidential computing" },
-            { "file": "docs/reference.md", "heading": "Covenants: a licence provider's rules on a product it sponsors", "title": "Covenants" }
+            { "file": "docs/reference/licence-providers.md", "heading": "Sponsorship", "title": "Licence providers and sponsorship" },
+            { "file": "docs/reference/licence-providers.md", "heading": "Firm checks" },
+            { "file": "docs/reference/licence-providers.md", "heading": "Covenants" },
+            { "file": "docs/reference/licence-providers.md", "heading": "Partner kit" },
+            { "file": "docs/reference/money-rails.md", "heading": "Money rails" }
+          ]
+        },
+        {
+          "slug": "concepts/agreements",
+          "title": "Agreements",
+          "sources": [
+            { "file": "docs/reference/agreements.md", "heading": "Agreements" }
+          ]
+        },
+        {
+          "slug": "concepts/risk",
+          "title": "Risk",
+          "sources": [
+            { "file": "docs/reference/risk.md", "heading": "Risk" }
           ]
         },
         {
           "slug": "concepts/vendors",
           "title": "Vendors",
-          "sources": [{ "file": "docs/reference.md", "heading": "Vendors: standard services, per region" }]
+          "sources": [
+            { "file": "docs/reference/vendors-and-marketplace.md", "heading": "Vendors and the marketplace" }
+          ]
         },
         {
-          "slug": "concepts/workspaces",
-          "title": "Workspaces",
+          "slug": "concepts/earn",
+          "title": "Earn & liquidity",
           "sources": [
-            { "file": "docs/reference.md", "heading": "Workspaces" },
-            { "file": "docs/reference.md", "heading": "Linked accounts" }
+            { "file": "docs/reference/liquidity-and-treasury.md", "heading": "Liquidity pools" },
+            { "file": "docs/reference/liquidity-and-treasury.md", "heading": "The withdrawal queue" },
+            { "file": "docs/reference/licence-providers.md", "heading": "Product health" },
+            { "file": "docs/reference/liquidity-and-treasury.md", "heading": "Earn in Studio" }
+          ]
+        },
+        {
+          "slug": "concepts/treasury",
+          "title": "Treasury & Solana",
+          "sources": [
+            { "file": "docs/reference/liquidity-and-treasury.md", "heading": "On-chain treasuries" },
+            { "file": "docs/reference/solana-programs.md", "heading": "Solana programs", "skip": ["Turnkey custody"] }
+          ]
+        },
+        {
+          "slug": "concepts/confidential-computing",
+          "title": "Confidential computing",
+          "sources": [
+            { "file": "docs/reference/confidential-computing.md", "heading": "Confidential computing" }
           ]
         },
         {
           "slug": "concepts/compliance",
           "title": "Audits & compliance",
           "sources": [
-            { "file": "docs/reference.md", "heading": "Administration" },
-            { "file": "docs/reference.md", "heading": "Legal entities: facts, parties and GRC folders", "title": "Legal entities" },
-            { "file": "docs/reference.md", "heading": "The governance desk (admins)", "title": "The governance desk" },
-            { "file": "docs/architecture.md", "heading": "10. Trust boundaries", "title": "Trust boundaries" }
+            { "file": "docs/reference/workspaces-and-sign-in.md", "heading": "Compliance and the audit trail" },
+            { "file": "docs/reference/agreements.md", "heading": "Oversight audits" },
+            { "file": "docs/reference/licence-providers.md", "heading": "Legal entities" },
+            { "file": "docs/reference/platform-admin.md", "heading": "The governance desk" },
+            { "file": "docs/architecture.md", "heading": "Trust boundaries" }
+          ]
+        },
+        {
+          "slug": "concepts/platform-admin",
+          "title": "Platform admin",
+          "sources": [
+            { "file": "docs/reference/platform-admin.md", "heading": "Platform administration", "skip": ["Set up a region's regulatory model", "Check the seed definitions"] }
           ]
         },
         {
           "slug": "concepts/architecture",
           "title": "Architecture",
           "sources": [
-            { "file": "docs/architecture.md", "heading": "1. The system in one picture", "title": "The system in one picture" },
-            { "file": "docs/architecture.md", "heading": "4. The domain core", "title": "The domain core" },
-            { "file": "docs/architecture.md", "heading": "8. Data", "title": "Data" },
-            { "file": "docs/architecture.md", "heading": "9. Background work", "title": "Background work" }
+            { "file": "docs/architecture.md", "heading": "The system in one picture" },
+            { "file": "docs/architecture.md", "heading": "The domain core" },
+            { "file": "docs/architecture.md", "heading": "Workspaces and stages" },
+            { "file": "docs/architecture.md", "heading": "Agreements and oversight" },
+            { "file": "docs/architecture.md", "heading": "Money and liquidity" },
+            { "file": "docs/architecture.md", "heading": "On-chain" },
+            { "file": "docs/architecture.md", "heading": "Confidential computing", "title": "Confidential computing in the architecture" },
+            { "file": "docs/architecture.md", "heading": "Data" },
+            { "file": "docs/architecture.md", "heading": "Background work" }
           ]
         }
       ]
     },
-    { "id": "tools", "title": "Tool reference", "pages": [] },
+    {
+      "id": "tools",
+      "title": "Tool reference",
+      "pages": []
+    },
     {
       "id": "guides",
       "title": "Guides",
@@ -158,35 +241,63 @@
         {
           "slug": "guides/partners",
           "title": "Connecting a licence provider",
-          "sources": [{ "file": "docs/partners.md", "heading": "Connecting a licence provider to Mynt" }]
+          "sources": [
+            { "file": "docs/partners.md", "heading": "Connecting a licence provider to Mynt" }
+          ]
         },
         {
           "slug": "guides/sponsored-product",
           "title": "A sponsored US product, end to end",
-          "sources": [{ "file": "docs/reference.md", "heading": "A sponsored US product, end to end" }]
+          "sources": [
+            { "file": "docs/reference/licence-providers.md", "heading": "A sponsored US product, end to end" }
+          ]
         },
         {
           "slug": "guides/regulatory-model",
           "title": "Set up a region's regulatory model",
-          "sources": [{ "file": "docs/reference.md", "heading": "Set up a region's regulatory model: the United States" }]
+          "sources": [
+            { "file": "docs/reference/platform-admin.md", "heading": "Set up a region's regulatory model" }
+          ]
         },
         {
           "slug": "guides/seed-definitions",
           "title": "Check the seed definitions",
-          "sources": [{ "file": "docs/reference.md", "heading": "Run it yourself: check the seed definitions against a Mynt server" }]
+          "sources": [
+            { "file": "docs/reference/platform-admin.md", "heading": "Check the seed definitions" }
+          ]
         },
         {
           "slug": "guides/partner-walkthrough",
           "title": "The partner walkthrough",
-          "sources": [{ "file": "docs/demo.md", "heading": "The partner walkthrough" }]
+          "sources": [
+            { "file": "docs/demo.md", "heading": "The partner walkthrough" }
+          ]
         },
         {
           "slug": "guides/run-it-yourself",
           "title": "Run Mynt yourself",
           "sources": [
-            { "file": "docs/reference.md", "heading": "Install & build" },
-            { "file": "docs/reference.md", "heading": "Users and tokens" },
-            { "file": "docs/reference.md", "heading": "Run it" }
+            { "file": "docs/reference/operations.md", "heading": "Install and build" },
+            { "file": "docs/reference/operations.md", "heading": "Users and tokens" },
+            { "file": "docs/reference/operations.md", "heading": "Run it" },
+            { "file": "docs/reference/operations.md", "heading": "Sign-in with Clerk" }
+          ]
+        },
+        {
+          "slug": "guides/deploy",
+          "title": "Deploy Mynt",
+          "sources": [
+            { "file": "docs/reference/operations.md", "heading": "Deploying" },
+            { "file": "docs/reference/operations.md", "heading": "Backups" },
+            { "file": "docs/reference/operations.md", "heading": "Settings by name" },
+            { "file": "docs/reference/operations.md", "heading": "Starting empty" }
+          ]
+        },
+        {
+          "slug": "guides/mainnet-custody",
+          "title": "Mainnet custody with Turnkey",
+          "sources": [
+            { "file": "docs/reference/solana-programs.md", "heading": "Turnkey custody" }
           ]
         }
       ]

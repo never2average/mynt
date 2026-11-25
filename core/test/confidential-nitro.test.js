@@ -48,7 +48,7 @@ test("the pinned root is AWS's Nitro Enclaves root: its documented fingerprint, 
   assert.equal(root.publicKey.asymmetricKeyDetails.namedCurve, "secp384r1");
   assert.equal(new Date(root.validTo).getUTCFullYear(), 2049);
   // The documentation names the same fingerprint, so partners can compare.
-  assert.ok(readFileSync(fileURLToPath(new URL("../../docs/reference.md", import.meta.url)), "utf8").includes(DOCUMENTED_ROOT_FINGERPRINT));
+  assert.ok(readFileSync(fileURLToPath(new URL("../../docs/reference/confidential-computing.md", import.meta.url)), "utf8").includes(DOCUMENTED_ROOT_FINGERPRINT));
 });
 
 // ---- the document check ----

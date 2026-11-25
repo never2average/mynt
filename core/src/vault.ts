@@ -7,7 +7,7 @@ import { DATA_DICTIONARY, type CaptureMethod } from "./data-dictionary.js";
 // outlives a restart. Values are never returned to devices: only which fields are held, masked.
 //
 // The vault key is MYNT_VAULT_KEY (32 bytes, base64) until the operator moves it into the confidential host
-// (confidential/index.ts, docs/reference.md "Confidential computing"). After that, the host releases two keys into this
+// (confidential/index.ts, docs/reference/confidential-computing.md). After that, the host releases two keys into this
 // process at boot, and MYNT_VAULT_KEY can be removed from the server:
 //   - a data key: new values are sealed with it (format v2), and the migration re-wraps every v1 value to it;
 //   - HKDF-Extract of MYNT_VAULT_KEY: every key derived from it (derivedKey, the durable sandbox key) is HKDF-Expand of

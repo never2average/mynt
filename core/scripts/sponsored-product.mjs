@@ -7,7 +7,7 @@
 // The fixture (schemas/examples/us/sponsored-product.placeholder.json) names the licence provider's firm, its
 // licences and roster, the builder's firm and the product. The shipped one is a placeholder, for staging and
 // tests only, and is refused unless `staging` is set; for the real partner, copy it, set placeholder to false
-// and put in the real firm and licences (docs/reference.md, "A sponsored US product").
+// and put in the real firm and licences (docs/reference/licence-providers.md, "A sponsored US product, end to end").
 //
 // Three people act, each over their own session: `call(name, input, actor)` with actor "admin", "licence_provider"
 // or "builder" returns { isError, data }. `actors` lists the sessions there are; the run stops where it needs one

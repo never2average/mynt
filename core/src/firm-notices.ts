@@ -187,7 +187,7 @@ export async function recoveryLock(store: Store, entityId: string, subjectId: st
 }
 
 // First call: starts it (only when nobody at the firm can decide), told to every current and past licence provider.
-// A call after RECOVERY_DELAY with no block completes it. One admin is enough: production has one (docs/reference.md).
+// A call after RECOVERY_DELAY with no block completes it. One admin is enough: production has one (docs/reference/licence-providers.md, "When nobody can decide").
 // Both calls are refused while the firm's recovery is locked (recoveryLock) or someone at the firm can decide.
 export async function recoverMembership(store: Store, requestId: string, admin: User, reason: string, now = new Date()): Promise<{ error: string } | Record<string, unknown>> {
   const r = await requestById(store, requestId);

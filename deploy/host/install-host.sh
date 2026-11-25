@@ -162,8 +162,8 @@ if ! grep -qs '^MYNT_PSEUDONYM_SECRET=' "$ENV_DIR/env"; then
   printf 'MYNT_PSEUDONYM_SECRET=%s\n' "$(openssl rand -hex 32)" >>"$ENV_DIR/env"
 fi
 # Encrypts the customer vault at rest; generated once and kept across runs (losing it loses the vault). Not once the
-# vault's keys have moved to the confidential host (CONFIDENTIAL_HOST set to anything but local; docs/reference.md,
-# Confidential computing): its removal is the point of that migration.
+# vault's keys have moved to the confidential host (CONFIDENTIAL_HOST set to anything but local;
+# docs/reference/confidential-computing.md): its removal is the point of that migration.
 CONFIDENTIAL_HOST_KIND=$(grep -s '^CONFIDENTIAL_HOST=' "$ENV_DIR/env" | cut -d= -f2- || true)
 if ! grep -qs '^MYNT_VAULT_KEY=' "$ENV_DIR/env" && { [ -z "$CONFIDENTIAL_HOST_KIND" ] || [ "$CONFIDENTIAL_HOST_KIND" = local ]; }; then
   umask 077
@@ -233,7 +233,7 @@ install -d -m 755 /var/lib/mynt
 if [ ! -e "$ENV_DIR/backup.env" ]; then
   install -m 600 /dev/null "$ENV_DIR/backup.env"
   cat >"$ENV_DIR/backup.env" <<'EOF'
-# Off-site backup copies: see "Backups" in Mynt's docs/reference.md. KEY=value lines; this file is root-only.
+# Off-site backup copies: see "Backups" in Mynt's docs/reference/operations.md. KEY=value lines; this file is root-only.
 # BACKUP_AGE_RECIPIENT=age1...
 # BACKUP_REMOTE=myntbackup:<bucket>/mynt
 # RCLONE_CONFIG_MYNTBACKUP_TYPE=s3

@@ -256,7 +256,7 @@
     },
     {
       "role": "admin",
-      "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
+      "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Also holds the builder, vendor and licence-provider roles (except the licence-provider tools that act as a member of the firm itself), but not the liquidity-provider role.",
       "tools": 411,
       "get_started": [
         {
@@ -1651,7 +1651,7 @@
     {
       "name": "announce_enclave_release",
       "title": "Announce a confidential service release",
-      "description": "Admin: announce a build of the confidential service by what the hardware measures, as CI's confidential-image job printed it for that commit: pcr0, pcr1 and pcr2 for the enclave image (the default host), or image_digest for a confidential-VM container. It takes effect 48 hours later (the first ever at once); until then Mynt's server won't talk to a service running it. Audited, and told to every licence-provider firm (a notice to each member and confidential.release_announced on its webhooks). The cloud key policy must name the same measurement (an enclave's pcr0) before the service can use its keys: the operator changes that, and docs/reference.md says how.",
+      "description": "Admin: announce a build of the confidential service by what the hardware measures, as CI's confidential-image job printed it for that commit: pcr0, pcr1 and pcr2 for the enclave image (the default host), or image_digest for a confidential-VM container. It takes effect 48 hours later (the first ever at once); until then Mynt's server won't talk to a service running it. Audited, and told to every licence-provider firm (a notice to each member and confidential.release_announced on its webhooks). The cloud key policy must name the same measurement (an enclave's pcr0) before the service can use its keys: the operator changes that, and docs/reference/confidential-computing.md (The key policy) says how.",
       "area": "admin",
       "roles": [
         "admin"

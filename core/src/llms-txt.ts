@@ -31,7 +31,7 @@ export const ROLE_SUMMARY: Record<Role, string> = {
   vendor: "a firm offering standard services per region (identity, KYC, account data, bureau, e-sign, e-mandate, the ramp) that builders plug into products. A peer of builders.",
   license_provider: "a firm, added by an admin, holding licences (verified by admins) that sponsor builders' products: it approves, declines or revokes sponsorship of a product's component under a held licence, in the jurisdictions it covers. A peer of builders.",
   liquidity_provider: "a firm or fund, added by an admin, that puts capital into products' pools and takes it out, watching each product's health to decide where capital goes. Mynt never holds its funds. A peer of builders.",
-  admin: "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
+  admin: "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Also holds the builder, vendor and licence-provider roles (except the licence-provider tools that act as a member of the firm itself), but not the liquidity-provider role.",
 };
 
 // The first tools each role should call. test/llms-txt.test.js checks every name against the role's real tools.
@@ -94,11 +94,11 @@ export function llmsTxt(base: string): string {
   ).join("\n\n");
   return `# Mynt
 
-> Mynt is Lovable for finance apps: a platform where builders compose financial products from regulated primitives and build apps on them with coding agents that Mynt verifies and hosts, licence providers sponsor those products under their licences, vendors offer standard services per region, and admins keep the regulatory model. Everything is reached through one MCP server.
+> Mynt is Lovable for finance apps: a platform where builders compose financial products from regulated primitives and build apps on them with coding agents that Mynt verifies and hosts, licence providers sponsor those products under their licences, vendors offer standard services per region, liquidity providers put capital into products' pools, and admins keep the regulatory model. Everything is reached through one MCP server.
 
 Mynt's MCP endpoint is \`${base}/mcp\` (Streamable HTTP, JSON-RPC over POST). Sign in with OAuth: the authorization server is advertised at \`${base}/.well-known/oauth-protected-resource/mcp\` (RFC 9728), and any MCP client that supports OAuth discovers it from the \`WWW-Authenticate\` header of a 401. Access is by invitation: an admin invites you with your roles, and you sign in with the email they invited.
 
-Tools are registered per user, so you only see the tools your roles allow. Roles nest (admin > builder > consumer); innovator and developer are two names for the builder role, and vendors and licence providers stand beside builders:
+Tools are registered per user, so you only see the tools your roles allow. Roles nest (admin > builder > consumer); innovator and developer are two names for the builder role, and vendors, licence providers and liquidity providers stand beside builders. An admin also holds the vendor and licence-provider roles, but not the liquidity-provider role:
 
 ${ROLES.map((r) => `- **${r}**: ${ROLE_SUMMARY[r]}`).join("\n")}
 
@@ -112,10 +112,10 @@ ${started}
 
 - [Every tool, per role, with inputs](${base}/llms-full.txt): generated from the live tool registry, plus the runtime API and the vendor contract
 - [README](${repo}#readme): what Mynt is and why
-- [Technical reference](${repo}/blob/main/docs/reference.md): tools, the runtime API, hosting, deployment and operations
-- [Roles and their tools](${repo}/blob/main/docs/reference.md#mynt-technical-reference)
-- [Vendors: standard services per region](${repo}/blob/main/docs/reference.md#vendors-standard-services-per-region)
-- [Product lines, actions and primitives](${repo}/blob/main/docs/reference.md#product-lines-actions-and-primitives)
+- [Technical reference](${repo}/blob/main/docs/reference.md): the index to the reference files, one per area
+- [Roles and their tools](${repo}/blob/main/docs/reference/roles-and-tools.md)
+- [Vendors: standard services per region](${repo}/blob/main/docs/reference/vendors-and-marketplace.md)
+- [Product lines, actions and primitives](${repo}/blob/main/docs/reference/products.md#product-lines-actions-and-primitives)
 - [Architecture](${repo}/blob/main/docs/architecture.md)
 
 ## Machine-readable

@@ -16,7 +16,7 @@ import { CATALOG } from "./helpers.js";
 // in-process server with the US model as data (schemas/regulatory/us.json).
 
 // The placeholder licence provider isn't a real company, so no public register can show it is one: staging runs
-// it with the legitimacy gate off, as here (see docs/reference.md, "Is the licence provider a real company?").
+// it with the legitimacy gate off, as here (see docs/reference/licence-providers.md, Firm checks).
 process.env.SPONSOR_LEGITIMACY_RULE = "off";
 
 const MODEL = JSON.parse(readFileSync(new URL("../schemas/regulatory/us.json", import.meta.url), "utf8"));

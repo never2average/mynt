@@ -12,7 +12,7 @@ Mynt's platform, not an app built on it. It's an MCP server (TypeScript, Node, P
 
 1. If `AGENTS.local.md` exists next to this file, read it. It holds this machine's and this operator's own rules (git-ignored, never committed) and wins over this file where they differ.
 2. For the server: `cd core && npm ci && npm run build` (core's own lockfile, as production installs it). For the apps: `npm ci` at the root, which installs the `platform/` workspaces and never touches `core/`. The build must be clean before anything else.
-3. Read what the job needs: `README.md` explains the product, `docs/reference.md` the tools, the runtime API, hosting and deployment, and `docs/architecture.md` how the parts fit together.
+3. Read what the job needs: `README.md` explains the product; `docs/reference.md` is the index to the reference files in `docs/reference/` (one per area: the tools, the runtime API, hosting, deployment and operations); and `docs/architecture.md` explains how the parts fit together.
 4. Then do what was asked, using the map below.
 
 ## Where each job lives
@@ -34,7 +34,7 @@ Mynt's platform, not an app built on it. It's an MCP server (TypeScript, Node, P
 | "Change the sample chat app or developer console" | `platform/chat/` | `cd platform/chat && npx vitest run && npx tsc --noEmit` |
 | "Change Mynt Studio" (the chat-to-build web app, built on Adorable) | `platform/studio/` (its README lists what was changed from Adorable) | `cd platform/studio && npx vitest run && npx tsc --noEmit`; CI's `platform` job also builds it |
 | "Change sign-in for Studio and the chat" | `platform/packages/auth/` (`@mynt/auth`; each app hands it its settings, cookie name and session store in `lib/session.ts`) | both apps' checks, and `npx tsc --noEmit -p platform/packages/auth` |
-| "Change the docs site" (Studio's public `/docs`: the tool reference and pages from the repository's Markdown) | `docs/site/manifest.json` (which headings make which page), `core/src/docs-site.ts`, `core/src/tool-catalogue.ts` (tool areas), `platform/studio/app/docs/`, `platform/studio/components/docs/`; after changing a tool, a role or a quoted doc, `cd core && npm run build && npm run docs-data` and commit `docs/site/*.json` | `core/test/tool-catalogue.test.js` (fails when the committed data is stale); `cd platform/studio && npx vitest run test/docs.test.tsx` |
+| "Change the docs site" (Studio's public `/docs`: the tool reference and pages from the repository's Markdown) | `docs/site/manifest.json` (which headings make which page), `core/src/docs-site.ts`, `core/src/tool-catalogue.ts` (tool areas), `platform/studio/app/docs/`, `platform/studio/components/docs/`; after changing a tool, a role or a quoted doc (`README.md`, `docs/*.md` and `docs/reference/*.md`), `cd core && npm run build && npm run docs-data` and commit `docs/site/*.json` | `core/test/tool-catalogue.test.js` (fails when the committed data is stale); `cd platform/studio && npx vitest run test/docs.test.tsx` |
 | "What needs attention in production?" | the `ops_status` admin tool | |
 
 ## How to check your work
