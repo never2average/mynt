@@ -180,6 +180,14 @@ describe("My services (service providers) on the allow-list", () => {
     expect(parseStudioCall("update_vendor_offering", { offering_id: OFF, listed: true })).toHaveProperty("tool");
     expect(parseStudioCall("update_vendor_offering", { offering_id: "x", listed: true })).toHaveProperty("error");
     expect(parseStudioCall("run_conformance", { offering_id: OFF, test_credential: "c" })).toHaveProperty("tool");
+    // Run practice test takes the service and nothing else; a new draft may have no test endpoint yet (never an http one).
+    expect(parseStudioCall("run_practice_conformance", { offering_id: OFF })).toHaveProperty("tool");
+    expect(parseStudioCall("run_practice_conformance", { offering_id: OFF, test_credential: "c" })).toHaveProperty("error");
+    expect(parseStudioCall("run_practice_conformance", { offering_id: OFF, practice: false })).toHaveProperty("error");
+    expect(parseStudioCall("run_practice_conformance", { offering_id: "x" })).toHaveProperty("error");
+    expect(parseStudioCall("run_practice_conformance", {})).toHaveProperty("error");
+    const { test_base_url: _none, ...draft } = create;
+    expect(parseStudioCall("create_vendor_offering", draft)).toHaveProperty("tool");
     // Subscribers' signing secrets stay with the MCP tools.
     for (const t of ["reveal_subscription_secret", "rotate_subscription_secret", "suspend_vendor_offering", "define_service_type"]) expect(parseStudioCall(t, {})).toHaveProperty("error");
   });

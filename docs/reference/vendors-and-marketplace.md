@@ -69,7 +69,7 @@ In the examples: PAN and identity verification and bank account verification giv
 
 `create_vendor_offering` offers a service type in a region. It names:
 
-- a test HTTPS endpoint, and later a live one;
+- a test HTTPS endpoint, and later a live one. The test endpoint may be left out of a new draft, so a vendor can [practise first](#practising-first-the-vendor-sandbox); `run_conformance` and listing need it (`update_vendor_offering { test_base_url }`);
 - a fixed price per call, for builders to see. Billing is between vendor and builder, never through Mynt;
 - service-level agreement (SLA) notes;
 - the firm's licences it relies on.
@@ -86,6 +86,39 @@ Mynt tests the offering itself with `run_conformance`:
 - the vendor's licences checked against the service type.
 
 A pass makes the offering `conformance_passed`. `update_vendor_offering { listed: true }` then lists it. Changing an endpoint or licences sends it back to draft.
+
+### Practising first: the vendor sandbox
+
+A vendor that has no test endpoint yet can still see Mynt's test run. Mynt serves a practice endpoint itself for every offering (`core/src/vendor-sandbox.ts`):
+
+```http
+POST <PUBLIC_URL>/vendor-sandbox/<offering_id>
+```
+
+(`<PUBLIC_URL>/vendor-sandbox/<offering_id>/v1/<service_type_key>` is the same endpoint, in the wire contract's own shape.)
+
+It behaves as a correct vendor of the offering's service type:
+
+- it verifies `Mynt-Signature` with the offering's conformance signing secret, and answers `401` to a bad signature or one more than 300 seconds old (and to an offering that doesn't exist, so it never says which do);
+- it checks `input` against the service type's input schema;
+- it answers with a fixture `output` valid against the output schema, built from the schema itself: a property's `const`, `default`, first `examples` value or first `enum` value, else Mynt's sandbox fixture for a data dictionary field of that name, else the simplest value its type, format and pattern allow. The same schema always gives the same answer (a quote's `expires_at` is one minute ahead). If Mynt can't build a valid answer for a schema it says so (`no_sandbox_answer`) and never sends an invalid one;
+- it takes bodies up to 64 KB, 30 requests a minute per offering, makes no outbound call, and keeps nothing a caller sends. Its inputs are Mynt's sandbox fixtures, never customer data.
+
+`run_practice_conformance { offering_id }` runs **the same test cases as `run_conformance`** against that endpoint, in-process, so nothing leaves Mynt and no credential is needed (ten runs a minute per offering). It returns:
+
+- `kind: "practice"`, `passed`, `counts_as_conformance: false`, the offering's unchanged `status`, and each case's result;
+- `reference`: what Mynt sends and expects for the service type, to build an endpoint against. It has the request (`sends`: method, address, the signature rule, the input and params schemas), the answer (`expects`: the shape, the time limit and the output schema), and `transcript`: every request Mynt sent in the run and the answer it got, with what Mynt expected of each. The signing secret is never in it, and each `Mynt-Signature` is shown as `t=<seconds>,v1=<redacted>`.
+
+On a pass it says: "Practice run passed — now point Mynt at your own test endpoint and run the real test".
+
+A practice pass is never conformance:
+
+- **It never moves an offering.** A practice run doesn't change an offering's status, so it never makes one `conformance_passed`, and listing still needs a real pass on the vendor's own endpoint.
+- **It is recorded apart.** Practice runs are kept in their own table (`vendor_practice_runs`, `kind: "practice"`), which nothing that reads conformance reads: not listing, not the marketplace's conformance result, not `list_my_offerings`' `last_conformance`, not `ops_status` or the risk register.
+- **The sandbox answers practice only.** A practice request is marked `consent.artefact_ref: "mynt_practice"`; the real test marks its requests `mynt_conformance`, which the sandbox refuses (`practice_only`). So the real test fails against the sandbox however a request reaches it.
+- **The sandbox is never an offering's endpoint.** `create_vendor_offering` and `update_vendor_offering` refuse a test or live endpoint whose path is `/vendor-sandbox`, and `run_conformance` refuses again.
+
+An admin running it for another firm's offering is audited as `admin_run_practice_conformance`.
 
 ### Suspension and admin changes
 
@@ -242,7 +275,8 @@ Each step has a `key`, a `title`, a `status`, a `detail` in plain words, the `to
 | `first_service` (firm) | The firm has an offering | Next: `create_vendor_offering`. Blocked while nobody at the firm has the vendor role |
 | `service_created` (offering) | Always, with its service type and region | |
 | `licence` (offering, only when the service type needs a vendor licence) | A verified, in-force licence of one of the types is named on the offering | Register one (`register_license`). Blocked while Mynt verifies it (`review_license`) or has suspended it. Register again if rejected or lapsed. Name it on the offering (`update_vendor_offering { licence_ids }`) |
-| `conformance` (offering) | The latest `run_conformance` passed and the offering is `conformance_passed` or `listed` (`facts.last_run`: when, who, failures) | Run it, or run it again after a failure (named in the detail) or a change of endpoint or licences. Blocked while the licence waits on Mynt |
+| `practice` (offering, informational) | The latest `run_practice_conformance` passed (`facts.last_run`, `facts.counts_as_conformance: false`). The detail says to point Mynt at the vendor's own endpoint and run the real test | Not started: optional, never counted, and never the `conformance` step (see [Practising first](#practising-first-the-vendor-sandbox)) |
+| `conformance` (offering) | The latest `run_conformance` passed and the offering is `conformance_passed` or `listed` (`facts.last_run`: when, who, failures; `facts.test_endpoint`: whether the offering has its own) | Run it, or run it again after a failure (named in the detail) or a change of endpoint or licences. With no test endpoint yet, give one first (`update_vendor_offering { test_base_url }`). Blocked while the licence waits on Mynt |
 | `terms` (offering) | Standard terms naming their scopes are on file (`facts.terms_version`, `facts.scopes`) | Set them, with their scopes (`update_vendor_offering { standard_terms }`). App teams can't subscribe from the Marketplace without them |
 | `listed` (offering) | Listed | List it once it passed (`update_vendor_offering { listed: true }`) |
 | `first_subscriber` (offering, informational) | A firm subscribes (`facts.subscribers`) | Not started: it is the subscribers' choice, and never counted |
@@ -258,6 +292,7 @@ A suspended offering's steps wait on Mynt (`suspend_vendor_offering`). Terms alr
 With `offering_id`, `history` adds:
 
 - that offering's conformance runs, newest first, up to 20;
+- its practice runs (`practice_runs`), apart from them, newest first, up to 20;
 - every version of its standard terms Mynt knows: the current one in full, and earlier ones from the audit log (version, SHA-256, scopes, when, by whom) and from the agreements that accepted them, with how many did.
 
 A figure Mynt doesn't keep (an earlier version's summary nobody accepted, a firm not yet registered) is `null`, never 0.
@@ -266,9 +301,10 @@ A figure Mynt doesn't keep (an earlier version's summary nobody accepted, a firm
 
 Mynt Studio shows the checklist to vendors as My services (`/vendor`, in the sidebar only for accounts with the vendor role):
 
-- the checklist on top, each step's status in words, with a labelled button where Studio can do it: Create service, Run conformance, Set standard terms, List service;
+- the checklist on top, each step's status in words, with a labelled button where Studio can do it: Create service, Run practice test, Run conformance, Set standard terms, List service. The practice run is a line "for information";
 - the firm's services in a table;
-- each service's details: Conformance runs, Terms versions, Subscribers.
+- each service's details: Conformance runs, Practice runs, Terms versions, Subscribers;
+- Run practice test, beside Run conformance on a service, opens a sheet with each case's result, what Mynt sends and expects, and the run's transcript (Download transcript saves it as JSON). Create service takes a service with no test endpoint yet, to practise on.
 
 The platform admin's Vendors section has a Vendor firms tab with each firm's onboarding progress (see [The platform admin in Studio](platform-admin.md#the-platform-admin-in-studio)).
 
@@ -577,7 +613,7 @@ The body is:
 - `environment` is `test` or `live`.
 - `input` is valid against the service type's `input_schema`.
 - `params` is sent only for a service type with a `params_schema`.
-- `quote` is sent only for a service type that accepts a quote. In conformance runs its `quote_id` is `mynt_conformance`.
+- `quote` is sent only for a service type that accepts a quote. In conformance runs its `quote_id` is `mynt_conformance`, as is `consent.artefact_ref`; in a practice run against [Mynt's sandbox](#practising-first-the-vendor-sandbox) both are `mynt_practice`.
 
 Mynt expects `200` with:
 

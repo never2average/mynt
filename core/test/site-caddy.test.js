@@ -38,6 +38,7 @@ const MYNT_PATHS = [
   "/v1/hosting/bootstrap",
   "/v1/ramp-adapters/partner/webhook",
   "/ramp-sandbox/session",
+  "/vendor-sandbox/2b0c6a52-0000-4000-8000-000000000000",
   "/agent/v1/messages",
   "/bd/unsubscribe",
   "/webhooks/clerk",
@@ -66,6 +67,7 @@ test("every path literal Mynt routes in src/http.ts is among the paths checked h
   const http = readFileSync("src/http.ts", "utf8");
   const constants = {
     RAMP_SANDBOX_PATH: /RAMP_SANDBOX_PATH = "([^"]+)"/.exec(readFileSync("src/ramp-sandbox.ts", "utf8"))[1],
+    VENDOR_SANDBOX_PATH: /VENDOR_SANDBOX_PATH = "([^"]+)"/.exec(readFileSync("src/vendor-sandbox.ts", "utf8"))[1],
     RAMP_ADAPTER_WEBHOOK_PATH: /RAMP_ADAPTER_WEBHOOK_PATH = "([^"]+)"/.exec(readFileSync("src/ramp-adapters/index.ts", "utf8"))[1],
   };
   const literals = [

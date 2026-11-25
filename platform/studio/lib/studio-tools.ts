@@ -70,7 +70,8 @@ const vendorOfferingEdits = {
 const vendorOfferingFields = {
   ...vendorOfferingEdits,
   name: z.string().trim().min(1).max(200),
-  test_base_url: httpsUrl,
+  // Optional on a new draft: a provider may practise against Mynt's sandbox first. Mynt's real test and listing need it.
+  test_base_url: httpsUrl.optional(),
   price: z.object({ amount: z.number().min(0).max(1_000_000), currency: z.string().regex(/^[A-Z]{3}$/) }).strict(),
 };
 export const standardTerms = z
@@ -281,7 +282,7 @@ export const STUDIO_TOOLS = {
     .strict(),
   unsubscribe_vendor_service: z.object({ subscription_id: uuid, reason: z.string().trim().min(3).max(2000).optional() }).strict(),
   // My services (/vendor), for service providers (Mynt's vendor role): their onboarding checklist and their firm's own
-  // services, with Create service, Edit service, Set standard terms, Run conformance and List / Unlist service. Each
+  // services, with Create service, Edit service, Set standard terms, Run practice test, Run conformance and List / Unlist service. Each
   // route checks the offering is the caller's firm's own (list_my_offerings) before it writes; Mynt checks again. A test
   // credential for a conformance run goes to Mynt only and isn't kept. Revealing or rotating subscribers' signing
   // secrets, and live endpoints' credentials, stay with the MCP tools.
@@ -306,6 +307,9 @@ export const STUDIO_TOOLS = {
     })
     .strict(),
   run_conformance: z.object({ offering_id: uuid, test_credential: z.string().min(1).max(2000).optional() }).strict(),
+  // Run practice test: Mynt's test cases against Mynt's own sandbox for the service. A practice pass never counts as
+  // conformance, never changes the service's status and never lets it be listed. It takes the service and nothing else.
+  run_practice_conformance: z.object({ offering_id: uuid }).strict(),
   get_app_customers: z.object({ app_id: id }).strict(),
   set_app_target_segments: z.object({ app_id: id, segments: z.array(z.object({ product_id: id, segment_id: id }).strict()).max(100) }).strict(),
   // Risk registers: an app's (its Security & risk tab) and a financial product's (its Risk tab). Add risk and

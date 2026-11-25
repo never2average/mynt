@@ -9,6 +9,7 @@ import { RAMP_ADAPTER_WEBHOOK_PATH, rampAdapterWebhook } from "./ramp-adapters/i
 import { ESIGN_WEBHOOK_PATH, esignWebhook } from "./agreement-esign.js";
 import { currentEsign } from "./esign-settings.js";
 import { RAMP_SANDBOX_PATH, rampSandbox } from "./ramp-sandbox.js";
+import { VENDOR_SANDBOX_PATH, vendorSandbox } from "./vendor-sandbox.js";
 import { createRuntimeApi, type RuntimeApiOptions } from "./runtime-api.js";
 import { createServer } from "./server.js";
 import { llmsFullCache, llmsTxt } from "./llms-txt.js";
@@ -136,6 +137,8 @@ async function handle(store: Store, clerk: ClerkAuth | null, ctx: AdminContext, 
   if (url.pathname === "/v1" || url.pathname.startsWith("/v1/")) return runtime(req, res, url);
   // The Mynt Ramp's sandbox endpoint: answers only requests Mynt signed for a ramp offering pointed at it.
   if (url.pathname.startsWith(`${RAMP_SANDBOX_PATH}/`)) return rampSandbox(store, req, res, url);
+  // The vendor sandbox: a practice endpoint per offering, answering only practice requests signed for that offering.
+  if (url.pathname.startsWith(`${VENDOR_SANDBOX_PATH}/`)) return vendorSandbox(store, req, res, url);
   // Build agents reach Anthropic through Mynt with a per-build token (see agent-proxy.ts).
   if (ctx.builds && url.pathname.startsWith("/agent/")) {
     const builds = ctx.builds;

@@ -182,7 +182,7 @@ A licence provider (`license_provider`) is a firm that holds licences, verified 
 
 A vendor offers standard services that builders plug into their products instead of each integrating them: identity checks, business verification, bank account verification, bureau reports, smart-contract audits and the Mynt Ramp. A vendor is a peer of builders, neither above nor below them. Mynt Studio calls vendors "service providers".
 
-- Offerings: `list_service_types`, `create_vendor_offering`, `update_vendor_offering`, `run_conformance`, `list_my_offerings` (see [Offerings and conformance](vendors-and-marketplace.md#offerings-and-conformance))
+- Offerings: `list_service_types`, `create_vendor_offering`, `update_vendor_offering`, `run_practice_conformance`, `run_conformance`, `list_my_offerings` (see [Offerings and conformance](vendors-and-marketplace.md#offerings-and-conformance))
 - Onboarding: `get_vendor_onboarding` (see [Onboarding a vendor](vendors-and-marketplace.md#onboarding-a-vendor))
 - Subscribers: `list_my_subscribers`, `reveal_subscription_secret`, `rotate_subscription_secret` (see [Subscriptions](vendors-and-marketplace.md#subscriptions))
 - The Mynt Ramp, for the firm that runs it: `set_ramp_adapter`, `link_ramp_partner_customer` (see [The Mynt Ramp](vendors-and-marketplace.md#the-mynt-ramp))

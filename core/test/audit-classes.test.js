@@ -41,7 +41,7 @@ const TEMPLATE_EXPANSIONS = {
   "${op}_refused": ["set_covenant_refused", "delete_covenant_refused", "acknowledge_breach_refused", "release_covenant_pause_refused"],
   "app_${kind}": ["app_status", "app_logs", "app_restart", "app_exec"],
   "review_${r.kind}": ["review_product_access", "review_campaign_launch"],
-  "admin_${action}": ["admin_update_vendor_offering", "admin_run_conformance", "admin_reveal_subscription_secret", "admin_rotate_subscription_secret"],
+  "admin_${action}": ["admin_update_vendor_offering", "admin_run_conformance", "admin_run_practice_conformance", "admin_reveal_subscription_secret", "admin_rotate_subscription_secret"],
 };
 
 test("every audit action in the source is classified, by one table, each in exactly one class", () => {

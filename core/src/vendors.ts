@@ -37,6 +37,7 @@ import {
   resolveCustomerState,
 } from "./money-rails.js";
 import { callVendor, resolveVendorUrl, signBody, type VendorCallOptions, type VendorResult } from "./vendor-call.js";
+import { pointsAtVendorSandbox, PracticeRefused, runPractice } from "./vendor-sandbox.js";
 import { inTransaction } from "./db.js";
 import { noticeFirm } from "./firm-notices.js";
 import { agreementScopeLabel } from "./app-agreements-schema.js";
@@ -142,7 +143,7 @@ export interface Offering {
   region: string;
   service_type: string;
   name: string;
-  test_base_url: string;
+  test_base_url: string | null; // null: a draft with no test endpoint yet (practice runs only; see vendor-sandbox.ts)
   live_base_url: string | null;
   price: { amount: number; currency: string; per: "call" };
   sla_notes: string;
@@ -197,7 +198,7 @@ const toOffering = (r: Row): Offering => ({
   region: r.region as string,
   service_type: r.service_type as string,
   name: r.name as string,
-  test_base_url: r.test_base_url as string,
+  test_base_url: (r.test_base_url as string | null) ?? null,
   live_base_url: (r.live_base_url as string | null) ?? null,
   price: r.price as Offering["price"],
   sla_notes: r.sla_notes as string,
@@ -271,7 +272,8 @@ async function callOffering(
     const payload = JSON.stringify(req.body);
     return serveRampAdapter(store, o, req.service_type, payload, req.signature ?? signBody(req.signing_secret, payload), req.environment, req.customer_key ?? null, opts);
   }
-  const base = req.environment === "test" ? o.test_base_url : o.live_base_url!;
+  const base = req.environment === "test" ? o.test_base_url : o.live_base_url;
+  if (!base) return { ok: false, http_status: null, body: null, error: `refused: the offering has no ${req.environment} endpoint`, latency_ms: 0 };
   return callVendor({ base_url: base, service_type: req.service_type, body: req.body, signing_secret: req.signing_secret, credential: req.credential, signature: req.signature }, opts);
 }
 
@@ -568,24 +570,36 @@ const licenceView = (l: HeldLicense) => ({ id: l.id, regulator_id: l.regulator_i
 
 // ---- conformance ----
 
-type CaseResult = { case: string; passed: boolean; http_status: number | null; latency_ms: number; problems: string[] };
+export type CaseResult = { case: string; passed: boolean; http_status: number | null; latency_ms: number; problems: string[] };
 
-// Mynt's own test of an offering's test endpoint: each fixture input, signed, must come back "ok" with output
-// valid against the service type's schema; a request with a bad signature must be refused.
-export async function runConformance(store: Store, o: Offering, t: ServiceType, opts: VendorCallOptions, by: string | null, credential?: string | null) {
-  const secret = open((await sealedColumn(store.db, "vendor_offerings", "conformance_secret", o.id))!, false);
+// What a conformance request's consent.artefact_ref (and a quote's placeholder quote_id) says: Mynt's real test, or a
+// practice run against Mynt's own sandbox (vendor-sandbox.ts), which answers only the latter.
+export const CONFORMANCE_REF = "mynt_conformance";
+export const PRACTICE_REF = "mynt_practice";
+
+// The test cases themselves, whoever answers them: each fixture input, signed, must come back "ok" with output valid
+// against the service type's schema; a request with a bad signature, and a correctly signed but stale one, must be
+// refused. `send` delivers one signed request (run_conformance: to the vendor's test endpoint; a practice run: to
+// Mynt's sandbox, in-process), so both run exactly these cases.
+export async function conformanceCases(
+  t: ServiceType,
+  secret: string,
+  send: (name: string, body: Record<string, unknown>, signature?: string) => Promise<VendorResult>,
+  ref: typeof CONFORMANCE_REF | typeof PRACTICE_REF = CONFORMANCE_REF,
+): Promise<CaseResult[]> {
   const cases: CaseResult[] = [];
   const request = (input: Record<string, unknown>) => ({
     request_id: randomUUID(),
     environment: "test",
     input,
     ...(t.params_schema ? { params: t.params_fixture ?? {} } : {}),
-    ...(t.accepts ? { quote: { quote_id: "mynt_conformance" } } : {}),
-    consent: { purpose: t.consent_purpose, artefact_ref: "mynt_conformance", given_at: new Date().toISOString() },
+    ...(t.accepts ? { quote: { quote_id: ref } } : {}),
+    consent: { purpose: t.consent_purpose, artefact_ref: ref, given_at: new Date().toISOString() },
   });
+  const refusedBy = (r: VendorResult) => (r.http_status != null && r.http_status >= 400 && r.http_status < 500) || (r.ok && (r.body as { status?: string } | null)?.status === "error");
   for (const [i, input] of t.fixtures.entries()) {
     const body = request(input);
-    const r = await callOffering(store, o, { environment: "test", service_type: t.key, body, signing_secret: secret, credential }, opts);
+    const r = await send(`fixture_${i + 1}`, body);
     const problems: string[] = [];
     if (!r.ok) problems.push(r.error ?? "failed");
     else problems.push(...responseProblems(r.body, body.request_id, t));
@@ -593,8 +607,8 @@ export async function runConformance(store: Store, o: Offering, t: ServiceType, 
   }
   {
     const body = request(t.fixtures[0] ?? {});
-    const r = await callOffering(store, o, { environment: "test", service_type: t.key, body, signing_secret: secret, credential, signature: signBody(newSecret(), JSON.stringify(body)) }, opts);
-    const refused = (r.http_status != null && r.http_status >= 400 && r.http_status < 500) || (r.ok && (r.body as { status?: string } | null)?.status === "error");
+    const r = await send("bad_signature_refused", body, signBody(newSecret(), JSON.stringify(body)));
+    const refused = refusedBy(r);
     cases.push({
       case: "bad_signature_refused",
       passed: refused,
@@ -607,8 +621,8 @@ export async function runConformance(store: Store, o: Offering, t: ServiceType, 
     // Correctly signed, but ten minutes old: a replay, which must be refused.
     const body = request(t.fixtures[0] ?? {});
     const stale = Math.floor(Date.now() / 1000) - 600;
-    const r = await callOffering(store, o, { environment: "test", service_type: t.key, body, signing_secret: secret, credential, signature: signBody(secret, JSON.stringify(body), stale) }, opts);
-    const refused = (r.http_status != null && r.http_status >= 400 && r.http_status < 500) || (r.ok && (r.body as { status?: string } | null)?.status === "error");
+    const r = await send("stale_timestamp_refused", body, signBody(secret, JSON.stringify(body), stale));
+    const refused = refusedBy(r);
     cases.push({
       case: "stale_timestamp_refused",
       passed: refused,
@@ -617,6 +631,18 @@ export async function runConformance(store: Store, o: Offering, t: ServiceType, 
       problems: refused ? [] : [r.error && r.http_status == null ? r.error : "a request signed more than 300 s ago wasn't refused (answer 401)"],
     });
   }
+  return cases;
+}
+
+// The offering's sealed conformance signing secret, opened. Never returned or logged.
+export async function conformanceSecret(store: Store, offeringId: string): Promise<string> {
+  return open((await sealedColumn(store.db, "vendor_offerings", "conformance_secret", offeringId))!, false);
+}
+
+// Mynt's own test of an offering's test endpoint (the cases above), with the vendor's licences checked too.
+export async function runConformance(store: Store, o: Offering, t: ServiceType, opts: VendorCallOptions, by: string | null, credential?: string | null) {
+  const secret = await conformanceSecret(store, o.id);
+  const cases = await conformanceCases(t, secret, (_name, body, signature) => callOffering(store, o, { environment: "test", service_type: t.key, body, signing_secret: secret, credential, signature }, opts));
   const gap = await vendorLicenceGap(store, o, t);
   const passed = cases.every((c) => c.passed) && !gap;
   const id = randomUUID();
@@ -831,7 +857,7 @@ export async function rampRefusal(store: Store, t: ServiceType, entityId: string
 }
 
 // A ramp's test and live endpoints must differ, so a sandbox transfer can't reach real money.
-function rampUrlsClash(t: ServiceType, test: string, live: string | null): string | null {
+function rampUrlsClash(t: ServiceType, test: string | null, live: string | null): string | null {
   // As URLs, not text: case, a default port and a trailing dot or slash make no difference, and nor does the scheme.
   const endpoint = (raw: string) => {
     try {
@@ -841,7 +867,7 @@ function rampUrlsClash(t: ServiceType, test: string, live: string | null): strin
       return raw.trim().toLowerCase();
     }
   };
-  return t.category === "ramp" && live !== null && endpoint(test) === endpoint(live) ? "A ramp offering's test_base_url and live_base_url must be different endpoints" : null;
+  return t.category === "ramp" && test !== null && live !== null && endpoint(test) === endpoint(live) ? "A ramp offering's test_base_url and live_base_url must be different endpoints" : null;
 }
 
 // ---- runtime: calls through a product's bound vendor ----
@@ -1538,7 +1564,7 @@ export async function endVendorSubscription(store: Store, s: Subscription, by: s
 const PriceSchema = z.object({ amount: z.number().min(0), currency: z.string().regex(/^[A-Z]{3}$/, "ISO 4217, e.g. INR, USD") });
 const OfferingFields = {
   name: z.string().min(1).max(200),
-  test_base_url: z.string().url().describe("HTTPS base URL of your test endpoint; Mynt calls POST <base>/v1/<service_type>"),
+  test_base_url: z.string().url().optional().describe("HTTPS base URL of your test endpoint; Mynt calls POST <base>/v1/<service_type>. May be left out of a new draft, to practise first (run_practice_conformance); run_conformance and listing need it"),
   live_base_url: z.string().url().optional().describe("HTTPS base URL of your live endpoint"),
   price: PriceSchema.describe("Your fixed price per call, for innovators to see; billing is between you and them, not through Mynt"),
   sla_notes: z.string().max(2000).default(""),
@@ -1701,12 +1727,15 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
     await audit(own ? action : `admin_${action}`, o.id, own ? details : { ...details, as_admin: true, vendor_entity_id: o.entity_id });
   };
   const checkUrls = async (urls: (string | undefined)[]) => {
-    for (const u of urls.filter((x): x is string => Boolean(x)))
+    for (const u of urls.filter((x): x is string => Boolean(x))) {
+      // Mynt's own practice sandbox is never a vendor's endpoint: the real test must reach the vendor.
+      if (pointsAtVendorSandbox(u)) return `${u}: that is Mynt's practice sandbox, which answers practice runs only (run_practice_conformance); give your own endpoint`;
       try {
         await resolveVendorUrl(u, opts);
       } catch (e) {
         return `${u}: ${(e as Error).message}`;
       }
+    }
     return null;
   };
   const checkLicences = async (entityId: string, region: string, ids: string[]) => {
@@ -1720,7 +1749,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
     {
       title: "Offer a standard service",
       description:
-        "Vendor: offer a standard service type in a region from your test (and live) HTTPS endpoint, with your per-call price and the licences you hold for it, and your standard terms (standard_terms: the document link (https) and its SHA-256, a short summary, your pricing in words, and scopes: what they cover, one or more of technology, manpower, financial_regulatory_operations, recorded on every agreement made on them; you bill subscribers directly). Listing an offering with terms is your standing acceptance of them: app workspaces subscribe by accepting them in the marketplace, with no negotiation. It starts as a draft: run_conformance, then update_vendor_offering { listed: true }. The conformance signing secret is shown once.",
+        "Vendor: offer a standard service type in a region from your test (and live) HTTPS endpoint (test_base_url may be left out of a new draft, to practise against Mynt's sandbox first with run_practice_conformance; run_conformance and listing need your own), with your per-call price and the licences you hold for it, and your standard terms (standard_terms: the document link (https) and its SHA-256, a short summary, your pricing in words, and scopes: what they cover, one or more of technology, manpower, financial_regulatory_operations, recorded on every agreement made on them; you bill subscribers directly). Listing an offering with terms is your standing acceptance of them: app workspaces subscribe by accepting them in the marketplace, with no negotiation. It starts as a draft: run_conformance (run_practice_conformance to practise first; a practice pass never counts), then update_vendor_offering { listed: true }. The conformance signing secret is shown once.",
       inputSchema: { region: z.string().regex(/^[A-Z]{2}$/), service_type: Key, ...OfferingFields, standard_terms: StandardTermsSchema.optional() },
     },
     async ({ standard_terms, ...o }) => {
@@ -1730,7 +1759,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
       if (!t) return fail(`No service type '${o.service_type}' in ${o.region}; see list_service_types`);
       const ramp = await rampRefusal(store, t, entityId);
       if (ramp) return fail(ramp);
-      const bad = (await checkUrls([o.test_base_url, o.live_base_url])) ?? rampUrlsClash(t, o.test_base_url, o.live_base_url ?? null) ?? (await checkLicences(entityId, o.region, o.licence_ids));
+      const bad = (await checkUrls([o.test_base_url, o.live_base_url])) ?? rampUrlsClash(t, o.test_base_url ?? null, o.live_base_url ?? null) ?? (await checkLicences(entityId, o.region, o.licence_ids));
       if (bad) return fail(bad);
       if (!vaultAvailable(false)) return fail("This server's vault key (MYNT_VAULT_KEY) isn't configured, so it can't keep signing secrets");
       const secret = newSecret();
@@ -1743,7 +1772,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
           o.region,
           o.service_type,
           o.name,
-          o.test_base_url,
+          o.test_base_url ?? null,
           o.live_base_url ?? null,
           JSON.stringify({ ...o.price, per: "call" }),
           o.sla_notes,
@@ -1764,7 +1793,8 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
         ...offering,
         conformance_signing_secret: secret,
         note: "Shown once. Mynt signs its conformance requests with this secret; each subscriber gets its own (list_my_subscribers).",
-        next: "run_conformance",
+        next: o.test_base_url ? "run_conformance" : "run_practice_conformance",
+        ...(o.test_base_url ? {} : { practice: "No test endpoint yet: practise with run_practice_conformance, then set yours (update_vendor_offering { test_base_url }) and run_conformance. A practice pass never counts as conformance." }),
       });
     },
   );
@@ -1779,7 +1809,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
       inputSchema: {
         offering_id: z.string(),
         name: OfferingFields.name.optional(),
-        test_base_url: OfferingFields.test_base_url.optional(),
+        test_base_url: OfferingFields.test_base_url,
         live_base_url: OfferingFields.live_base_url,
         price: OfferingFields.price.optional(),
         sla_notes: z.string().max(2000).optional(),
@@ -1816,6 +1846,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
       if (a.listed !== undefined) {
         if (o.status === "suspended") return fail("An admin suspended this offering");
         if (a.listed) {
+          if (!next.test_base_url && !next.adapter) return fail("Set your own test endpoint (test_base_url) and pass run_conformance before listing; a practice run doesn't count");
           if (next.status !== "conformance_passed" && next.status !== "listed") return fail("Run run_conformance until it passes before listing");
           const t = (await serviceType(store.db, o.region, o.service_type))!;
           const gap = (await rampRefusal(store, t, o.entity_id)) ?? (await vendorLicenceGap(store, next, t));
@@ -1843,17 +1874,43 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
     {
       title: "Have Mynt test your endpoint",
       description:
-        "Vendor: Mynt calls your test endpoint with signed fixture requests and checks every answer against the service type's output schema, that a badly signed request is refused, and your licences. A pass lets you list the offering. If you require a credential, pass a test one; it isn't kept.",
+        "Vendor: Mynt calls your test endpoint with signed fixture requests and checks every answer against the service type's output schema, that a badly signed request is refused, and your licences. A pass lets you list the offering. If you require a credential, pass a test one; it isn't kept. To practise before your endpoint exists, see run_practice_conformance (a practice pass never counts here).",
       inputSchema: { offering_id: z.string(), test_credential: z.string().min(1).max(2000).optional() },
     },
     async ({ offering_id, test_credential }) => {
       const o = await mine(offering_id);
       if (!o) return fail(`No offering of yours '${offering_id}'`);
+      if (!o.test_base_url && !o.adapter) return fail("This offering has no test endpoint yet: set yours (update_vendor_offering { test_base_url }) and run this again. To practise first, use run_practice_conformance");
+      // Defence in depth: the real test never runs against Mynt's own practice sandbox.
+      if (o.test_base_url && pointsAtVendorSandbox(o.test_base_url)) return fail("This offering's test endpoint is Mynt's practice sandbox: set your own (update_vendor_offering { test_base_url })");
       if (o.requires_credential && !test_credential) return fail("This offering requires a credential: pass a test_credential");
       const t = (await serviceType(store.db, o.region, o.service_type))!;
       const result = await runConformance(store, o, t, opts, user.id, test_credential ?? null);
       await auditOffering("run_conformance", o, { passed: result.passed });
       return json(result);
+    },
+  );
+
+  server.registerTool(
+    "run_practice_conformance",
+    {
+      title: "Practise Mynt's conformance test",
+      description:
+        "Vendor: a practice run of run_conformance's own test cases against Mynt's sandbox endpoint for this offering (<PUBLIC_URL>/vendor-sandbox/<offering_id>), which answers as a correct vendor of the service type would, so you can see the test pass and build against it before your own test endpoint exists. Nothing leaves Mynt and no credential is needed. Returns each case's result and reference: what Mynt sends and expects for the service type (schemas, signature rule) with the run's request and response transcript, the signing secret redacted. A practice pass never counts as conformance: it is recorded as kind practice, never changes the offering's status and never allows listing. Then set your own endpoint (update_vendor_offering { test_base_url }) and run_conformance.",
+      inputSchema: { offering_id: z.string() },
+    },
+    async ({ offering_id }) => {
+      const o = await mine(offering_id);
+      if (!o) return fail(`No offering of yours '${offering_id}'`);
+      const t = (await serviceType(store.db, o.region, o.service_type))!;
+      try {
+        const result = await runPractice(store, o, t, user.id);
+        await auditOffering("run_practice_conformance", o, { passed: result.passed, kind: "practice" });
+        return json(result);
+      } catch (e) {
+        if (e instanceof PracticeRefused) return fail(e.message);
+        throw e;
+      }
     },
   );
 

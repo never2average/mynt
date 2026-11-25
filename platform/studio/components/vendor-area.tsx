@@ -3,18 +3,19 @@
 // My services (/vendor): a service provider's own area, for accounts with Mynt's vendor role. On top, the onboarding
 // checklist card (get_vendor_onboarding): the firm's steps, then each service's, every step's status in words with a
 // mark (never colour alone), what it waits on, and a labelled button where the studio can do it (Create service, Edit
-// service, Run conformance, Set standard terms, List service); steps only Mynt can do say what they wait for. Then
+// service, Run practice test, Run conformance, Set standard terms, List service); steps only Mynt can do say what they
+// wait for. The practice run is a line for information: it never counts. Then
 // the firm's services in the list layout (full-width search, labelled Import and Export CSV, Create service, a
 // full-height table paged 25 rows at a time). A service opens its details: a metadata card with its labelled actions,
-// then tabs (Conformance runs, Terms versions, Subscribers), each a table. Tabs only show; every change is a labelled
+// then tabs (Conformance runs, Practice runs, Terms versions, Subscribers), each a table. Tabs only show; every change is a labelled
 // button opening a sheet (components/vendor-sheets.tsx). Server-renderable for the tests.
 import { useMemo, useState } from "react"
-import { CheckCircle2, Circle, CircleDot, ExternalLink, FileCheck2, FlaskConical, ListChecks, ListX, PauseCircle, Pencil, Plus } from "lucide-react"
+import { CheckCircle2, Circle, CircleDot, ExternalLink, FileCheck2, FlaskConical, ListChecks, ListX, PauseCircle, Pencil, Plus, TestTube2 } from "lucide-react"
 
 import { AdminDetail, AdminList, AdminTable } from "@/components/admin-kit"
 import { downloadCsv } from "@/components/licences-view"
 import { matches, usePaged } from "@/components/list-layout"
-import { ConformanceSheet, ListingSheet, ServiceSheet, TermsSheet } from "@/components/vendor-sheets"
+import { ConformanceSheet, ListingSheet, PracticeSheet, ServiceSheet, TermsSheet } from "@/components/vendor-sheets"
 import { Button } from "@/components/ui/button"
 import {
   conformanceWords,
@@ -39,11 +40,11 @@ import {
 import { scopeLabelOf } from "@/lib/app-panel"
 
 export type VendorData = { onboarding: Onboarding; offerings: VendorOffering[]; serviceTypes: ServiceTypeOption[]; licences: LicenceOption[] }
-export type OfferingDetailData = { offering: VendorOffering; runs: ConformanceRun[]; termsVersions: TermsVersion[]; subscribers: Subscriber[] | null }
+export type OfferingDetailData = { offering: VendorOffering; runs: ConformanceRun[]; practiceRuns?: ConformanceRun[]; termsVersions: TermsVersion[]; subscribers: Subscriber[] | null }
 
 const STATUS_ICON: Record<StepStatus, typeof Circle> = { done: CheckCircle2, next: CircleDot, not_started: Circle, blocked: PauseCircle }
 const STATUS_TONE: Record<StepStatus, string> = { done: "text-emerald-600", next: "text-sky-600", not_started: "text-muted-foreground", blocked: "text-amber-600" }
-const ACTION_ICON: Record<StepAction, typeof Plus> = { create: Plus, edit: Pencil, terms: FileCheck2, conformance: FlaskConical, list: ListChecks }
+const ACTION_ICON: Record<StepAction, typeof Plus> = { create: Plus, edit: Pencil, terms: FileCheck2, practice: TestTube2, conformance: FlaskConical, list: ListChecks }
 
 /** A step's status: a mark and its words, never colour alone. */
 export function StepStatusMark({ status }: { status: StepStatus }) {
@@ -122,7 +123,7 @@ export function OnboardingChecklist({ onboarding, onAction }: { onboarding: Onbo
   )
 }
 
-type SheetState = { kind: "create" } | { kind: "edit" | "terms" | "conformance" | "listing"; offering: VendorOffering } | null
+type SheetState = { kind: "create" } | { kind: "edit" | "terms" | "practice" | "conformance" | "listing"; offering: VendorOffering } | null
 
 /** The sheets every view of the area opens, and what opens them. */
 function useSheets(initial: SheetState = null) {
@@ -138,6 +139,7 @@ function Sheets({ state, data, onClose, onDone, fetcher }: { state: SheetState; 
       <ServiceSheet mode="create" open={state?.kind === "create"} serviceTypes={data.serviceTypes} licences={data.licences} onClose={onClose} onDone={onDone} fetcher={fetcher} />
       <ServiceSheet mode="edit" open={state?.kind === "edit"} offering={of("edit")} serviceTypes={data.serviceTypes} licences={data.licences} onClose={onClose} onDone={onDone} fetcher={fetcher} />
       <TermsSheet offering={of("terms")} onClose={onClose} onDone={onDone} fetcher={fetcher} />
+      <PracticeSheet offering={of("practice")} onClose={onClose} onDone={onDone} fetcher={fetcher} />
       <ConformanceSheet offering={of("conformance")} onClose={onClose} onDone={onDone} fetcher={fetcher} />
       <ListingSheet offering={of("listing")} onClose={onClose} onDone={onDone} fetcher={fetcher} />
     </>
@@ -221,6 +223,7 @@ export function VendorView({
 
 export const DETAIL_TABS = [
   { id: "runs", label: "Conformance runs" },
+  { id: "practice", label: "Practice runs" },
   { id: "terms", label: "Terms versions" },
   { id: "subscribers", label: "Subscribers" },
 ] as const
@@ -263,7 +266,7 @@ export function OfferingDetailView({
         fields={[
           ["Status", offeringStatusWords(o.status)],
           ["Price", priceWords(o.price)],
-          ["Test endpoint", o.testBaseUrl || "—"],
+          ["Test endpoint", o.testBaseUrl || "Not yet (practice only)"],
           ["Live endpoint", o.liveBaseUrl ?? "Not yet"],
           ["Conformance", conformanceWords(o.lastConformance)],
           ["Standard terms", o.terms ? `v${o.terms.version}` : "None yet"],
@@ -280,6 +283,10 @@ export function OfferingDetailView({
             <Button size="sm" variant="outline" onClick={() => setSheet({ kind: "terms", offering: o })} data-detail-action="terms">
               <FileCheck2 />
               Set standard terms
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setSheet({ kind: "practice", offering: o })} disabled={suspended} data-detail-action="practice">
+              <TestTube2 />
+              Run practice test
             </Button>
             <Button size="sm" variant="outline" onClick={() => setSheet({ kind: "conformance", offering: o })} disabled={suspended} data-detail-action="conformance">
               <FlaskConical />
@@ -321,6 +328,21 @@ export function OfferingDetailView({
               r.failures.length ? r.failures.map((f) => `${f.case.replace(/_/g, " ")}: ${f.problems.join("; ") || "failed"}`).join(" · ") : "None",
             ])}
             empty="Mynt hasn't tested this service yet. Run conformance."
+          />
+        )}
+        {tab === "practice" && (
+          <AdminTable
+            head={["When", "Practice result", "Run by", "Counts as conformance"]}
+            rowKeys={(detail.practiceRuns ?? []).map((r) => r.runId)}
+            rows={(detail.practiceRuns ?? []).map((r) => [
+              when(r.at),
+              <span key="r" data-practice-run-result={r.passed ? "passed" : "failed"}>
+                {r.passed ? "Passed" : "Didn't pass"}
+              </span>,
+              r.runBy ?? "—",
+              "No",
+            ])}
+            empty="No practice runs yet. Run practice test shows Mynt's test against its own sandbox; it never counts as conformance."
           />
         )}
         {tab === "terms" && (
