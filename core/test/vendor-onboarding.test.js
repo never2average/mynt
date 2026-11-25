@@ -118,8 +118,8 @@ test("each step's states, from a firm with nothing to a listed service with a su
   assert.equal(stepOf(o.firm_steps, "first_service").status, "done");
   assert.equal(o.offerings.length, 1);
   let steps = o.offerings[0].steps;
-  assert.deepEqual(steps.map((s) => s.key), ["service_created", "licence", "conformance", "terms", "listed", "first_subscriber"]);
-  assert.deepEqual(statuses(steps), { service_created: "done", licence: "next", conformance: "not_started", terms: "not_started", listed: "not_started", first_subscriber: "not_started" });
+  assert.deepEqual(steps.map((s) => s.key), ["service_created", "licence", "practice", "conformance", "terms", "listed", "first_subscriber"]);
+  assert.deepEqual(statuses(steps), { service_created: "done", licence: "next", practice: "not_started", conformance: "not_started", terms: "not_started", listed: "not_started", first_subscriber: "not_started" });
   assert.match(stepOf(steps, "licence").detail, /needs a licence of one of: rbi_pa/);
   assert.equal(stepOf(steps, "licence").tool, "register_license");
   assert.equal(stepOf(steps, "conformance").facts.last_run, null, "no run yet: null, never a made-up figure");
@@ -172,7 +172,7 @@ test("each step's states, from a firm with nothing to a listed service with a su
   steps = (await ok(vera, "get_vendor_onboarding")).offerings[0].steps;
   assert.equal(stepOf(steps, "conformance").status, "done");
   assert.match(stepOf(steps, "conformance").detail, /^Passed on \d{4}-\d{2}-\d{2}\.$/);
-  assert.deepEqual(statuses(steps), { service_created: "done", licence: "done", conformance: "done", terms: "next", listed: "not_started", first_subscriber: "not_started" });
+  assert.deepEqual(statuses(steps), { service_created: "done", licence: "done", practice: "not_started", conformance: "done", terms: "next", listed: "not_started", first_subscriber: "not_started" });
   assert.match(stepOf(steps, "listed").detail, /passed Mynt's test: list it/);
 
   // ---- listed (before terms), then a first subscriber, then standard terms: complete ----
@@ -254,7 +254,7 @@ test("permissions: vendor firm members read their own firm only; admins any firm
 
   // No licence needed: no licence step.
   const own = await ok(ana, "get_vendor_onboarding", { entity_id: firmA.id });
-  assert.deepEqual(own.offerings[0].steps.map((s) => s.key), ["service_created", "conformance", "terms", "listed", "first_subscriber"]);
+  assert.deepEqual(own.offerings[0].steps.map((s) => s.key), ["service_created", "practice", "conformance", "terms", "listed", "first_subscriber"]);
 
   // Another firm's vendor sees neither the firm nor its offering.
   assert.match((await call(bo, "get_vendor_onboarding", { entity_id: firmA.id })).data.error, /only see your own firm/);

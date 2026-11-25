@@ -374,6 +374,9 @@ const WORKSPACE = [
   "suspend_vendor_offering",
   "run_conformance",
   "admin_run_conformance",
+  // a practice run against Mynt's own sandbox (vendor-sandbox.ts): never conformance
+  "run_practice_conformance",
+  "admin_run_practice_conformance",
   "subscribe_vendor_service",
   "set_subscription_live",
   "unsubscribe_vendor_service",

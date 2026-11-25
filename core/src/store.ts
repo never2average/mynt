@@ -1170,7 +1170,7 @@ const TABLES = `
     region text NOT NULL,
     service_type text NOT NULL,
     name text NOT NULL,
-    test_base_url text NOT NULL,
+    test_base_url text,
     live_base_url text,
     price jsonb NOT NULL,
     sla_notes text NOT NULL DEFAULT '',
@@ -1274,6 +1274,21 @@ const TABLES = `
   -- A ramp offering Mynt answers through an adapter in front of the partner's own API (src/ramp-adapters/): the
   -- adapter, its non-secret settings, and the partner's credentials as keys in the ramp firm's key vault.
   ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS adapter text;
+  -- A draft may have no test endpoint yet, so a vendor can practise against Mynt's sandbox first (vendor-sandbox.ts).
+  -- run_conformance and listing still need the vendor's own.
+  ALTER TABLE financial_products.vendor_offerings ALTER COLUMN test_base_url DROP NOT NULL;
+  -- Practice runs: the conformance cases against Mynt's own sandbox endpoint. Kept apart from vendor_conformance_runs
+  -- on purpose, so nothing that reads real conformance (listing, the marketplace, ops, risk) can ever count one.
+  CREATE TABLE IF NOT EXISTS financial_products.vendor_practice_runs (
+    id uuid PRIMARY KEY,
+    offering_id uuid NOT NULL REFERENCES financial_products.vendor_offerings(id),
+    kind text NOT NULL DEFAULT 'practice' CHECK (kind = 'practice'),
+    passed boolean NOT NULL,
+    cases jsonb NOT NULL,
+    run_by uuid REFERENCES financial_products.users(id),
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS vendor_practice_offering_idx ON financial_products.vendor_practice_runs (offering_id, created_at DESC);
   ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS adapter_config jsonb;
   ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS adapter_test_key_id uuid REFERENCES financial_products.key_vault(id);
   ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS adapter_live_key_id uuid REFERENCES financial_products.key_vault(id);

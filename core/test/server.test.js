@@ -98,7 +98,7 @@ const VENDOR_TOOLS = [
   "get_my_entity", "register_license",
   // its standard services, and where its onboarding stands
   "create_vendor_offering", "get_vendor_onboarding", "list_my_offerings", "list_my_subscribers", "list_service_types",
-  "reveal_subscription_secret", "rotate_subscription_secret", "run_conformance", "update_vendor_offering",
+  "reveal_subscription_secret", "rotate_subscription_secret", "run_conformance", "run_practice_conformance", "update_vendor_offering",
   // the Mynt Ramp's adapter
   "link_ramp_partner_customer", "set_ramp_adapter",
   // apps' agreements with its firm (never a licence provider's agreement templates: a vendor's terms are its offerings')

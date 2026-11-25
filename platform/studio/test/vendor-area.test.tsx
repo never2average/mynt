@@ -19,7 +19,7 @@ const { TooltipProvider } = await import("@/components/ui/tooltip");
 const { pageGateFor } = await import("@/components/studio-gates");
 const { pageTitle, isAppPath } = await import("@/lib/studio-search");
 const { VendorView, OfferingDetailView, OnboardingChecklist } = await import("@/components/vendor-area");
-const { ServiceSheet, TermsSheet, ConformanceSheet, ListingSheet } = await import("@/components/vendor-sheets");
+const { ServiceSheet, TermsSheet, ConformanceSheet, ListingSheet, PracticeSheet } = await import("@/components/vendor-sheets");
 const v = await import("@/lib/vendor-area");
 const { groupByStage } = await import("@/lib/workspaces");
 const { NO_ACCESS } = await import("@/lib/liquidity");
@@ -169,7 +169,38 @@ describe("the onboarding checklist", () => {
     expect(v.stepAction(s("licence", "next", { tool: "register_license" }))).toBeNull();
     expect(v.stepAction(s("terms", "done"))).toBeNull();
     expect(v.stepAction(s("vendor_members", "blocked", { by: "admin" }))).toBeNull();
-    expect(Object.values(v.STEP_ACTION_LABELS)).toEqual(["Create service", "Edit service", "Set standard terms", "Run conformance", "List service"]);
+    expect(Object.values(v.STEP_ACTION_LABELS)).toEqual(["Create service", "Edit service", "Set standard terms", "Run practice test", "Run conformance", "List service"]);
+    // The practice line is for information: it can be run (again) whatever its state, and is never the conformance step.
+    expect(v.stepAction(s("practice", "not_started", { informational: true }))).toBe("practice");
+    expect(v.stepAction(s("practice", "done", { informational: true }))).toBe("practice");
+    expect(v.stepAction(s("practice", "blocked", { informational: true }))).toBeNull();
+    // With no test endpoint yet, the conformance step asks for one (Edit service) before the real test.
+    expect(v.stepAction(s("conformance", "next", { tool: "update_vendor_offering" }))).toBe("edit");
+  });
+
+  it("the practice run is an informational line with its own labelled button, beside the real conformance step", () => {
+    const withPractice = v.fromOnboarding({
+      firm_steps: [],
+      offerings: [
+        {
+          offering_id: OFF,
+          name: "KYC Works CKYC",
+          region: "US",
+          service_type: "identity_verification",
+          status: "draft",
+          steps: [
+            step("practice", "done", { title: "Practice run", informational: true, tool: "run_practice_conformance", detail: "Practice run passed on 2026-11-24 — now point Mynt at your own test endpoint and run the real test. It doesn't count as conformance." }),
+            step("conformance", "next", { title: "Pass Mynt's conformance test", tool: "run_conformance", detail: "Mynt hasn't tested your endpoint yet. Run the conformance test." }),
+          ],
+          progress: { done: 0, total: 1, next: null, complete: false },
+        },
+      ],
+      progress: { done: 0, total: 1, next: null, complete: false },
+    })!;
+    const html = renderToStaticMarkup(<OnboardingChecklist onboarding={withPractice} onAction={() => undefined} />);
+    expect(html).toMatch(/data-step="practice"[\s\S]*?Practice run[\s\S]*?\(for information\)[\s\S]*?now point Mynt at your own test endpoint and run the real test[\s\S]*?data-step-action="practice"[\s\S]*?Run practice test/);
+    expect(html).toMatch(/data-step="conformance" data-step-state="next"[\s\S]*?data-step-action="conformance"[\s\S]*?Run conformance/);
+    expect(html).toContain("0 of 1"); // the practice line is never counted
   });
 
   it("a step's button opens its sheet", async () => {
@@ -202,8 +233,14 @@ describe("the services list and a service's details", () => {
     };
     const runs = renderToStaticMarkup(<OfferingDetailView detail={detail} data={DATA} onBack={() => undefined} />);
     expect(runs).toContain("data-metadata-card");
-    for (const a of ["Edit service", "Set standard terms", "Run conformance", "List service"]) expect(runs).toContain(a);
-    for (const t of ["Conformance runs", "Terms versions", "Subscribers"]) expect(runs).toContain(t);
+    for (const a of ["Edit service", "Set standard terms", "Run practice test", "Run conformance", "List service"]) expect(runs).toContain(a);
+    expect(runs).toMatch(/data-detail-action="practice"[\s\S]*?Run practice test[\s\S]*?data-detail-action="conformance"/);
+    for (const t of ["Conformance runs", "Practice runs", "Terms versions", "Subscribers"]) expect(runs).toContain(t);
+    const practised = renderToStaticMarkup(<OfferingDetailView detail={{ ...detail, practiceRuns: [{ runId: "p1", passed: true, at: "2026-11-24T09:00:00Z", runBy: "Vera", failures: [] }] }} data={DATA} onBack={() => undefined} initialTab="practice" />);
+    for (const h of ["When", "Practice result", "Run by", "Counts as conformance"]) expect(practised).toContain(`>${h}</th>`);
+    expect(practised).toMatch(/data-practice-run-result="passed">Passed<[\s\S]*?>Vera<[\s\S]*?>No</);
+    expect(practised).not.toContain("fixture 1: output /status must be string"); // the conformance runs stay in their own tab
+    expect(renderToStaticMarkup(<OfferingDetailView detail={detail} data={DATA} onBack={() => undefined} initialTab="practice" />)).toContain("No practice runs yet.");
     expect(runs).toContain("Didn&#x27;t pass");
     expect(runs).toContain("fixture 1: output /status must be string");
     const terms = renderToStaticMarkup(<OfferingDetailView detail={detail} data={DATA} onBack={() => undefined} initialTab="terms" />);
@@ -314,6 +351,71 @@ describe("each sheet posts to its route with what was typed", () => {
     expect((document.querySelector("[data-conformance-credential]") as HTMLInputElement).value).toBe("");
     expect(document.querySelector("[data-conformance-outcome]")?.getAttribute("data-conformance-outcome")).toBe("failed");
     expect(document.querySelector("[data-conformance-failures]")?.textContent).toContain("bad signature refused: a request with a bad Mynt-Signature wasn't refused");
+  });
+
+  it("Run practice test: nothing typed, then each case's result, what Mynt sends and expects, and the transcript", async () => {
+    const reference = {
+      serviceType: "identity_verification",
+      sendsTo: "POST <your test_base_url>/v1/identity_verification",
+      signature: "Mynt-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256>.",
+      marker: "In a practice run, mynt_practice.",
+      expects: "200 within 10 s",
+      inputSchema: {},
+      paramsSchema: null,
+      outputSchema: {},
+      transcript: [
+        { case: "fixture_1", expected: "200 with status ok", request: { method: "POST", path: "/v1/identity_verification", headers: { "Mynt-Signature": "t=1,v1=<redacted>" }, body: { request_id: "q1" } }, response: { httpStatus: 200, body: { request_id: "q1", status: "ok" } } },
+        { case: "bad_signature_refused", expected: "Refused: 401", request: { method: "POST", path: "/v1/identity_verification", headers: {}, body: {} }, response: { httpStatus: 401, body: { status: "error" } } },
+      ],
+    };
+    const { f, calls } = fetcher({
+      ok: true,
+      practice: true,
+      passed: true,
+      status: "draft",
+      cases: [
+        { case: "fixture_1", passed: true, httpStatus: 200, problems: [] },
+        { case: "bad_signature_refused", passed: true, httpStatus: 401, problems: [] },
+      ],
+      licenceNote: null,
+      reference,
+      message: "Practice run passed — now point Mynt at your own test endpoint and run the real test.",
+    });
+    render(<PracticeSheet offering={{ ...OFFERING, testBaseUrl: "", status: "draft" }} onClose={() => undefined} onDone={() => undefined} fetcher={f} />);
+    const sheet = document.querySelector('[data-admin-sheet="run-practice"]')!;
+    expect(sheet.textContent).toContain("Run practice test");
+    expect(sheet.textContent).toContain("A practice pass never counts");
+    expect(document.querySelector("[data-practice-form] input")).toBeNull(); // no credential, nothing to type
+    await submit("[data-practice-form]");
+    expect(calls).toEqual([{ url: `/api/vendor/offerings/${OFF}/practice`, method: "POST", body: {} }]);
+    expect(document.querySelector("[data-practice-outcome]")?.getAttribute("data-practice-outcome")).toBe("passed");
+    expect(sheet.textContent).toContain("Practice run passed — now point Mynt at your own test endpoint and run the real test.");
+    expect(sheet.textContent).toContain("Practice result: passed (doesn't count as conformance)");
+    expect([...document.querySelectorAll("[data-practice-case]")].map((c) => [c.getAttribute("data-practice-case"), c.getAttribute("data-practice-case-result"), c.textContent])).toEqual([
+      ["fixture_1", "passed", "fixture 1: Passed (HTTP 200)"],
+      ["bad_signature_refused", "passed", "bad signature refused: Passed (HTTP 401)"],
+    ]);
+    expect(document.querySelector("[data-practice-reference]")?.textContent).toContain("POST <your test_base_url>/v1/identity_verification");
+    expect(document.querySelector("[data-practice-download]")?.textContent).toBe("Download transcript");
+    expect([...document.querySelectorAll("[data-practice-exchange]")].map((x) => x.getAttribute("data-practice-exchange"))).toEqual(["fixture_1", "bad_signature_refused"]);
+    expect(document.querySelector('[data-practice-exchange="fixture_1"]')?.textContent).toContain("v1=<redacted>");
+    expect(document.querySelector("[data-practice-submit]")?.textContent).toBe("Run practice test again");
+  });
+
+  it("Run conformance on a service with no test endpoint yet: says so, and can't be sent", () => {
+    render(<ConformanceSheet offering={{ ...OFFERING, testBaseUrl: "", requiresCredential: false }} onClose={() => undefined} onDone={() => undefined} />);
+    expect(document.querySelector("[data-conformance-no-endpoint]")?.textContent).toContain("a practice pass doesn't count");
+    expect((document.querySelector("[data-conformance-submit]") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("Create service without a test endpoint yet: a draft to practise on, with no endpoint sent", async () => {
+    const { f, calls } = fetcher({ ok: true, offering_id: OFF, signing_secret: "mvs_once", message: "Service created as a draft." });
+    render(<ServiceSheet mode="create" open serviceTypes={DATA.serviceTypes} licences={DATA.licences} onClose={() => undefined} onDone={() => undefined} fetcher={f} />);
+    type("[data-service-type]", "US/identity_verification");
+    type("[data-service-name]", "KYC Works ID");
+    type("[data-service-price]", "0.4");
+    await submit("[data-service-form]");
+    expect(calls.map((c) => c.body)).toEqual([{ region: "US", service_type: "identity_verification", name: "KYC Works ID", price: { amount: 0.4, currency: "USD" }, sla_notes: "", licence_ids: [], requires_credential: false }]);
   });
 
   it("List service and Unlist service", async () => {

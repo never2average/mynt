@@ -4,6 +4,7 @@ import { licenseInForce } from "./access.js";
 import { agreementScopeLabel } from "./app-agreements-schema.js";
 import type { Entity, HeldLicense, Store, User } from "./store.js";
 import { effectiveRoles } from "./store.js";
+import { practiceRunsOf, type PracticeRun } from "./vendor-sandbox.js";
 import { getOffering, offeringsOf, rampRefusal, serviceType, type Offering, type ServiceType } from "./vendors.js";
 
 // A vendor's onboarding, as one ordered checklist (get_vendor_onboarding): what's done, what's next, and what waits on
@@ -13,8 +14,9 @@ import { getOffering, offeringsOf, rampRefusal, serviceType, type Offering, type
 //
 // A step's status: done; next (the first thing the vendor can do now); not_started (theirs to do, after the next one);
 // blocked (waiting on Mynt or on a step before it: the detail says which). The first subscriber is informational: it's
-// the subscribers' choice, never a step the vendor does, and it never counts towards progress. A figure Mynt doesn't
-// measure is null, never 0.
+// the subscribers' choice, never a step the vendor does, and it never counts towards progress. So is the practice run
+// (run_practice_conformance, against Mynt's own sandbox): shown, never counted, and never the conformance step. A
+// figure Mynt doesn't measure is null, never 0.
 
 const T = "financial_products";
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
@@ -116,7 +118,7 @@ async function firmSteps(store: Store, entity: Entity | null, offerings: Offerin
     offerings.length
       ? step("first_service", "Create your first service", "done", `${offerings.length} ${offerings.length === 1 ? "service" : "services"} created.`, "create_vendor_offering", "vendor", { services: offerings.length })
       : members > 0
-        ? step("first_service", "Create your first service", "todo", "Choose a standard service type and give Mynt your test endpoint.", "create_vendor_offering", "vendor", { services: 0 })
+        ? step("first_service", "Create your first service", "todo", "Choose a standard service type and give Mynt your test endpoint (or add it later, and practise against Mynt's sandbox first).", "create_vendor_offering", "vendor", { services: 0 })
         : // Nobody at the firm can create one yet: it isn't offered as the next thing to do.
           step("first_service", "Create your first service", "blocked", "Waits for your firm's people with the vendor role.", "create_vendor_offering", "vendor", { services: 0 }),
   ];
@@ -182,7 +184,7 @@ export interface OfferingOnboarding {
   progress: Progress;
 }
 
-async function offeringOnboarding(store: Store, o: Offering, held: HeldLicense[], gate: string | null, runs: Run[]): Promise<OfferingOnboarding> {
+async function offeringOnboarding(store: Store, o: Offering, held: HeldLicense[], gate: string | null, runs: Run[], practice: PracticeRun | null): Promise<OfferingOnboarding> {
   const t = await serviceType(store.db, o.region, o.service_type);
   const suspended = o.status === "suspended";
   const suspendedWords = `Mynt suspended this service${o.status_note ? `: ${o.status_note}` : ""}. Waiting for Mynt to reinstate it.`;
@@ -193,14 +195,25 @@ async function offeringOnboarding(store: Store, o: Offering, held: HeldLicense[]
   if (licence) raws.push(licence);
   const ramp = t ? await rampRefusal(store, t, o.entity_id) : null;
 
+  const passedNow = o.status === "conformance_passed" || o.status === "listed";
+  const ownEndpoint = Boolean(o.test_base_url) || Boolean(o.adapter);
+
+  // The practice run: the same cases against Mynt's sandbox. For information only: it never counts as conformance.
+  const practiceFacts = { last_run: practice, counts_as_conformance: false };
+  const practiceTitle = "Practice run";
+  if (!practice) raws.push(step("practice", practiceTitle, "todo", "Optional: practise Mynt's test against Mynt's own sandbox before your endpoint is ready. It never counts as conformance.", "run_practice_conformance", "vendor", practiceFacts, true));
+  else if (!practice.passed) raws.push(step("practice", practiceTitle, "todo", `The practice run on ${day(practice.at)} didn't pass. It says nothing about your own endpoint, and never counts as conformance.`, "run_practice_conformance", "vendor", practiceFacts, true));
+  else if (passedNow) raws.push(step("practice", practiceTitle, "done", `Practice run passed on ${day(practice.at)}. It didn't count: the real test of your endpoint did.`, "run_practice_conformance", "vendor", practiceFacts, true));
+  else raws.push(step("practice", practiceTitle, "done", `Practice run passed on ${day(practice.at)} — now point Mynt at your own test endpoint and run the real test. It doesn't count as conformance.`, "run_practice_conformance", "vendor", practiceFacts, true));
+
   // Conformance: Mynt's own test of the endpoint, latest run first.
   const last = runs[0] ?? null;
-  const conformanceFacts = { last_run: last };
-  const passedNow = o.status === "conformance_passed" || o.status === "listed";
+  const conformanceFacts = { last_run: last, test_endpoint: ownEndpoint };
   if (suspended) raws.push(step("conformance", "Pass Mynt's conformance test", "blocked", suspendedWords, "suspend_vendor_offering", "admin", conformanceFacts));
   else if (ramp) raws.push(step("conformance", "Pass Mynt's conformance test", "blocked", `${ramp}.`, "set_mynt_ramp", "admin", conformanceFacts));
   else if (last?.passed && passedNow) raws.push(step("conformance", "Pass Mynt's conformance test", "done", `Passed on ${day(last.at)}.`, "run_conformance", "vendor", conformanceFacts));
   else if (licence && licence.state === "blocked") raws.push(step("conformance", "Pass Mynt's conformance test", "blocked", "Waits for Mynt to verify your licence first.", "run_conformance", "vendor", conformanceFacts));
+  else if (!ownEndpoint) raws.push(step("conformance", "Pass Mynt's conformance test", "todo", "This service has no test endpoint yet. Give Mynt yours, then run the conformance test. A practice run doesn't count.", "update_vendor_offering", "vendor", conformanceFacts));
   else if (!last) raws.push(step("conformance", "Pass Mynt's conformance test", "todo", "Mynt hasn't tested your endpoint yet. Run the conformance test.", "run_conformance", "vendor", conformanceFacts));
   else if (last.passed) raws.push(step("conformance", "Pass Mynt's conformance test", "todo", `It passed on ${day(last.at)}, but the endpoint or licences changed since. Run it again.`, "run_conformance", "vendor", conformanceFacts));
   else raws.push(step("conformance", "Pass Mynt's conformance test", "todo", `The last run on ${day(last.at)} failed: ${failureWords(last)}. Fix your endpoint and run it again.`, "run_conformance", "vendor", conformanceFacts));
@@ -312,8 +325,9 @@ export async function vendorOnboarding(store: Store, entityId: string | null, op
   const history: Record<string, unknown>[] = [];
   for (const o of offerings) {
     const runs = await conformanceRuns(store, o.id, opts.history ? 20 : 1);
-    out.push(await offeringOnboarding(store, o, held, firm.gate, runs));
-    if (opts.history) history.push({ offering_id: o.id, conformance_runs: runs, terms_versions: await termsVersions(store, o) });
+    const practice = await practiceRunsOf(store, o.id, opts.history ? 20 : 1);
+    out.push(await offeringOnboarding(store, o, held, firm.gate, runs, practice[0] ?? null));
+    if (opts.history) history.push({ offering_id: o.id, conformance_runs: runs, practice_runs: practice, terms_versions: await termsVersions(store, o) });
   }
   // The firm's overall progress: its own steps and every offering's, and the first thing to do (firm first).
   const steps = [...firm.steps, ...out.flatMap((o) => o.steps)];
@@ -358,7 +372,7 @@ export function registerVendorOnboardingTools(server: McpServer, store: Store, u
     {
       title: "Where a vendor's onboarding stands",
       description:
-        "Vendor (your own firm) or admin (any firm, with entity_id; every vendor firm's progress, with all_firms): the ordered onboarding checklist, firm-wide and per offering, each step done, next, not_started or blocked (waiting on Mynt or an earlier step), in plain words with the tool that does it: the firm registered and active, people with the vendor role, a first service, the licence the service type needs (registered and verified by Mynt), the offering (service type, region), Mynt's conformance test (latest run, when, failures), standard terms (version), listed, and the first subscriber (informational, never counted). offering_id narrows it to one offering and adds its history: conformance runs and terms versions. It only reads; a figure Mynt doesn't measure is null.",
+        "Vendor (your own firm) or admin (any firm, with entity_id; every vendor firm's progress, with all_firms): the ordered onboarding checklist, firm-wide and per offering, each step done, next, not_started or blocked (waiting on Mynt or an earlier step), in plain words with the tool that does it: the firm registered and active, people with the vendor role, a first service, the licence the service type needs (registered and verified by Mynt), the offering (service type, region), the practice run against Mynt's sandbox (informational, never counted, never conformance), Mynt's conformance test (latest run, when, failures), standard terms (version), listed, and the first subscriber (informational, never counted). offering_id narrows it to one offering and adds its history: conformance runs, practice runs and terms versions. It only reads; a figure Mynt doesn't measure is null.",
       inputSchema: {
         entity_id: z.string().uuid().optional().describe("Admins: the vendor's firm. Vendors may omit it (their own firm)."),
         offering_id: z.string().uuid().optional().describe("One offering, with its conformance runs and terms versions"),

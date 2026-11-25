@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 type Params = { params: Promise<{ offeringId: string }> };
 
 // GET: one of the firm's services, for its details: the service itself (list_my_offerings), its checklist with its
-// history (get_vendor_onboarding { offering_id }: conformance runs, terms versions) and its subscribers
+// history (get_vendor_onboarding { offering_id }: conformance runs, practice runs, terms versions) and its subscribers
 // (list_my_subscribers { offering_id }). Another firm's service is not found.
 export async function GET(_req: Request, { params }: Params) {
   const { offeringId } = await params;
@@ -30,6 +30,7 @@ export async function GET(_req: Request, { params }: Params) {
       offering,
       checklist: onboarding?.offerings.find((o) => o.offeringId === offeringId) ?? null,
       runs: history?.runs ?? [],
+      practiceRuns: history?.practiceRuns ?? [],
       termsVersions: history?.termsVersions ?? [],
       // null: Mynt didn't answer, never shown as none.
       subscribers,

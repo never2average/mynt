@@ -101,6 +101,7 @@ Locally, `mynt serve` speaks MCP over stdio for one user instead (`FINANCIAL_PRO
 | `GET /esign/frame-origins` | Mynt Studio | None. It lists the origins signing pages may be framed from, and names no secret |
 | `GET /confidential/attestation?nonce=…` | A licence provider checking the confidential service | None. Mynt relays the host's attestation unchanged, with the releases in effect. One request a second across all callers |
 | `/ramp-sandbox/*` | Mynt itself, for a ramp offering pointed at the sandbox | Requests Mynt signed (`core/src/ramp-sandbox.ts`) |
+| `/vendor-sandbox/<offering id>` | A vendor practising before its own test endpoint exists | Practice requests signed with that offering's conformance secret (`core/src/vendor-sandbox.ts`); never the real conformance test |
 | `/bd/unsubscribe` | Anyone the connector emailed | The unsubscribe link itself |
 | `GET /llms.txt`, `/.well-known/llms.txt`, `/llms-full.txt` | AI assistants | None. Plain text, no customer data (`core/src/llms-txt.ts`) |
 | `GET /` | Anyone | None. One line pointing at `/mcp` and `/llms.txt` |

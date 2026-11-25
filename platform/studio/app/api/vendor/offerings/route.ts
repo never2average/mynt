@@ -19,7 +19,9 @@ export async function POST(req: Request) {
       ok: true,
       offering_id: typeof reply?.id === "string" ? reply.id : null,
       signing_secret: typeof reply?.conformance_signing_secret === "string" ? reply.conformance_signing_secret : null,
-      message: "Service created as a draft. Copy the signing secret now: Mynt shows it once. Your endpoint checks Mynt-Signature with it. Then run conformance.",
+      message: (w.body as { test_base_url?: unknown }).test_base_url
+        ? "Service created as a draft. Copy the signing secret now: Mynt shows it once. Your endpoint checks Mynt-Signature with it. Then run conformance."
+        : "Service created as a draft, with no test endpoint yet. Copy the signing secret now: Mynt shows it once. Run a practice test to see what Mynt sends and expects, then add your test endpoint and run conformance.",
     });
   });
 }
