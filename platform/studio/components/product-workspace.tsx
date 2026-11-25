@@ -22,7 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { ChatWelcome } from "@/components/chat-welcome"
 import { ChatWorkspaceShell } from "@/components/chat-workspace-shell"
-import { ConnectAgentButton, DocsButton } from "@/components/connect-agent"
+import { DocsButton } from "@/components/connect-agent"
 import { CreateProductSheet } from "@/components/create-product-sheet"
 import { productTransport } from "@/components/new-app-workspace"
 import { ProductArchiveSheet, type ArchiveMode } from "@/components/product-archive-sheet"
@@ -125,7 +125,6 @@ export function ProductHeader({ product, error = null, onMove, onArchive, onBack
           </span>
         </DeveloperOnly>
         <DocsButton />
-        <ConnectAgentButton />
         <ThemeSwitcher compact />
       </div>
     </header>
