@@ -17,7 +17,7 @@
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useCallback, useEffect, useState } from "react"
-import { Blocks, Coins, FileBadge, History, LayoutDashboard, ServerCog, Settings, ShieldCheck } from "lucide-react"
+import { Coins, FileBadge, Handshake, History, LayoutDashboard, ServerCog, Settings, ShieldCheck } from "lucide-react"
 
 import { NavFolders } from "@/components/nav-folders"
 import { NavUser } from "@/components/nav-user"
@@ -51,7 +51,7 @@ const PAGES = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/licences", label: "Licences", icon: FileBadge },
   // Service providers' standard services, subscribed to by accepting their standard terms.
-  { href: "/marketplace", label: "Marketplace", icon: Blocks },
+  { href: "/marketplace", label: "Marketplace", icon: Handshake },
   { href: "/audits", label: "Audits", icon: History },
   { href: "/settings", label: "Settings", icon: Settings },
 ] as const
