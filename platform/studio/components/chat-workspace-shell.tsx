@@ -30,7 +30,7 @@ export function PanelTabStrip({ tabs, tab, onTab, header, onCollapse }: { tabs: 
   return (
     <div className="flex h-10 shrink-0 items-stretch gap-1 px-3 shadow-[inset_0_-1px_0_var(--color-border)]" data-panel-tabs>
       {/* The strip's bottom line is the tab bar's own (an inset shadow): the active tab's underline covers it. */}
-      <TabList aria-label="Panel">
+      <TabList aria-label="Panel" className="w-auto flex-1">
         {tabs.map((t) => (
           <Tab key={t.id} selected={t.id === tab} data-panel-tab={t.id} onClick={() => onTab(t.id)}>
             {t.label}

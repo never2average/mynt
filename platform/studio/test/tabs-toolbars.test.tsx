@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 // One look for every page-level tab bar (shadcn's line tabs), no explainer text on Audits, and
 // the header's controls as one outlined group with real marks.
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { readFileSync } from "node:fs";
+import { useState } from "react";
 import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -13,7 +14,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 const root = process.cwd();
-const { Tab, TabList } = await import("@/components/ui/tabs");
+const { Tab, TabList, tabsThatFit } = await import("@/components/ui/tabs");
 const { AuditTabs } = await import("@/components/audits-view");
 const { PanelTabStrip } = await import("@/components/chat-workspace-shell");
 const { AUDIT_CLASS_HELP } = await import("@/lib/audit-classes");
@@ -36,7 +37,9 @@ describe("page-level tab bars", () => {
         <Tab selected={false}>Two</Tab>
       </TabList>,
     );
-    expect(html).toMatch(/role="tablist" aria-label="Demo" data-slot="tabs-list" data-variant="line" class="[^"]*shadow-\[inset_0_-1px_0_var\(--color-border\)\]/);
+    expect(html).toMatch(/role="tablist" aria-label="Demo" data-slot="tabs-list" data-variant="line"/);
+    // One bottom line across the row (the tablist and More), drawn inside it so the active underline covers it.
+    expect(html).toMatch(/class="[^"]*shadow-\[inset_0_-1px_0_var\(--color-border\)\][^"]*" data-slot="tabs-row"/);
     expect(html).not.toMatch(/bg-muted|rounded-lg|[\s"]p-1[\s"]|primary|mint/);
     const active = /<button[^>]*data-state="active"[^>]*class="([^"]*)"/.exec(html)![1];
     for (const c of ["border-b-2", "data-[state=active]:border-foreground", "data-[state=active]:text-foreground", "text-muted-foreground"]) expect(active).toContain(c);
@@ -56,32 +59,148 @@ describe("page-level tab bars", () => {
     }
   });
 
-  it("scroll sideways without a visible scrollbar, never vertically, and keep the focus ring inside the bar", () => {
+  it("never scroll: no overflow-x-auto or scrollbar on any tab row, and the focus ring stays inside the bar", () => {
     const html = renderToStaticMarkup(
       <TabList aria-label="Demo">
         <Tab selected>One</Tab>
         <Tab selected={false}>Two</Tab>
       </TabList>,
     );
-    const list = /role="tablist"[^>]*class="([^"]*)"/.exec(html)![1].split(" ");
-    for (const c of ["scrollbar-none", "overflow-x-auto", "overflow-y-hidden", "shrink-0"]) expect(list).toContain(c);
-    // The underline no longer hangs 1px below the bar (what made a scrollbar appear), and focus stays visible.
+    expect(html).not.toMatch(/overflow-x-auto|overflow-x-scroll|overflow-auto|overflow-y-auto|scrollbar-none/);
     const tab = /<button[^>]*class="([^"]*)"/.exec(html)![1].split(" ");
     expect(tab).not.toContain("-mb-px");
     expect(tab).toEqual(expect.arrayContaining(["focus-visible:ring-2", "focus-visible:ring-inset"]));
-    // The utility is defined once, in the studio's global CSS, for every engine.
-    const css = readFileSync(join(root, "app/globals.css"), "utf8");
-    expect(css).toMatch(/@utility scrollbar-none \{[^}]*scrollbar-width: none;[^}]*-ms-overflow-style: none;[^]*?::-webkit-scrollbar \{\s*display: none;/);
-    // Every page's tab row carries it: Licences, the app and Earn panels, Audits, Settings and the admin areas' tabs
-    // all render the shared TabList.
-    const panel = renderToStaticMarkup(<PanelTabStrip tabs={[{ id: "a", label: "Preview", content: null }]} tab="a" onTab={() => undefined} />);
-    expect(panel).toMatch(/role="tablist"[^>]*class="[^"]*scrollbar-none/);
-    expect(renderToStaticMarkup(<AuditTabs tab="security" onTab={() => undefined} />)).toMatch(/role="tablist"[^>]*class="[^"]*scrollbar-none/);
-    for (const f of ["app/(studio)/licences/licences-page.tsx", "components/admin-kit.tsx", "components/risk-area-tabs.tsx", "components/licences-kit.tsx"]) {
-      const src = readFileSync(join(root, f), "utf8");
-      expect(src, f).toMatch(/<TabList /);
-      expect(src, f).not.toMatch(/<TabList [^>]*className="[^"]*overflow-y-(auto|scroll)/);
+    const panel = renderToStaticMarkup(<PanelTabStrip tabs={["a", "b", "c", "d", "e"].map((id) => ({ id, label: id, content: null }))} tab="a" onTab={() => undefined} />);
+    expect(panel).not.toMatch(/overflow-x-auto|overflow-auto/);
+    expect(renderToStaticMarkup(<AuditTabs tab="security" onTab={() => undefined} />)).not.toMatch(/overflow-x-auto/);
+    expect(readFileSync(join(root, "components/ui/tabs.tsx"), "utf8")).not.toMatch(/overflow-x-auto|scrollbar-none|matchMedia/);
+    for (const f of ["app/(studio)/licences/licences-page.tsx", "components/admin-kit.tsx", "components/risk-area-tabs.tsx", "components/licences-kit.tsx", "components/workspace-view.tsx", "components/audits-view.tsx", "components/chat-workspace-shell.tsx"]) {
+      expect(readFileSync(join(root, f), "utf8"), f).not.toMatch(/<TabList [^>]*className="[^"]*overflow/);
     }
+  });
+
+  describe("when the row is too narrow", () => {
+    // jsdom has no layout: the row's and each tab's width are given here, and the row's ResizeObserver is driven by hand.
+    const TAB = 120;
+    const MORE = 90;
+    let room = 0;
+    const observers: (() => void)[] = [];
+    beforeEach(() => {
+      room = 0;
+      observers.length = 0;
+      vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+        const slot = this.getAttribute("data-slot");
+        const width = slot === "tabs-row" ? room : slot === "tabs-trigger" ? TAB : slot === "tabs-more" ? MORE : 0;
+        return { width, height: 36, top: 0, left: 0, right: width, bottom: 36, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+      });
+      vi.stubGlobal(
+        "ResizeObserver",
+        class {
+          constructor(private cb: () => void) {}
+          observe() {
+            observers.push(() => this.cb());
+          }
+          disconnect() {}
+          unobserve() {}
+        },
+      );
+    });
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    });
+    const resize = async (width: number) => {
+      room = width;
+      await act(async () => observers.forEach((o) => o()));
+    };
+
+    const FIVE = ["Business agreements", "MSA", "SLA", "Audit obligations", "Activity"];
+    function Bar({ start = 0, count = 5 }: { start?: number; count?: number }) {
+      const [tab, setTab] = useState(start);
+      return (
+        <TabList aria-label="Demo">
+          {FIVE.slice(0, count).map((t, i) => (
+            <Tab key={t} selected={tab === i} onClick={() => setTab(i)} data-demo-tab={i}>
+              {t}
+            </Tab>
+          ))}
+        </TabList>
+      );
+    }
+    const inlineTabs = () => screen.getAllByRole("tab").map((t) => t.textContent);
+    const more = () => document.querySelector("[data-tabs-more]") as HTMLButtonElement | null;
+
+    it("a wide row (or one not measured) shows every tab inline and no More", async () => {
+      render(<Bar />);
+      expect(inlineTabs()).toEqual(FIVE); // nothing measured yet: everything fits
+      expect(more()).toBeNull();
+      await resize(5 * TAB + 4 * 16); // exactly room for all five
+      expect(inlineTabs()).toEqual(FIVE);
+      expect(more()).toBeNull();
+    });
+
+    it("a narrow row shows the first tabs that fit and a labelled More after the tablist; widening it brings them back", async () => {
+      render(<Bar />);
+      await resize(3 * TAB + 3 * 16 + MORE); // three tabs and More
+      expect(inlineTabs()).toEqual(["Business agreements", "MSA", "SLA"]);
+      const trigger = more()!;
+      expect(trigger.textContent).toBe("More");
+      expect(trigger.querySelector("svg.lucide-chevron-down")).not.toBeNull();
+      expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
+      expect(trigger.getAttribute("data-state")).toBe("inactive");
+      expect(screen.getByRole("tablist").contains(trigger)).toBe(false);
+      expect(screen.getByRole("tablist").nextElementSibling).toBe(trigger);
+      await resize(100); // narrower than anything: still the first two
+      expect(inlineTabs()).toEqual(["Business agreements", "MSA"]);
+      await resize(2000);
+      expect(inlineTabs()).toEqual(FIVE);
+      expect(more()).toBeNull();
+    });
+
+    it("choosing a tab under More activates it: the trigger reads More: <tab> and is the active one; an inline tab clears it", async () => {
+      render(<Bar />);
+      await resize(3 * TAB + 3 * 16 + MORE);
+      await act(async () => void fireEvent.keyDown(more()!, { key: "Enter" }));
+      const items = [...document.querySelectorAll("[data-tabs-more-menu] [data-tabs-more-item]")];
+      expect(items.map((i) => i.textContent)).toEqual(["Audit obligations", "Activity"]);
+      expect(items.map((i) => i.getAttribute("role"))).toEqual(["menuitem", "menuitem"]);
+      await act(async () => void fireEvent.click(document.querySelector('[data-tabs-more-item][data-demo-tab="3"]')!));
+      expect(more()!.textContent).toBe("More: Audit obligations");
+      expect(more()!.getAttribute("data-state")).toBe("active");
+      expect(screen.getAllByRole("tab").every((t) => t.getAttribute("aria-selected") === "false")).toBe(true);
+      // The tablist stays in the keyboard order (its first tab), then More.
+      expect(screen.getAllByRole("tab").map((t) => t.tabIndex)).toEqual([0, -1, -1]);
+      await act(async () => void fireEvent.click(screen.getByRole("tab", { name: "MSA" })));
+      expect(more()!.textContent).toBe("More");
+      expect(screen.getByRole("tab", { name: "MSA" }).getAttribute("aria-selected")).toBe("true");
+    });
+
+    it("a page opened on a tab under More shows it on the trigger", async () => {
+      render(<Bar start={4} />);
+      await resize(3 * TAB + 3 * 16 + MORE);
+      expect(more()!.textContent).toBe("More: Activity");
+    });
+
+    it("three tabs or fewer that fit never show More; two never do", async () => {
+      render(<Bar count={3} />);
+      await resize(3 * TAB + 2 * 16);
+      expect(inlineTabs()).toEqual(FIVE.slice(0, 3));
+      expect(more()).toBeNull();
+      cleanup();
+      render(<Bar count={2} />);
+      await resize(50);
+      expect(inlineTabs()).toEqual(FIVE.slice(0, 2));
+      expect(more()).toBeNull();
+    });
+  });
+
+  it("the fit rule: all when they fit or nothing is measured, else as many as fit beside More, at least two", () => {
+    expect(tabsThatFit(5, 0, [], 0)).toBe(5);
+    expect(tabsThatFit(5, 400, [0, 0, 0, 0, 0], 0)).toBe(5);
+    expect(tabsThatFit(5, 664, [120, 120, 120, 120, 120], 90)).toBe(5);
+    expect(tabsThatFit(5, 498, [120, 120, 120, 120, 120], 90)).toBe(3);
+    expect(tabsThatFit(5, 10, [120, 120, 120, 120, 120], 90)).toBe(2);
+    expect(tabsThatFit(2, 10, [120, 120], 90)).toBe(2);
   });
 
   it("move with the arrow keys", () => {

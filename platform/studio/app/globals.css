@@ -144,7 +144,7 @@
   --sidebar-ring: #3ddc97;
 }
 
-/* A row that scrolls sideways without showing a scrollbar: the tab bars (components/ui/tabs.tsx) and toolbars. */
+/* A row that scrolls sideways without showing a scrollbar: the list toolbars (components/list-layout.tsx). Tab rows never scroll: they put extra tabs under More (components/ui/tabs.tsx). */
 @utility scrollbar-none {
   scrollbar-width: none;
   -ms-overflow-style: none;
