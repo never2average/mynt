@@ -22,11 +22,12 @@ export const STEP_STATUSES: readonly StepStatus[] = ["done", "next", "not_starte
 export const STEP_STATUS_WORDS: Record<StepStatus, string> = { done: "Done", next: "Do this next", not_started: "Not started", blocked: "Waiting" };
 
 /** What the studio can do for a step: open one of the area's sheets. Steps only Mynt can do have none. */
-export type StepAction = "create" | "edit" | "terms" | "conformance" | "list";
+export type StepAction = "create" | "edit" | "terms" | "practice" | "conformance" | "list";
 export const STEP_ACTION_LABELS: Record<StepAction, string> = {
   create: "Create service",
   edit: "Edit service",
   terms: "Set standard terms",
+  practice: "Run practice test",
   conformance: "Run conformance",
   list: "List service",
 };
@@ -52,7 +53,7 @@ export type Onboarding = {
   firmSteps: Step[];
   offerings: OfferingChecklist[];
   progress: Progress;
-  history: { offeringId: string; runs: ConformanceRun[]; termsVersions: TermsVersion[] }[];
+  history: { offeringId: string; runs: ConformanceRun[]; practiceRuns: ConformanceRun[]; termsVersions: TermsVersion[] }[];
 };
 
 const stepOf = (s: Obj): Step | null => {
@@ -109,6 +110,8 @@ export function fromOnboarding(reply: unknown): Onboarding | null {
               {
                 offeringId: str(h.offering_id)!,
                 runs: arr(h.conformance_runs).filter(isObj).map(runOf).filter((r): r is ConformanceRun => r !== null),
+                // Practice runs against Mynt's sandbox: kept apart, because they never count as conformance.
+                practiceRuns: arr(h.practice_runs).filter(isObj).map(runOf).filter((r): r is ConformanceRun => r !== null),
                 termsVersions: arr(h.terms_versions)
                   .filter(isObj)
                   .flatMap((v) =>
@@ -125,19 +128,25 @@ export function fromOnboarding(reply: unknown): Onboarding | null {
 
 /**
  * The studio's action for a step, where the vendor can take it now: the first service (Create service), naming a
- * licence on the service (Edit service), Mynt's test (Run conformance), standard terms (Set standard terms, at any
+ * licence on the service (Edit service), a practice run against Mynt's sandbox (Run practice test, for information:
+ * it never counts), Mynt's test (Run conformance; Edit service while the service has no test endpoint), standard terms (Set standard terms, at any
  * time before they're set) and listing (List service, once it passed). Steps only Mynt or subscribers can do, and
  * steps already done, have none.
  */
 export function stepAction(step: Step): StepAction | null {
+  // The practice run is for information and can be run again, passed or not.
+  if (step.key === "practice" && step.status !== "blocked" && step.by === "vendor") return "practice";
   if (step.status === "done" || step.status === "blocked" || step.by !== "vendor") return null;
   switch (step.key) {
     case "first_service":
       return "create";
     case "licence":
       return step.tool === "update_vendor_offering" ? "edit" : null; // registering a licence stays with the MCP tool
+    case "practice":
+      return "practice";
     case "conformance":
-      return "conformance";
+      // With no test endpoint yet, Mynt's step is to give it one (Edit service) before the real test can run.
+      return step.tool === "update_vendor_offering" ? "edit" : "conformance";
     case "terms":
       return "terms";
     case "listed":
@@ -300,3 +309,52 @@ export const isHttpsUrl = (u: string) => {
     return false;
   }
 };
+
+// ---- Run practice test ----
+
+export type PracticeCase = { case: string; passed: boolean; httpStatus: number | null; problems: string[] };
+export type PracticeExchange = { case: string; expected: string; request: { method: string; path: string; headers: Record<string, string>; body: unknown }; response: { httpStatus: number | null; body: unknown } };
+export type PracticeReference = { serviceType: string; sendsTo: string; signature: string; marker: string; expects: string; inputSchema: unknown; paramsSchema: unknown; outputSchema: unknown; transcript: PracticeExchange[] };
+export type PracticeResult = { passed: boolean; status: string | null; cases: PracticeCase[]; licenceNote: string | null; reference: PracticeReference | null };
+
+// A signing secret as Mynt issues them. Mynt leaves it out of a practice run's answer; the studio checks anyway and
+// shows no reference at all rather than one that carries a secret.
+const SECRET_LIKE = /mvs_[A-Za-z0-9_-]{16,}/;
+
+/** A practice run as the studio shows it (run_practice_conformance): each case, and what Mynt sent and expected. */
+export function practiceFrom(reply: unknown): PracticeResult {
+  const r = isObj(reply) ? reply : {};
+  const cases = arr(r.cases)
+    .filter(isObj)
+    .map((c) => ({ case: str(c.case) ?? "case", passed: c.passed === true, httpStatus: num(c.http_status), problems: arr(c.problems).map(str).filter((p): p is string => Boolean(p)) }));
+  const ref = isObj(r.reference) ? r.reference : null;
+  const sends = ref && isObj(ref.sends) ? ref.sends : {};
+  const expects = ref && isObj(ref.expects) ? ref.expects : {};
+  const reference: PracticeReference | null = ref
+    ? {
+        serviceType: str(ref.service_type) ?? "",
+        sendsTo: `${str(sends.method) ?? "POST"} ${str(sends.url) ?? ""}`.trim(),
+        signature: str(sends.signature) ?? "",
+        marker: str(sends.marker) ?? "",
+        expects: str(expects.answer) ?? "",
+        inputSchema: sends.input_schema ?? null,
+        paramsSchema: sends.params_schema ?? null,
+        outputSchema: expects.output_schema ?? null,
+        transcript: arr(ref.transcript)
+          .filter(isObj)
+          .map((x) => {
+            const q = isObj(x.request) ? x.request : {};
+            const a = isObj(x.response) ? x.response : {};
+            const headers = isObj(q.headers) ? Object.fromEntries(Object.entries(q.headers).filter((e): e is [string, string] => typeof e[1] === "string")) : {};
+            return { case: str(x.case) ?? "case", expected: str(x.expected) ?? "", request: { method: str(q.method) ?? "POST", path: str(q.path) ?? "", headers, body: q.body ?? null }, response: { httpStatus: num(a.http_status), body: a.body ?? null } };
+          }),
+      }
+    : null;
+  return {
+    passed: r.passed === true && r.kind === "practice",
+    status: str(r.status),
+    cases,
+    licenceNote: str(r.licence_note),
+    reference: reference && !SECRET_LIKE.test(JSON.stringify(reference)) ? reference : null,
+  };
+}

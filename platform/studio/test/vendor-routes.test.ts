@@ -20,7 +20,27 @@ const TOOLS = [
   { name: "create_vendor_offering", inputSchema: props("region", "service_type") },
   { name: "update_vendor_offering", inputSchema: props("offering_id", "listed", "standard_terms") },
   { name: "run_conformance", inputSchema: props("offering_id", "test_credential") },
+  { name: "run_practice_conformance", inputSchema: props("offering_id") },
 ];
+const PRACTICE = {
+  run_id: "p1",
+  kind: "practice",
+  passed: true,
+  counts_as_conformance: false,
+  status: "draft",
+  cases: [
+    { case: "fixture_1", passed: true, http_status: 200, latency_ms: 3, problems: [] },
+    { case: "bad_signature_refused", passed: true, http_status: 401, latency_ms: 1, problems: [] },
+  ],
+  reference: {
+    service_type: "identity_verification",
+    sends: { method: "POST", url: "<your test_base_url>/v1/identity_verification", signature: "Mynt-Signature: t=<unix seconds>,v1=<hex>", marker: "mynt_practice", input_schema: { type: "object" }, params_schema: null },
+    expects: { answer: "200 within 10 s", output_schema: { type: "object" } },
+    signing_secret: "<redacted>",
+    transcript: [{ case: "fixture_1", expected: "200 ok", request: { method: "POST", path: "/v1/identity_verification", headers: { "Mynt-Signature": "t=1,v1=<redacted>" }, body: { request_id: "q1", environment: "test" } }, response: { http_status: 200, body: { request_id: "q1", status: "ok", output: { result: "match" }, error: null } } }],
+  },
+} as Record<string, unknown>;
+let practiceReply: Record<string, unknown> = PRACTICE;
 const fake = {
   session: undefined as Session | undefined,
   ownOrigin: true,
@@ -63,6 +83,8 @@ vi.mock("@/lib/tokens", () => ({
           return ok({ id: OFF, status: "draft", conformance_signing_secret: "mvs_shown_once" });
         case "update_vendor_offering":
           return ok({ id: OFF, status: "draft", terms: args.standard_terms ? { version: 2 } : null });
+        case "run_practice_conformance":
+          return ok(practiceReply);
         case "run_conformance":
           return ok({ run_id: "r2", passed: false, status: "draft", cases: [{ case: "fixture_1", passed: false, problems: ["timeout"] }, { case: "bad_signature_refused", passed: true, problems: [] }] });
         default:
@@ -78,13 +100,14 @@ const create = await import("@/app/api/vendor/offerings/route");
 const one = await import("@/app/api/vendor/offerings/[offeringId]/route");
 const terms = await import("@/app/api/vendor/offerings/[offeringId]/terms/route");
 const conformance = await import("@/app/api/vendor/offerings/[offeringId]/conformance/route");
+const practice = await import("@/app/api/vendor/offerings/[offeringId]/practice/route");
 const listing = await import("@/app/api/vendor/offerings/[offeringId]/listing/route");
 const access = await import("@/app/api/liquidity/access/route");
 
 const post = (path: string, body: unknown) => new Request(`http://localhost:3000${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 const params = (offeringId: string) => ({ params: Promise.resolve({ offeringId }) });
 const session = (roles: string[]) => ({ id: "s", userId: "v1", createdAt: 0, lastSeen: 0, tokens: { access_token: "t", token_type: "Bearer" }, roles, rolesAt: Date.now() }) as Session;
-const writes = () => fake.calls.filter((c) => ["create_vendor_offering", "update_vendor_offering", "run_conformance"].includes(c.name));
+const writes = () => fake.calls.filter((c) => ["create_vendor_offering", "update_vendor_offering", "run_conformance", "run_practice_conformance"].includes(c.name));
 const TERMS = { document_url: "https://example.com/terms.pdf", document_sha256: "a".repeat(64), summary: "Our standard terms.", pricing_summary: "$1 per check", scopes: ["technology"] };
 
 beforeEach(() => {
@@ -92,6 +115,7 @@ beforeEach(() => {
   fake.ownOrigin = true;
   fake.whoami = { id: "v1", roles: ["vendor"], effective_roles: ["vendor"] };
   fake.calls = [];
+  practiceReply = PRACTICE;
 });
 
 describe("My services' routes, for a service provider", () => {
@@ -139,6 +163,50 @@ describe("My services' routes, for a service provider", () => {
       { name: "run_conformance", args: { offering_id: OFF, test_credential: "cred" } },
       { name: "update_vendor_offering", args: { offering_id: OFF, listed: true } },
     ]);
+  });
+
+  it("Run practice test → run_practice_conformance on the firm's own service: each case, the transcript, and never conformance", async () => {
+    const res = await practice.POST(post(`/api/vendor/offerings/${OFF}/practice`, {}), params(OFF));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: true, practice: true, passed: true, status: "draft" });
+    expect(body.message).toBe("Practice run passed — now point Mynt at your own test endpoint and run the real test.");
+    expect(body.cases).toEqual([
+      { case: "fixture_1", passed: true, httpStatus: 200, problems: [] },
+      { case: "bad_signature_refused", passed: true, httpStatus: 401, problems: [] },
+    ]);
+    expect(body.reference.sendsTo).toBe("POST <your test_base_url>/v1/identity_verification");
+    expect(body.reference.transcript[0].request.headers["Mynt-Signature"]).toBe("t=1,v1=<redacted>");
+    expect(body.reference.transcript[0].response).toEqual({ httpStatus: 200, body: { request_id: "q1", status: "ok", output: { result: "match" }, error: null } });
+    expect(JSON.stringify(body)).not.toContain("signing_secret");
+    expect(writes()).toEqual([{ name: "run_practice_conformance", args: { offering_id: OFF } }]);
+    // The real test is a different tool on a different route: a practice run never calls it.
+    expect(fake.calls.some((c) => c.name === "run_conformance" || c.name === "update_vendor_offering")).toBe(false);
+
+    // A reply that isn't marked as practice is never shown as a pass; one carrying a secret loses its transcript.
+    practiceReply = { ...PRACTICE, kind: undefined };
+    expect((await (await practice.POST(post(`/api/vendor/offerings/${OFF}/practice`, {}), params(OFF))).json()).passed).toBe(false);
+    practiceReply = { ...PRACTICE, reference: { ...(PRACTICE.reference as object), transcript: [{ case: "fixture_1", request: { headers: { leak: `mvs_${"a".repeat(43)}` } }, response: {} }] } };
+    const leaked = await (await practice.POST(post(`/api/vendor/offerings/${OFF}/practice`, {}), params(OFF))).json();
+    expect(leaked.reference).toBeNull();
+    expect(JSON.stringify(leaked)).not.toContain("mvs_");
+
+    // It takes nothing but the service: no credential, no flags; and only the firm's own service, from the studio's page.
+    fake.calls = [];
+    expect((await practice.POST(post(`/api/vendor/offerings/${OFF}/practice`, { test_credential: "cred" }), params(OFF))).status).toBe(400);
+    expect((await practice.POST(post(`/api/vendor/offerings/${OTHER}/practice`, {}), params(OTHER))).status).toBe(404);
+    fake.ownOrigin = false;
+    expect((await practice.POST(post(`/api/vendor/offerings/${OFF}/practice`, {}), params(OFF))).status).toBe(403);
+    fake.ownOrigin = true;
+    fake.session = session(["consumer", "developer", "innovator"]);
+    expect((await practice.POST(post(`/api/vendor/offerings/${OFF}/practice`, {}), params(OFF))).status).toBe(403);
+    expect(writes()).toEqual([]);
+  });
+
+  it("a service's details carry its practice runs apart from its conformance runs", async () => {
+    const body = await (await one.GET(new Request(`http://localhost:3000/api/vendor/offerings/${OFF}`), params(OFF))).json();
+    expect(body.runs.map((r: { runId: string }) => r.runId)).toEqual(["r1"]);
+    expect(body.practiceRuns).toEqual([]);
   });
 
   it("refuses, before anything is written: another firm's service, another origin, a bad body, terms without a SHA-256", async () => {

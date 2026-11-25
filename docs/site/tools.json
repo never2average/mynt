@@ -76,7 +76,7 @@
       "id": "vendors",
       "title": "Vendors",
       "summary": "Standard services per region, vendors' offerings, conformance and subscriptions.",
-      "tools": 24
+      "tools": 25
     },
     {
       "id": "compliance",
@@ -176,7 +176,7 @@
     {
       "role": "vendor",
       "summary": "a firm offering standard services per region (identity, KYC, account data, bureau, e-sign, e-mandate, the ramp) that builders plug into products. A peer of builders.",
-      "tools": 49,
+      "tools": 50,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Also holds the builder, vendor and licence-provider roles (except the licence-provider tools that act as a member of the firm itself), but not the liquidity-provider role.",
-      "tools": 411,
+      "tools": 412,
       "get_started": [
         {
           "tool": "define_region",
@@ -4480,7 +4480,7 @@
     {
       "name": "create_vendor_offering",
       "title": "Offer a standard service",
-      "description": "Vendor: offer a standard service type in a region from your test (and live) HTTPS endpoint, with your per-call price and the licences you hold for it, and your standard terms (standard_terms: the document link (https) and its SHA-256, a short summary, your pricing in words, and scopes: what they cover, one or more of technology, manpower, financial_regulatory_operations, recorded on every agreement made on them; you bill subscribers directly). Listing an offering with terms is your standing acceptance of them: app workspaces subscribe by accepting them in the marketplace, with no negotiation. It starts as a draft: run_conformance, then update_vendor_offering { listed: true }. The conformance signing secret is shown once.",
+      "description": "Vendor: offer a standard service type in a region from your test (and live) HTTPS endpoint (test_base_url may be left out of a new draft, to practise against Mynt's sandbox first with run_practice_conformance; run_conformance and listing need your own), with your per-call price and the licences you hold for it, and your standard terms (standard_terms: the document link (https) and its SHA-256, a short summary, your pricing in words, and scopes: what they cover, one or more of technology, manpower, financial_regulatory_operations, recorded on every agreement made on them; you bill subscribers directly). Listing an offering with terms is your standing acceptance of them: app workspaces subscribe by accepting them in the marketplace, with no negotiation. It starts as a draft: run_conformance (run_practice_conformance to practise first; a practice pass never counts), then update_vendor_offering { listed: true }. The conformance signing secret is shown once.",
       "area": "vendors",
       "roles": [
         "vendor",
@@ -4506,9 +4506,9 @@
             "maxLength": 200
           },
           "test_base_url": {
+            "description": "HTTPS base URL of your test endpoint; Mynt calls POST <base>/v1/<service_type>. May be left out of a new draft, to practise first (run_practice_conformance); run_conformance and listing need it",
             "type": "string",
-            "format": "uri",
-            "description": "HTTPS base URL of your test endpoint; Mynt calls POST <base>/v1/<service_type>"
+            "format": "uri"
           },
           "live_base_url": {
             "description": "HTTPS base URL of your live endpoint",
@@ -4607,7 +4607,6 @@
           "region",
           "service_type",
           "name",
-          "test_base_url",
           "price"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -8933,7 +8932,7 @@
     {
       "name": "get_vendor_onboarding",
       "title": "Where a vendor's onboarding stands",
-      "description": "Vendor (your own firm) or admin (any firm, with entity_id; every vendor firm's progress, with all_firms): the ordered onboarding checklist, firm-wide and per offering, each step done, next, not_started or blocked (waiting on Mynt or an earlier step), in plain words with the tool that does it: the firm registered and active, people with the vendor role, a first service, the licence the service type needs (registered and verified by Mynt), the offering (service type, region), Mynt's conformance test (latest run, when, failures), standard terms (version), listed, and the first subscriber (informational, never counted). offering_id narrows it to one offering and adds its history: conformance runs and terms versions. It only reads; a figure Mynt doesn't measure is null.",
+      "description": "Vendor (your own firm) or admin (any firm, with entity_id; every vendor firm's progress, with all_firms): the ordered onboarding checklist, firm-wide and per offering, each step done, next, not_started or blocked (waiting on Mynt or an earlier step), in plain words with the tool that does it: the firm registered and active, people with the vendor role, a first service, the licence the service type needs (registered and verified by Mynt), the offering (service type, region), the practice run against Mynt's sandbox (informational, never counted, never conformance), Mynt's conformance test (latest run, when, failures), standard terms (version), listed, and the first subscriber (informational, never counted). offering_id narrows it to one offering and adds its history: conformance runs, practice runs and terms versions. It only reads; a figure Mynt doesn't measure is null.",
       "area": "vendors",
       "roles": [
         "vendor",
@@ -15292,7 +15291,7 @@
     {
       "name": "run_conformance",
       "title": "Have Mynt test your endpoint",
-      "description": "Vendor: Mynt calls your test endpoint with signed fixture requests and checks every answer against the service type's output schema, that a badly signed request is refused, and your licences. A pass lets you list the offering. If you require a credential, pass a test one; it isn't kept.",
+      "description": "Vendor: Mynt calls your test endpoint with signed fixture requests and checks every answer against the service type's output schema, that a badly signed request is refused, and your licences. A pass lets you list the offering. If you require a credential, pass a test one; it isn't kept. To practise before your endpoint exists, see run_practice_conformance (a practice pass never counts here).",
       "area": "vendors",
       "roles": [
         "vendor",
@@ -15373,6 +15372,30 @@
         },
         "required": [
           "source"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "run_practice_conformance",
+      "title": "Practise Mynt's conformance test",
+      "description": "Vendor: a practice run of run_conformance's own test cases against Mynt's sandbox endpoint for this offering (<PUBLIC_URL>/vendor-sandbox/<offering_id>), which answers as a correct vendor of the service type would, so you can see the test pass and build against it before your own test endpoint exists. Nothing leaves Mynt and no credential is needed. Returns each case's result and reference: what Mynt sends and expects for the service type (schemas, signature rule) with the run's request and response transcript, the signing secret redacted. A practice pass never counts as conformance: it is recorded as kind practice, never changes the offering's status and never allows listing. Then set your own endpoint (update_vendor_offering { test_base_url }) and run_conformance.",
+      "area": "vendors",
+      "roles": [
+        "vendor",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "offering_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "offering_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -18617,9 +18640,9 @@
             "maxLength": 200
           },
           "test_base_url": {
+            "description": "HTTPS base URL of your test endpoint; Mynt calls POST <base>/v1/<service_type>. May be left out of a new draft, to practise first (run_practice_conformance); run_conformance and listing need it",
             "type": "string",
-            "format": "uri",
-            "description": "HTTPS base URL of your test endpoint; Mynt calls POST <base>/v1/<service_type>"
+            "format": "uri"
           },
           "live_base_url": {
             "description": "HTTPS base URL of your live endpoint",

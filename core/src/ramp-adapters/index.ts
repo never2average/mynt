@@ -621,6 +621,7 @@ export function registerRampAdapterTools(server: McpServer, store: Store, user: 
         return json({ offering_id: o.id, adapter: null, status: "draft", next: "run_conformance" });
       }
       const a = RAMP_ADAPTERS[adapter];
+      if (!o.test_base_url) return fail("Set the offering's test_base_url (the partner's test API) first: update_vendor_offering");
       const problems = [...a.configProblems(config), ...a.environmentProblems({ test_base_url: o.test_base_url, live_base_url: o.live_base_url, test_credential, live_credential })];
       if (problems.length) return fail("The adapter's settings aren't valid", { problems, config_fields: a.config_fields });
       if ((test_credential || live_credential) && !vaultAvailable(false)) return fail("This server's vault key (MYNT_VAULT_KEY) isn't configured, so it can't keep credentials");

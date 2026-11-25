@@ -5,7 +5,9 @@
 // (create_vendor_offering, update_vendor_offering), Set standard terms (an https link with the document's SHA-256,
 // computed here in the browser from the file, or pasted; a summary; the pricing in words; the Scope, at least one;
 // each change a new version),
-// Run conformance (Mynt's own test of the endpoint, with each failure) and List service / Unlist service.
+// Run practice test (the same cases against Mynt's own sandbox, with each case's result and what Mynt sent and
+// expected; it never counts), Run conformance (Mynt's own test of the endpoint, with each failure) and List service /
+// Unlist service.
 // Server-renderable for the tests.
 import { useEffect, useMemo, useState } from "react"
 import { Copy } from "lucide-react"
@@ -16,7 +18,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import type { AgreementScope } from "@/lib/app-panel"
 import { categoryLabel } from "@/lib/marketplace"
-import { isHttpsUrl, sha256Hex, sha256Of, type LicenceOption, type ServiceTypeOption, type VendorOffering } from "@/lib/vendor-area"
+import { isHttpsUrl, sha256Hex, sha256Of, type LicenceOption, type PracticeResult, type ServiceTypeOption, type VendorOffering } from "@/lib/vendor-area"
 
 type Done = () => void
 const offeringPath = (id: string, tail = "") => `/api/vendor/offerings/${encodeURIComponent(id)}${tail}`
@@ -38,10 +40,11 @@ const formOf = (o: VendorOffering | null): ServiceForm => ({
 })
 
 /** What's wrong with the form, in words, or null when it can be sent. */
-export function serviceFormProblem(f: ServiceForm, creating: boolean): string | null {
+export function serviceFormProblem(f: ServiceForm, creating: boolean, hadTestUrl = true): string | null {
   if (creating && !f.typeKey) return "Choose the standard service type."
   if (!f.name.trim()) return "Give the service a name."
-  if (!isHttpsUrl(f.testUrl)) return "The test endpoint must be an https link."
+  // A new draft may leave it blank, to practise against Mynt's sandbox first. Mynt's real test and listing need it.
+  if (f.testUrl.trim() ? !isHttpsUrl(f.testUrl) : !creating && hadTestUrl) return "The test endpoint must be an https link."
   if (f.liveUrl.trim() && !isHttpsUrl(f.liveUrl)) return "The live endpoint must be an https link."
   const amount = Number(f.amount)
   if (!f.amount.trim() || !Number.isFinite(amount) || amount < 0) return "Give your price per call (0 or more)."
@@ -96,7 +99,7 @@ export function ServiceSheet({
       title={title}
       description={
         creating
-          ? "Offer one of Mynt's standard services from your test endpoint. It starts as a draft; Mynt tests it before it's listed."
+          ? "Offer one of Mynt's standard services from your test endpoint. It starts as a draft; Mynt tests it before it's listed. No endpoint yet? Leave it blank and run a practice test first."
           : "Change your service. Changing an endpoint or licences makes it a draft again, to pass Mynt's conformance test before it's listed."
       }
       error={invalid ?? error}
@@ -107,12 +110,12 @@ export function ServiceSheet({
         data-service-form={mode}
         onSubmit={async (e) => {
           e.preventDefault()
-          const problem = serviceFormProblem(f, creating)
+          const problem = serviceFormProblem(f, creating, Boolean(offering?.testBaseUrl))
           if (problem) return setInvalid(problem)
           setInvalid(null)
           const fields = {
             name: f.name.trim(),
-            test_base_url: f.testUrl.trim(),
+            ...(f.testUrl.trim() ? { test_base_url: f.testUrl.trim() } : {}),
             ...(f.liveUrl.trim() ? { live_base_url: f.liveUrl.trim() } : {}),
             price: { amount: Number(f.amount), currency: f.currency.trim().toUpperCase() },
             sla_notes: f.sla.trim(),
@@ -152,8 +155,11 @@ export function ServiceSheet({
         <Field label="Name">
           <Input value={f.name} onChange={(e) => set({ name: e.target.value })} maxLength={200} required data-service-name />
         </Field>
-        <Field label="Test endpoint" hint="https only. Mynt calls POST <endpoint>/v1/<service type>">
-          <Input value={f.testUrl} onChange={(e) => set({ testUrl: e.target.value })} placeholder="https://api.example.com" inputMode="url" required data-service-test-url />
+        <Field
+          label={creating || !offering?.testBaseUrl ? "Test endpoint (optional for now)" : "Test endpoint"}
+          hint={creating || !offering?.testBaseUrl ? "https only. Mynt calls POST <endpoint>/v1/<service type>. Mynt's real test and listing need it; a practice test doesn't" : "https only. Mynt calls POST <endpoint>/v1/<service type>"}
+        >
+          <Input value={f.testUrl} onChange={(e) => set({ testUrl: e.target.value })} placeholder="https://api.example.com" inputMode="url" required={!creating && Boolean(offering?.testBaseUrl)} data-service-test-url />
         </Field>
         <Field label="Live endpoint (optional)" hint="https only">
           <Input value={f.liveUrl} onChange={(e) => set({ liveUrl: e.target.value })} placeholder="https://api.example.com" inputMode="url" data-service-live-url />
@@ -344,15 +350,20 @@ export function ConformanceSheet({ offering, onClose, onDone, fetcher }: { offer
           }}
         >
           <p className="text-sm">
-            {offering.name} · test endpoint {offering.testBaseUrl}
+            {offering.name} · {offering.testBaseUrl ? `test endpoint ${offering.testBaseUrl}` : "no test endpoint yet"}
           </p>
+          {!offering.testBaseUrl && (
+            <p className="text-sm text-muted-foreground" data-conformance-no-endpoint>
+              Mynt&apos;s real test calls your own test endpoint. Add it with Edit service first. Until then, Run practice test shows the test against Mynt&apos;s sandbox; a practice pass doesn&apos;t count.
+            </p>
+          )}
           {offering.requiresCredential && (
             <Field label="Test credential" hint="Sent to your test endpoint for this run only; Mynt doesn't keep it">
               <Input type="password" value={credential} onChange={(e) => setCredential(e.target.value)} maxLength={2000} autoComplete="off" spellCheck={false} required data-conformance-credential />
             </Field>
           )}
           <div>
-            <Button type="submit" disabled={busy || (offering.requiresCredential && !credential.trim())} data-conformance-submit>
+            <Button type="submit" disabled={busy || !offering.testBaseUrl || (offering.requiresCredential && !credential.trim())} data-conformance-submit>
               {busy ? "Mynt is testing…" : outcome ? "Run conformance again" : "Run conformance"}
             </Button>
           </div>
@@ -369,6 +380,120 @@ export function ConformanceSheet({ offering, onClose, onDone, fetcher }: { offer
                 </li>
               ))}
             </ul>
+          )}
+        </div>
+      )}
+    </AdminSheet>
+  )
+}
+
+// ---- Run practice test ----
+
+function downloadJson(name: string, value: unknown) {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }))
+  const a = document.createElement("a")
+  a.href = url
+  a.download = name
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+const pretty = (v: unknown) => JSON.stringify(v, null, 2)
+
+/** Mynt's test cases against Mynt's own sandbox for the service. For practice only: it never counts as conformance. */
+export function PracticeSheet({ offering, onClose, onDone, fetcher }: { offering: VendorOffering | null; onClose: () => void; onDone: Done; fetcher?: typeof fetch }) {
+  const { busy, error, result, run, reset } = useAdminAction(fetcher)
+  const [outcome, setOutcome] = useState<PracticeResult | null>(null)
+  useEffect(() => {
+    reset()
+    setOutcome(null)
+  }, [offering, reset])
+  const ref = outcome?.reference ?? null
+  return (
+    <AdminSheet
+      id="run-practice"
+      open={offering !== null}
+      onClose={onClose}
+      title="Run practice test"
+      description="Mynt runs its conformance test's own cases against its own sandbox for this service, which answers as a correct endpoint would. Nothing leaves Mynt. It shows what Mynt sends and expects, so you can build your endpoint against it. A practice pass never counts: the service stays as it is, and listing still needs the real test of your own endpoint."
+      error={error}
+      result={result}
+    >
+      {offering && (
+        <form
+          className="flex flex-col gap-3"
+          data-practice-form
+          onSubmit={async (e) => {
+            e.preventDefault()
+            const r = await run(offeringPath(offering.id, "/practice"), {})
+            if (r?.ok) {
+              setOutcome({
+                passed: r.passed === true,
+                status: typeof r.status === "string" ? r.status : null,
+                cases: Array.isArray(r.cases) ? (r.cases as PracticeResult["cases"]) : [],
+                licenceNote: typeof r.licenceNote === "string" ? r.licenceNote : null,
+                reference: (r.reference as PracticeResult["reference"]) ?? null,
+              })
+              onDone()
+            }
+          }}
+        >
+          <p className="text-sm">
+            {offering.name} · {offering.serviceKey} in {offering.region}
+          </p>
+          <div>
+            <Button type="submit" disabled={busy} data-practice-submit>
+              {busy ? "Mynt is practising…" : outcome ? "Run practice test again" : "Run practice test"}
+            </Button>
+          </div>
+        </form>
+      )}
+      {outcome && (
+        <div className="flex flex-col gap-3 text-sm" data-practice-outcome={outcome.passed ? "passed" : "failed"}>
+          <p className="font-medium">{outcome.passed ? "Practice result: passed (doesn't count as conformance)" : "Practice result: didn't pass"}</p>
+          <ul className="flex flex-col gap-1" data-practice-cases>
+            {outcome.cases.map((c) => (
+              <li key={c.case} data-practice-case={c.case} data-practice-case-result={c.passed ? "passed" : "failed"}>
+                <span className="font-medium">{c.case.replace(/_/g, " ")}</span>: {c.passed ? "Passed" : "Didn't pass"}
+                {c.httpStatus !== null ? ` (HTTP ${c.httpStatus})` : ""}
+                {c.problems.length ? `: ${c.problems.join("; ")}` : ""}
+              </li>
+            ))}
+          </ul>
+          {outcome.licenceNote && (
+            <p className="text-muted-foreground" data-practice-licence-note>
+              {outcome.licenceNote}
+            </p>
+          )}
+          {ref ? (
+            <div className="flex flex-col gap-2" data-practice-reference>
+              <p className="font-medium">What Mynt sends and expects</p>
+              <p className="text-muted-foreground">
+                {ref.sendsTo}. {ref.signature} {ref.marker}
+              </p>
+              <p className="text-muted-foreground">Expects: {ref.expects}</p>
+              <div>
+                <Button type="button" size="sm" variant="outline" onClick={() => downloadJson(`practice-${ref.serviceType || "service"}.json`, ref)} data-practice-download>
+                  Download transcript
+                </Button>
+              </div>
+              {ref.transcript.map((x) => (
+                <details key={x.case} className="rounded-md border p-2" data-practice-exchange={x.case}>
+                  <summary className="cursor-pointer font-medium">{x.case.replace(/_/g, " ")}</summary>
+                  <p className="mt-1 text-muted-foreground">Expected: {x.expected}</p>
+                  <p className="mt-2 text-xs font-medium">
+                    Mynt sent: {x.request.method} {x.request.path}
+                  </p>
+                  <pre className="mt-1 overflow-x-auto rounded bg-muted p-2 text-xs">{pretty({ headers: x.request.headers, body: x.request.body })}</pre>
+                  <p className="mt-2 text-xs font-medium">The sandbox answered: HTTP {x.response.httpStatus ?? "—"}</p>
+                  <pre className="mt-1 overflow-x-auto rounded bg-muted p-2 text-xs">{pretty(x.response.body)}</pre>
+                </details>
+              ))}
+            </div>
+          ) : (
+            <p className="text-muted-foreground" data-practice-no-reference>
+              Mynt didn&apos;t send a transcript for this run.
+            </p>
           )}
         </div>
       )}

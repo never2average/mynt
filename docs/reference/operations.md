@@ -325,7 +325,7 @@ bash install-host.sh <domain> [git-ref] --studio-upstream <studio host>
 | Paths | Request body limit |
 |---|---|
 | `/mcp`, `/healthz`, `/v1/*`, `/agent/*`, `/bd/*` | As without Studio |
-| `/v1`, `/llms.txt`, `/llms-full.txt`, `/.well-known/*`, `/ramp-sandbox/*`, `/confidential/*` | 64 KB |
+| `/v1`, `/llms.txt`, `/llms-full.txt`, `/.well-known/*`, `/ramp-sandbox/*`, `/vendor-sandbox/*`, `/confidential/*` | 64 KB |
 | `/webhooks/*` (the sign-in provider's events) and `/esign/*` (the e-signature service's events and the signing frame's origins) | 1 MB |
 
 **What goes to Studio.** Everything else, `/` included, is proxied to the Studio host, with request bodies up to 4.5 MB. Streaming isn't buffered.
