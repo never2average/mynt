@@ -357,7 +357,7 @@ Vercel builds Studio as a standard Next.js app. `vercel.json` only sets the inst
 
 To serve Studio at Mynt's own address instead of its own, go live in this order. The server side is in [Mynt Studio on Mynt's domain](../../docs/reference/operations.md#mynt-studio-on-mynts-domain).
 
-1. **Deploy the edge first.** On Mynt's server, run its host installer (`deploy/host/install-host.sh` in this repository) with `<domain> --studio-upstream <Studio's deployment host>`. Mynt keeps its paths (`/mcp`, `/v1`, `/.well-known/*`, `/llms.txt` and the rest), and everything else on the domain is proxied to Studio.
+1. **Deploy the edge first.** On Mynt's server, run its host installer (the `install-host` script in `deploy/host/` in this repository) with `<domain> --studio-upstream <Studio's deployment host>`. Mynt keeps its paths (`/mcp`, `/v1`, `/.well-known/*`, `/llms.txt` and the rest), and everything else on the domain is proxied to Studio.
 2. **Then point Studio at the domain.** Set `APP_URL` to `https://<Mynt's domain>`, and `TRUSTED_EDGE_IPS` to every public outbound address of Mynt's server, both IPv4 and IPv6.
 3. **Redeploy Studio.** Everyone signs in once more, because the new callback address gets its own client registration. With a pre-registered client, register one for the new callback address first and replace `MYNT_OAUTH_CLIENT_ID` and `MYNT_OAUTH_CLIENT_SECRET`.
 
