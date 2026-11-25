@@ -175,6 +175,9 @@ export async function productRegime(store: Store, product: ProductRecord, opts: 
   // Licence providers' approved sponsorships of this product's components (by: sponsor).
   const sponsored: Sponsorship[] =
     product.entity_id && components.some((c) => c.provider?.by === "sponsor") ? await store.sponsorships({ product_id: product.product.id, status: "approved" }) : [];
+  // Requests still waiting for the licence provider: nothing is covered by them, but the builder has already asked.
+  const asked: Sponsorship[] =
+    product.entity_id && components.some((c) => c.provider?.by === "sponsor") ? await store.sponsorships({ product_id: product.product.id, status: "pending" }) : [];
 
   const out = [];
   for (const region of [...new Set(components.map(regionOf))]) {
@@ -240,7 +243,12 @@ export async function productRegime(store: Store, product: ProductRecord, opts: 
       else if (!c.provider) pre = { status: "unassigned", reason: "No provider named" };
       else if (!providerEntity || (providerParty && !partyActive(providerParty))) pre = { status: "uncovered", reason: "The providing party isn't active on your roster" };
       else if (sponsor && !sponsor.sponsorships.length)
-        pre = { status: "uncovered", reason: `${sponsor.name} (licence provider) hasn't approved a sponsorship of '${c.key}' in this product; ask with request_sponsorship` };
+        pre = {
+          status: "uncovered",
+          reason: asked.some((x) => x.component_key === c.key && x.provider_entity_id === providerEntity && x.builder_entity_id === product.entity_id)
+            ? `${sponsor.name} (licence provider) hasn't approved a sponsorship of '${c.key}' in this product yet: your request is waiting for its decision (approve_sponsorship)`
+            : `${sponsor.name} (licence provider) hasn't approved a sponsorship of '${c.key}' in this product; ask with request_sponsorship`,
+        };
       else [held, roster] = await entityData(providerEntity);
       const pinnedLicence = c.provider?.by === "self" ? c.provider.licence_id : undefined;
       const who = c.provider?.by === "self" ? "Your entity" : sponsor ? `${sponsor.name} (sponsor)` : "The partner";

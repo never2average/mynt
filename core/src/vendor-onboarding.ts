@@ -101,6 +101,8 @@ async function firmSteps(store: Store, entity: Entity | null, offerings: Offerin
   }
   const active = entity.status === "active";
   const members = await vendorMembers(store, entity.id);
+  // People Mynt added to the firm with the vendor role who haven't signed in yet: they join when they first do.
+  const invited = members > 0 ? 0 : (await store.pendingFirmMembers(entity.id)).filter((p) => p.roles.includes("vendor")).length;
   const gate = active ? null : "Waits for your firm to be active again.";
   const raws = [
     active
@@ -108,10 +110,15 @@ async function firmSteps(store: Store, entity: Entity | null, offerings: Offerin
       : step("firm_registered", "Your firm is registered with Mynt", "blocked", `Mynt has ${STATUS_WORDS[entity.status] ?? entity.status} ${entity.name}. Waiting for Mynt to make it active again.`, "set_entity_status", "admin", { entity_status: entity.status }),
     members > 0
       ? step("vendor_members", "People with the vendor role", "done", `${members} ${members === 1 ? "person has" : "people have"} the vendor role at ${entity.name}.`, "invite_user", "admin", { members })
-      : step("vendor_members", "People with the vendor role", "blocked", "Waiting for Mynt to invite your people with the vendor role.", "invite_user", "admin", { members }),
+      : invited > 0
+        ? step("vendor_members", "People with the vendor role", "blocked", `Mynt invited ${invited} ${invited === 1 ? "person" : "people"} with the vendor role. Waiting for them to sign in: they join ${entity.name} when they do.`, "invite_user", "admin", { members, invited })
+        : step("vendor_members", "People with the vendor role", "blocked", "Waiting for Mynt to invite your people with the vendor role.", "invite_user", "admin", { members }),
     offerings.length
       ? step("first_service", "Create your first service", "done", `${offerings.length} ${offerings.length === 1 ? "service" : "services"} created.`, "create_vendor_offering", "vendor", { services: offerings.length })
-      : step("first_service", "Create your first service", "todo", "Choose a standard service type and give Mynt your test endpoint.", "create_vendor_offering", "vendor", { services: 0 }),
+      : members > 0
+        ? step("first_service", "Create your first service", "todo", "Choose a standard service type and give Mynt your test endpoint.", "create_vendor_offering", "vendor", { services: 0 })
+        : // Nobody at the firm can create one yet: it isn't offered as the next thing to do.
+          step("first_service", "Create your first service", "blocked", "Waits for your firm's people with the vendor role.", "create_vendor_offering", "vendor", { services: 0 }),
   ];
   return { steps: settle(raws, gate), gate };
 }
@@ -314,10 +321,12 @@ export async function vendorOnboarding(store: Store, entityId: string | null, op
     ...(opts.history ? { history } : {}),
   };
 }
-// Firms that are vendors: one with a member holding the vendor role, or with an offering.
+// Firms that are vendors: one with a member holding the vendor role (or one invited with it who hasn't signed in yet),
+// or with an offering.
 export async function vendorFirms(store: Store) {
   const { rows } = await store.db.query(
     `SELECT e.id FROM ${T}.entities e WHERE EXISTS (SELECT 1 FROM ${T}.users u WHERE u.entity_id = e.id AND 'vendor' = ANY(u.roles))
+        OR EXISTS (SELECT 1 FROM ${T}.firm_pending_members p JOIN ${T}.invites i ON i.email = p.email WHERE p.entity_id = e.id AND 'vendor' = ANY(i.roles))
         OR EXISTS (SELECT 1 FROM ${T}.vendor_offerings o WHERE o.entity_id = e.id) ORDER BY e.name, e.id`,
   );
   const firms = [];

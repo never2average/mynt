@@ -579,7 +579,7 @@
     {
       "name": "add_entity_member",
       "title": "Add someone to a firm",
-      "description": "Admin: make a signed-in user a member of a firm (they then act for it as a builder, a vendor or a licence provider, by their roles). The firm's existing members are told, on its webhooks (firm.member_added) and as a notice each. A licence-provider account added to a licence provider that already has one waits for an existing member to accept it (decide_firm_member).",
+      "description": "Admin: make someone a member of a firm (they then act for it as a builder, a vendor or a licence provider, by their roles). Someone whitelisted (invite_user) who hasn't signed in yet is recorded as pending (status pending_sign_in; list_entities' pending_members) and joins the firm when they first sign in; remove_entity_member cancels it. The firm's existing members are told when they join, on its webhooks (firm.member_added) and as a notice each. A licence-provider account added to a licence provider that already has one waits for an existing member to accept it (decide_firm_member).",
       "area": "admin",
       "roles": [
         "admin"
