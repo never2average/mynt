@@ -33,8 +33,8 @@ import {
 
 const field = "rounded-md border border-input bg-background px-2 py-1.5 text-sm"
 const SCORES = [1, 2, 3, 4, 5]
-const LIKELIHOOD_WORDS = ["", "Rare", "Unlikely", "Possible", "Likely", "Almost certain"]
-const IMPACT_WORDS = ["", "Negligible", "Minor", "Moderate", "Major", "Severe"]
+export const LIKELIHOOD_WORDS = ["", "Rare", "Unlikely", "Possible", "Likely", "Almost certain"]
+export const IMPACT_WORDS = ["", "Negligible", "Minor", "Moderate", "Major", "Severe"]
 
 // Mynt's own register (platform) is the platform admin's Risk register (/platform/risk-register), one risk area per
 // tab, kept and read by Mynt admins only: its sheets also pick the risk's area (Add risk starts on the tab's).
