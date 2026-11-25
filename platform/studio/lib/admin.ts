@@ -351,7 +351,9 @@ export type AdminLicence = {
   reviewNote: string | null
   createdAt: string | null
 }
-export type Firm = { id: string; name: string; status: string; legalForm: string | null; country: string | null; regions: string[]; members: FirmMember[]; invited?: InvitedFirmMember[]; licences: AdminLicence[]; awaitingReview: number | null; types: FirmType[]; createdAt: string | null }
+// onboarding: a regulated firm's progress towards sponsoring (get_regulated_firm_onboarding { all_firms }); null for a
+// firm that isn't a licence provider's; left out when this Mynt doesn't say (the list shows "Not available").
+export type Firm = { id: string; name: string; status: string; legalForm: string | null; country: string | null; regions: string[]; members: FirmMember[]; invited?: InvitedFirmMember[]; licences: AdminLicence[]; awaitingReview: number | null; types: FirmType[]; createdAt: string | null; onboarding?: RegulatedFirmRow | null }
 
 // What a firm is, from its members' roles (a firm with nobody in it yet is none of them).
 export function firmTypes(members: FirmMember[]): FirmType[] {
@@ -485,6 +487,46 @@ export function vendorFirmsFrom(reply: unknown): VendorFirmRow[] | null {
 }
 /** A firm's onboarding progress in words: "4 of 6 steps done", "All 6 steps done", or "Not known". */
 export const onboardingWords = (f: VendorFirmRow) => (f.done === null || f.total === null ? "Not known" : f.complete ? `All ${f.total} steps done` : `${f.done} of ${f.total} steps done`)
+
+// Each regulated firm's onboarding progress (get_regulated_firm_onboarding { all_firms }): steps done of those counted,
+// the next one (the firm's own, or one waiting on Mynt or a register), and whether the real-company check passes. A
+// count Mynt didn't give stays null, never 0.
+export type RegulatedFirmRow = {
+  entityId: string
+  done: number | null
+  total: number | null
+  complete: boolean
+  next: { title: string; waiting: boolean } | null
+  checkPasses: boolean | null
+  readyToSponsor: boolean
+}
+export function regulatedFirmsFrom(reply: unknown): RegulatedFirmRow[] | null {
+  if (!isObj(reply) || !Array.isArray(reply.firms)) return null
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null)
+  return reply.firms.filter(isObj).map((f) => {
+    const p = isObj(f.progress) ? f.progress : {}
+    const next = isObj(p.next) ? p.next : null
+    const check = isObj(f.real_company_check) ? f.real_company_check : null
+    return {
+      entityId: String(f.entity_id ?? ""),
+      done: n(p.done),
+      total: n(p.total),
+      complete: p.complete === true,
+      next: next ? { title: String(next.title ?? next.key ?? ""), waiting: next.status === "blocked" } : null,
+      checkPasses: typeof check?.passes === "boolean" ? check.passes : null,
+      readyToSponsor: f.ready_to_sponsor === true,
+    }
+  })
+}
+/** The Regulated firms list's Onboarding column: "5 of 7 steps done · Next: …", or why there's none. */
+export function firmOnboardingWords(f: Pick<Firm, "onboarding">): string {
+  const o = f.onboarding
+  if (o === undefined) return NOT_AVAILABLE
+  if (o === null) return "Not a licence provider"
+  if (o.done === null || o.total === null) return "Not known"
+  if (o.complete) return `All ${o.total} steps done`
+  return `${o.done} of ${o.total} steps done${o.next ? ` · Next: ${o.next.title}${o.next.waiting ? " (waiting)" : ""}` : ""}`
+}
 
 export const conformanceWords = (c: AdminOffering["conformance"]) => (c ? `${c.passed ? "Passed" : "Failed"}${c.at ? ` ${dateOf(c.at)}` : ""}` : "Not run yet")
 

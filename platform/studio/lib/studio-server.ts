@@ -4,7 +4,7 @@ import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { callMyntTool, NotSignedInError } from "./mynt-client";
 import type { Session } from "./session-store";
-import { isDeveloper, isMyntAdmin, parseAdminCall, parseStudioCall, parseToolText, rolesFrom, type AdminTool } from "./studio-tools";
+import { isDeveloper, isMyntAdmin, parseAdminCall, parseFirmCall, parseStudioCall, parseToolText, rolesFrom, type AdminTool, type FirmTool } from "./studio-tools";
 
 // A refusal whose message may be shown to the user: Mynt's own error message ({"error": "..."}),
 // or a generic one. Raw replies and validation details are never shown.
@@ -88,6 +88,17 @@ export async function callStudioTool(client: Client, tool: string, args: Record<
 export async function callAdminTool(client: Client, session: Session, tool: AdminTool, args: Record<string, unknown> = {}): Promise<unknown> {
   if (!isMyntAdmin(session.roles ?? [])) throw new ToolRefusedError("That's for Mynt admins.");
   const call = parseAdminCall(tool, args);
+  if ("error" in call) throw new ToolRefusedError("The studio couldn't send that to Mynt.");
+  const outcome = await callMyntTool(client, call.tool, call.args);
+  if (outcome.isError) throw new MyntRefusedError(refusalMessage(outcome.text), outcome.text);
+  return parseToolText(outcome.text);
+}
+
+// My firm's only way to call Mynt: a regulated firm's tool (FIRM_TOOLS), for a session whose account Mynt says is a
+// licence provider. Anyone else's call never leaves the studio. Mynt checks the role, and whose firm it is, again.
+export async function callFirmTool(client: Client, session: Session, tool: FirmTool, args: Record<string, unknown> = {}): Promise<unknown> {
+  if (!(session.roles ?? []).includes("license_provider")) throw new ToolRefusedError("That's for a regulated firm's own people.");
+  const call = parseFirmCall(tool, args);
   if ("error" in call) throw new ToolRefusedError("The studio couldn't send that to Mynt.");
   const outcome = await callMyntTool(client, call.tool, call.args);
   if (outcome.isError) throw new MyntRefusedError(refusalMessage(outcome.text), outcome.text);

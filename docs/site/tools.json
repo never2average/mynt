@@ -70,7 +70,7 @@
       "id": "licences",
       "title": "Licences & partners",
       "summary": "Firms and licences, sponsorship, money rails, the partner kit and covenants.",
-      "tools": 42
+      "tools": 43
     },
     {
       "id": "vendors",
@@ -176,7 +176,7 @@
     {
       "role": "vendor",
       "summary": "a firm offering standard services per region (identity, KYC, account data, bureau, e-sign, e-mandate, the ramp) that builders plug into products. A peer of builders.",
-      "tools": 50,
+      "tools": 47,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -203,11 +203,15 @@
     {
       "role": "license_provider",
       "summary": "a firm, added by an admin, holding licences (verified by admins) that sponsor builders' products: it approves, declines or revokes sponsorship of a product's component under a held licence, in the jurisdictions it covers. A peer of builders.",
-      "tools": 101,
+      "tools": 102,
       "get_started": [
         {
           "tool": "get_my_entity",
           "why": "your firm, as an admin registered it; share its id with builders"
+        },
+        {
+          "tool": "get_regulated_firm_onboarding",
+          "why": "where your onboarding stands, step by step, and what to do next before you can sponsor"
         },
         {
           "tool": "register_license",
@@ -219,11 +223,7 @@
         },
         {
           "tool": "approve_sponsorship",
-          "why": "sponsor a product under your licences, where they cover"
-        },
-        {
-          "tool": "list_sponsored_products",
-          "why": "what you sponsor (revoke_sponsorship to stop)"
+          "why": "sponsor a product under your licences, where they cover (list_sponsored_products shows what you sponsor; revoke_sponsorship stops)"
         }
       ]
     },
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Also holds the builder, vendor and licence-provider roles (except the licence-provider tools that act as a member of the firm itself), but not the liquidity-provider role.",
-      "tools": 412,
+      "tools": 413,
       "get_started": [
         {
           "tool": "define_region",
@@ -8733,6 +8733,35 @@
       }
     },
     {
+      "name": "get_regulated_firm_onboarding",
+      "title": "Where a regulated firm's onboarding stands",
+      "description": "Licence provider (your own firm) or admin (any firm, with entity_id; every regulated firm's progress, with all_firms): the ordered checklist of what a regulated firm needs before it can sponsor builders' products, each step done, next, not_started or blocked (waiting on Mynt, a public register or an earlier step), in plain words with the tool that does it: the firm registered and active, people with the licence-provider role (and those invited who haven't signed in), the facts the real-company check looks the firm up by (its LEI or FinCEN MSB registration number, by SPONSOR_LEGITIMACY_RULE), the real-company check itself (each public register's latest answer and when; 'unavailable' is said as such, never as a failure), licences registered, licences verified by Mynt, and the roster filled for those licences' mandated stakeholders. Three more are informational and never counted: the partner ledger, a program agreement template and the first approved sponsorship. It also gives ready_to_sponsor, the legitimacy result and the registers' answers so far (checks, newest first). It only reads; a figure Mynt doesn't measure is null.",
+      "area": "licences",
+      "roles": [
+        "license_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "entity_id": {
+            "description": "Admins: the regulated firm. Licence providers may omit it (their own firm).",
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "all_firms": {
+            "description": "Admins: every regulated firm's progress",
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "get_regulator",
       "title": "A regulator in full",
       "description": "One regulator in a region: the product types and customer personas it supervises, and every licence it grants with its GRC (obligations, filings, risks, controls, repositories, allowed products and segments, mandatory stakeholders).",
@@ -9459,7 +9488,6 @@
       "description": "Licence provider: your firm's program agreement templates, each version with what it's attached to, its SHA-256 and whether it's the active one. include_retired lists the versions no longer in use too.",
       "area": "apps",
       "roles": [
-        "vendor",
         "license_provider",
         "admin"
       ],
@@ -14718,7 +14746,6 @@
       "description": "Licence provider: stop using one of your firm's templates for new agreements. Documents already made from it are unaffected, and the version is kept. Audited.",
       "area": "apps",
       "roles": [
-        "vendor",
         "license_provider",
         "admin"
       ],
@@ -18828,7 +18855,6 @@
       "description": "Licence provider (your firm's own licence providers only): add your firm's program agreement, which apps sign with you when you accept their program agreement. Either upload the document (source 'upload': a PDF or DOCX as base64, at most 5 MB; Mynt keeps it sealed with its SHA-256) or name a template your firm keeps at this deployment's e-signature service (source 'provider_template', with its placeholders for the two signers and field_map from Mynt's variables to the template's field ids). Attach it to one of your licences (licence_id) or sponsorships (sponsorship_id), or neither for your firm's default; the most specific active one is used. Mynt appends a program schedule stating the parties, the developer's firm, the app, the products, the scope, the states and the dates. Versions never change: a new upload under the same name is the next version and the active one. Audited.",
       "area": "apps",
       "roles": [
-        "vendor",
         "license_provider",
         "admin"
       ],

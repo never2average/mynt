@@ -37,6 +37,8 @@ const RESTRICTED: readonly StudioPage[] = [
   { href: "/platform", label: "Mynt platform admin" },
   // A service provider's own services (Mynt's vendor role), in its sidebar only.
   { href: "/vendor", label: "My services" },
+  // A regulated firm's own area (Mynt's licence-provider role), in its sidebar only.
+  { href: "/firm", label: "My firm" },
   { href: "/admin", label: "Mynt platform admin" },
 ];
 

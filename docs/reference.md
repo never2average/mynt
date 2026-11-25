@@ -131,6 +131,7 @@ This file used to hold the whole reference. Code comments, older links and insta
 | Opening products to developers | [Building on a product](reference/apps-and-builds.md#building-on-a-product) |
 | Vendors: standard services, per region | [Vendors and the marketplace](reference/vendors-and-marketplace.md) |
 | Onboarding a vendor | [Onboarding a vendor](reference/vendors-and-marketplace.md#onboarding-a-vendor) |
+| Onboarding a regulated firm (licence provider) | [Onboarding a regulated firm](reference/licence-providers.md#onboarding-a-regulated-firm) |
 | The vendor wire contract | [The wire contract](reference/vendors-and-marketplace.md#the-wire-contract) |
 | The Mynt Ramp | [The Mynt Ramp](reference/vendors-and-marketplace.md#the-mynt-ramp) |
 | Coding-agent builds (developers) | [Coding-agent builds](reference/apps-and-builds.md#coding-agent-builds) |

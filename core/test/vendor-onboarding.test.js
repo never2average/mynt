@@ -180,6 +180,10 @@ test("each step's states, from a firm with nothing to a listed service with a su
   steps = (await ok(vera, "get_vendor_onboarding")).offerings[0].steps;
   assert.equal(stepOf(steps, "listed").status, "done");
   assert.equal(stepOf(steps, "terms").status, "next");
+  // Listed with no standard terms: both steps say the same gap, the same way.
+  assert.equal(stepOf(steps, "listed").detail, "Listed in the Marketplace, without standard terms: app teams can't subscribe until you set them.");
+  assert.match(stepOf(steps, "terms").detail, /^It's listed without standard terms: app teams see it in the Marketplace and can't subscribe until you set them/);
+  assert.equal(stepOf(steps, "first_subscriber").detail, "No subscribers yet. App teams can subscribe from the Marketplace once you set standard terms.");
   assert.equal(stepOf(steps, "first_subscriber").facts.subscribers, 0, "a measured count: none yet");
   await ok(w.innovator, "subscribe_vendor_service", { offering_id: created.id });
   steps = (await ok(vera, "get_vendor_onboarding")).offerings[0].steps;

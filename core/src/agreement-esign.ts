@@ -458,7 +458,7 @@ export async function esignWebhook(store: Store, source: EsignSource, req: Incom
 }
 
 // Licence providers' templates (their firm's members only), and both parties' signing and signed copies.
-export function registerAgreementEsignTools(server: McpServer, store: Store, user: User, esignSource: EsignSource, sides: { app: boolean; counterparty: boolean }) {
+export function registerAgreementEsignTools(server: McpServer, store: Store, user: User, esignSource: EsignSource, sides: { app: boolean; counterparty: boolean; licenceProvider?: boolean }) {
   const esign = () => currentEsign(esignSource);
   // The caller's firm when they act for it as a licence provider (read afresh: no standing, no firm).
   const lpFirm = async () => {
@@ -485,7 +485,8 @@ export function registerAgreementEsignTools(server: McpServer, store: Store, use
   };
   const noLpFirm = "You don't act for a firm as a licence provider; its licence providers manage its agreement templates";
 
-  if (sides.counterparty) {
+  // Templates are a licence provider's: a vendor (a counterparty too, on its standard terms) is never shown them.
+  if (sides.licenceProvider ?? sides.counterparty) {
     server.registerTool(
       "upload_agreement_template",
       {

@@ -101,9 +101,9 @@ const VENDOR_TOOLS = [
   "reveal_subscription_secret", "rotate_subscription_secret", "run_conformance", "run_practice_conformance", "update_vendor_offering",
   // the Mynt Ramp's adapter
   "link_ramp_partner_customer", "set_ramp_adapter",
-  // apps' agreements with its firm
-  "download_agreement_document", "get_agreement_signing_link", "list_agreement_templates", "list_app_agreements",
-  "respond_to_app_agreement", "retire_agreement_template", "sign_app_agreement", "terminate_app_agreement", "update_agreement_scopes", "upload_agreement_template",
+  // apps' agreements with its firm (never a licence provider's agreement templates: a vendor's terms are its offerings')
+  "download_agreement_document", "get_agreement_signing_link", "list_app_agreements",
+  "respond_to_app_agreement", "sign_app_agreement", "terminate_app_agreement", "update_agreement_scopes",
 ];
 
 async function connect(store, user = null) {
@@ -181,6 +181,26 @@ test("a vendor gets the public catalogue, its firm and its own tools, with its o
   assert.deepEqual(await toolNames(await connect(store, vendor)), [...CATALOG_TOOLS, ...VENDOR_TOOLS].sort());
   assert.ok((await toolNames(await connect(store, await as("Root", ["admin"])))).includes("get_vendor_onboarding"));
   assert.ok(!(await toolNames(await connect(store, innovator))).includes("get_vendor_onboarding"));
+});
+
+test("agreement templates are a licence provider's tools: a vendor is never shown them", async () => {
+  const { store, as, developer } = await setup();
+  const TEMPLATE_TOOLS = ["list_agreement_templates", "retire_agreement_template", "upload_agreement_template"];
+  const have = async (who) => (await toolNames(await connect(store, who))).filter((t) => TEMPLATE_TOOLS.includes(t));
+  assert.deepEqual(await have(await as("Lena", ["license_provider"])), TEMPLATE_TOOLS);
+  assert.deepEqual(await have(await as("Root", ["admin"])), TEMPLATE_TOOLS, "an admin holds the licence-provider role too");
+  assert.deepEqual(await have(await as("Vera", ["vendor"])), []);
+  assert.deepEqual(await have(developer), []);
+  // Someone who is both keeps them, for their licence-provider side.
+  assert.deepEqual(await have(await as("Both", ["vendor", "license_provider"])), TEMPLATE_TOOLS);
+});
+
+test("a regulated firm's onboarding is a licence provider's and an admin's tool; builders, vendors and consumers don't have it", async () => {
+  const { store, as, developer, consumer } = await setup();
+  const has = async (who) => (await toolNames(await connect(store, who))).includes("get_regulated_firm_onboarding");
+  assert.equal(await has(await as("Lena", ["license_provider"])), true);
+  assert.equal(await has(await as("Root", ["admin"])), true);
+  for (const who of [developer, consumer, await as("Vera", ["vendor"]), await as("Fund", ["liquidity_provider"])]) assert.equal(await has(who), false);
 });
 
 test("a developer can enroll and an innovator can build apps", async () => {

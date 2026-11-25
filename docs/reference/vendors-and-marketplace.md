@@ -281,6 +281,8 @@ Each step has a `key`, a `title`, a `status`, a `detail` in plain words, the `to
 | `listed` (offering) | Listed | List it once it passed (`update_vendor_offering { listed: true }`) |
 | `first_subscriber` (offering, informational) | A firm subscribes (`facts.subscribers`) | Not started: it is the subscribers' choice, and never counted |
 
+An offering can be listed before it has standard terms. Both steps then say the same thing: `listed` is done, "without standard terms: app teams can't subscribe until you set them", and `terms` is the next step.
+
 Terms from before scopes were recorded stand, and subscribers can still accept them, but the `terms` step stays to do until new terms name their scopes.
 
 A suspended offering's steps wait on Mynt (`suspend_vendor_offering`). Terms already set stay done.

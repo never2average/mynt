@@ -14,7 +14,7 @@ Two rules hold on every page:
 Every Studio page has a left sidebar, collapsible to icons. From top to bottom it holds:
 
 1. **The workspace switcher.** Your workspaces, then **Create workspace**.
-2. **The fixed pages**, in this order: Dashboard, Licences, Marketplace, Audits, Settings. Then **Earn**, for builders and liquidity providers, and **My services**, for vendors.
+2. **The fixed pages**, in this order: Dashboard, Licences, Marketplace, Audits, Settings. Then **Earn**, for builders and liquidity providers, **My services**, for vendors, and **My firm**, for licence providers.
 3. **Apps and products.** The selected workspace's apps and your own financial products, in three folders by stage: Production, Staging and Ideas.
 4. **Platform admin**, for Mynt admins only.
 5. **Your account.** Your avatar, name and email, and Log out.
@@ -25,19 +25,19 @@ Everything is scoped to the selected workspace, which is remembered in a cookie.
 
 | Your roles | What the sidebar shows |
 |---|---|
-| Builder | Everything above except My services and Platform admin |
-| Licence provider, without the builder role | Dashboard and Licences. Only Licences opens |
+| Builder | Everything above except My services, My firm and Platform admin |
+| Licence provider, without the builder role | Dashboard, Licences and My firm. Licences and My firm open |
 | Liquidity provider, without the builder role | Dashboard (the investor view) and Earn |
 | Vendor | My services is added |
 | Mynt admin | Platform admin is added |
 
 The sidebar always lists Dashboard, but a page opens only for a role that can use it. Without the builder role:
 
-- a licence provider opens Licences;
+- a licence provider opens Licences and My firm;
 - a liquidity provider opens the Dashboard's investor view and Earn;
 - a vendor opens My services.
 
-Every other page, the Dashboard included for a licence provider or a vendor who is not also a liquidity provider, shows one message: "Mynt Studio is for developers. Ask a Mynt admin for the developer role." For a vendor the message carries an **Open My services** button. Someone with none of these roles gets that message on every page. Studio labels builders "developers" here, and vendors "service providers" on Marketplace and My services.
+Every other page, the Dashboard included for a licence provider or a vendor who is not also a liquidity provider, shows one message: "Mynt Studio is for developers. Ask a Mynt admin for the developer role." For a vendor the message carries an **Open My services** button, and for a licence provider an **Open My firm** button. Someone with none of these roles gets that message on every page. Studio labels builders "developers" here, and vendors "service providers" on Marketplace and My services.
 
 A builder with no workspace on Mynt yet is asked to **Create your workspace** first. Earn still opens.
 
@@ -340,6 +340,33 @@ My services (`/vendor`) is a vendor's own area, shown only to accounts with the 
 - A service opens its details: a card with its labelled actions, then the tabs Conformance runs, Terms versions and Subscribers, each a table.
 
 See [Onboarding a vendor](vendors-and-marketplace.md#onboarding-a-vendor).
+
+## My firm
+
+My firm (`/firm`) is a regulated firm's own area. It is shown only to accounts Mynt granted the licence-provider role, with standing at their firm. A Mynt admin's roles imply the role without a firm, so an admin sees My firm only when the role was also granted.
+
+From top to bottom:
+
+- **The firm's card**: its status, regions, LEI, FinCEN MSB registration number, NMLS ID, whether it can sponsor now, and its firm id to share with builders. One line says where the real-company check stands, in words with a mark, and when the registers were last asked. **Set firm facts** opens a sheet for the three identifiers. The firm's other identifiers are kept as they are, and its legal name is Mynt's to correct.
+- **The onboarding checklist**, "Getting ready to sponsor": every step has its status in words, what it waits on, and a labelled button where Studio can do it (**Set firm facts**, **Register licence**, **Add party**, **Review request**). Steps only Mynt can do say what they wait for.
+- **Six tabs**, each a list: a full-width search, **Import** (disabled, saying why), **Export CSV** and the tab's own action, over a paged table.
+
+| Tab | Address | Shows | Actions |
+|---|---|---|---|
+| **Licences** | `/firm` | The firm's licences: type, regulator, where it was issued, number, dates, status in words, where it covers, sponsorships under it | **Register licence**: the licence type from the regulatory model for the firm's regions, its number, the state where the type is issued per state, and its dates |
+| **Sponsorship requests** | `/firm?tab=requests` | Requests waiting for a decision, then approved sponsorships: product, component, builder, where asked and approved | **Review request** on a waiting one (Approve sponsorship or Decline request, with a note); **Revoke sponsorship** on an approved one, with a reason |
+| **Sponsored products** | `/firm?tab=sponsored` | Every approved sponsorship: the product and whether it is live or drifted, the component, the builder, the licences and where. Read-only | |
+| **Roster** | `/firm?tab=roster` | Required roles nobody fills, then the parties and what each fills | **Add party**, also on each unfilled role's row; **End party** |
+| **People** | `/firm?tab=people` | Licence providers, other members, accounts waiting to be accepted, and people invited who haven't signed in | **Decide** on a waiting account (Accept member or Decline member) |
+| **Notices** | `/firm?tab=notices` | What changed at the firm, newest first. Read-only. Opening the tab marks them read | |
+
+Review request says so when the real-company check hasn't passed: Approve sponsorship is off, with the reason, and Decline request still works.
+
+Mynt acts for the caller's own firm in every one of these, and Studio's routes check that a sponsorship, licence, party or member request belongs to that firm before they send anything. Mynt's refusals are shown in its own words: an admin account can't revoke a sponsorship or decide who joins, even one that belongs to the firm.
+
+Still done with the Model Context Protocol (MCP) tools: a party's qualification facts, a covenant breach on a revocation, the partner kit and the firm's webhooks. Agreement templates are on [Licences](#licences).
+
+See [Onboarding a regulated firm](licence-providers.md#onboarding-a-regulated-firm).
 
 ## Audits
 

@@ -62,6 +62,7 @@ import { driftFor, registerCovenantTools } from "./covenants.js";
 import { registerRampAdapterTools } from "./ramp-adapters/index.js";
 import { registerFirmWebhookTools, registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools } from "./vendors.js";
 import { registerVendorOnboardingTools } from "./vendor-onboarding.js";
+import { registerRegulatedFirmOnboardingTools } from "./regulated-firm-onboarding.js";
 import { registerProductRequestInnovatorTools, registerProductRequestTools, requestOffersFor } from "./product-requests.js";
 import { registerVersioningTools } from "./versions.js";
 import { productStage } from "./store.js";
@@ -182,6 +183,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   }
   // Where a vendor's onboarding stands: its own firm's, or (admins) any vendor firm's (vendor-onboarding.ts).
   if (user && (has("vendor") || has("admin"))) registerVendorOnboardingTools(server, store, user, { admin: has("admin") });
+  // Where a regulated firm's onboarding stands: its own, or (admins) any firm's (regulated-firm-onboarding.ts).
+  if (user && (has("license_provider") || has("admin"))) registerRegulatedFirmOnboardingTools(server, store, user, { admin: has("admin") });
   if (user && hasLiquidityRole(rolesFrom(user))) {
     registerLiquidityTools(server, store, user, rolesFrom(user), ctx.productHealth ?? null, { treasury: ctx.treasury ?? null, identity: ctx.identity ?? null });
     // On-chain treasuries (devnet): Mynt prepares unsigned transactions; the person's own wallet signs them.
@@ -216,7 +219,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     const sides = { app: has("developer"), counterparty: has("license_provider") || has("vendor") };
     registerAppAgreementTools(server, store, user, sides, ctx.esign ?? null);
     // Licence providers' agreement templates, and signing program agreements by e-signature (agreement-esign.ts).
-    registerAgreementEsignTools(server, store, user, ctx.esign ?? null, sides);
+    // (the templates only for licence providers: a vendor's terms are its offering's standard terms).
+    registerAgreementEsignTools(server, store, user, ctx.esign ?? null, { ...sides, licenceProvider: has("license_provider") });
   }
   // Admins set e-signature up from Mynt Studio: the service's key, its webhook, test mode (esign-settings.ts).
   if (user && has("admin") && typeof (ctx.esign as Partial<EsignSettings> | null | undefined)?.setKey === "function") registerEsignAdminTools(server, store, user, ctx.esign as EsignSettings);

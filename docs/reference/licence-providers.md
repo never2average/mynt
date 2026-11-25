@@ -1,6 +1,6 @@
 # Firms, licences and licence providers
 
-This file covers a firm's record on Mynt (its legal entity, parties and compliance folders), how a licence provider sponsors a builder's product, the public checks Mynt runs on a licence provider's firm, covenants, the partner kit that connects a licence provider's ledger, and product health. It is for licence providers, for builders asking for sponsorship, and for Mynt admins reviewing firms.
+This file covers a firm's record on Mynt (its legal entity, parties and compliance folders), how a licence provider sponsors a builder's product, the public checks Mynt runs on a licence provider's firm, a regulated firm's onboarding checklist, covenants, the partner kit that connects a licence provider's ledger, and product health. It is for licence providers, for builders asking for sponsorship, and for Mynt admins reviewing firms.
 
 See also: [Roles and tools](roles-and-tools.md), [Products](products.md), [Agreements](agreements.md), [Money rails](money-rails.md), [Liquidity pools and on-chain treasuries](liquidity-and-treasury.md), [Confidential computing](confidential-computing.md), [Connecting a licence provider to Mynt](../partners.md).
 
@@ -33,7 +33,7 @@ A party fills the mandatory stakeholders that the licence type of a held licence
 
 Parties aren't edited. To change one, end it and add a new one.
 
-`get_my_entity` reconciles each held licence against the roster. It reports:
+`get_my_entity` lists the roster, naming the firm behind each external party (`legal_entity_name`), and reconciles each held licence against it. It reports:
 
 - which mandated stakeholders are filled, and by whom;
 - which are missing;
@@ -86,6 +86,8 @@ A builder needn't hold licences. A licence provider is a firm that does.
 3. A Mynt admin verifies them with `review_license`, as for any firm.
 
 The firm's people share its firm id with builders out of band. There is no directory of firms.
+
+`get_regulated_firm_onboarding` shows the firm, and Mynt's admins, how far along it is: see [Onboarding a regulated firm](#onboarding-a-regulated-firm).
 
 ### Asking and deciding
 
@@ -201,7 +203,7 @@ How answers count:
 - Answers count only for the firm's current facts. A new LEI or legal name needs a fresh run.
 - The refusal says which checks failed and what to do.
 
-`get_my_entity`, the admin's `list_entities` and each of `list_sponsorship_requests` show the result as `legitimacy` (`your_firm_legitimacy` in the requests): whether it passes, why not, each source's latest status, URL and time, and what to verify by hand.
+`get_regulated_firm_onboarding` says where the check stands before anyone tries to approve (see [Onboarding a regulated firm](#onboarding-a-regulated-firm)). `get_my_entity`, the admin's `list_entities` and each of `list_sponsorship_requests` show the result as `legitimacy` (`your_firm_legitimacy` in the requests): whether it passes, why not, each source's latest status, URL and time, and what to verify by hand.
 
 ### Drift from a failed check
 
@@ -212,6 +214,75 @@ Nothing extra is pinned, so products published before these checks existed are c
 ### Paid checks later
 
 A state's Secretary of State good standing, officers and registered agent need a paid source. The US region has a `kyb_business_verification` service type for that (`core/schemas/service-types/us/`; vendors such as Middesk or Baselayer can offer it once it is wired in). It is data only for now: nothing calls it.
+
+## Onboarding a regulated firm
+
+`get_regulated_firm_onboarding` shows where a regulated firm (a licence provider's firm) stands on the way to sponsoring, as one ordered checklist. It only reads. Each step is done with the tools it names, which decide as before.
+
+| Caller | Reads |
+| --- | --- |
+| A licence provider of the firm, with standing there | Their firm's: no arguments, or their own `entity_id` |
+| A Mynt admin | Any firm's (`entity_id`), and every regulated firm's progress (`all_firms: true`: firms with a licence provider, with one invited who hasn't signed in yet, or with a sponsorship request) |
+
+A licence provider reads only its own firm. An account still waiting to be accepted at its firm has no standing, so it doesn't have the tool. Builders, vendors, liquidity providers and consumers don't have it either.
+
+### Steps and their statuses
+
+Each step has a `key`, a `title`, a `status`, a `detail` in plain words, the `tool` that does it, `by` (`firm`, `admin` or `builder`), `informational` and `facts`.
+
+| Status | Meaning |
+| --- | --- |
+| `done` | The step is complete |
+| `next` | The first thing the firm's own people can do now. At most one |
+| `not_started` | The firm's to do, after the next one |
+| `blocked` | Waiting on Mynt, on a public register, or on an earlier step. The detail says which, for example "Waiting for Mynt to verify your licence fincen_msb 31000123456789" |
+
+While the firm isn't `active`, and before it has a licence provider, nobody there can act: every step not yet done is `blocked`, and its detail starts with what it waits for.
+
+### The regulated firm's checklist
+
+Seven steps count towards progress, in this order:
+
+| Step | Done when | Otherwise |
+| --- | --- | --- |
+| `firm_registered` | The firm is on Mynt and `active` | Blocked on an admin (`register_firm`, `set_entity_status`) |
+| `licence_provider_members` | Someone at the firm has the licence-provider role, with standing (`facts.members`, and `facts.licence_providers` by name). The detail also counts those waiting to be accepted (`facts.waiting`, decided with `decide_firm_member`) and those invited who haven't signed in (`facts.invited`) | Blocked on an admin (`invite_user`, `add_entity_member`). "Mynt invited 1 person with the licence-provider role. Waiting for them to sign in" when they were added before signing in |
+| `firm_facts` | The firm's record has what the rule looks it up by: its LEI (identifier `lei`), its FinCEN MSB registration number (identifier `us_fincen_msb`, or its registered FinCEN licence), or both, by `SPONSOR_LEGITIMACY_RULE`. Also done when the check already passed on the legal name alone, and when the rule is `off` | Next: `set_entity_facts`. An LEI that isn't a valid LEI is said as such |
+| `real_company_check` | The firm passes [the rule](#the-rule): the detail names each register that matches, and when | Blocked, on Mynt or the register. Not run yet: waiting for an admin's `run_firm_checks` (it also runs monthly). A register that couldn't be reached is "unavailable, not a failure", with the date, and never counts against the firm. Not passed: each register's answer in words, and that `approve_sponsorship` is refused until it passes |
+| `licences_registered` | The firm has a licence registered that Mynt hasn't rejected (`facts.registered`) | Next: `register_license` |
+| `licences_verified` | A licence is verified and in force. The detail also counts those waiting, suspended, lapsed or not verified | Blocked while Mynt verifies (`review_license`) or has suspended one. Register again when one lapsed or wasn't verified, with Mynt's note |
+| `roster_complete` | Every stakeholder the held licences mandate is filled on the roster by a party that meets its criteria (`facts.mandated`, `facts.filled`) | Next: `add_party`. The detail names what is still needed ("AML compliance officer (a person, for fincen_msb)"); `facts.missing` lists each with its licence and stakeholder id |
+
+Three more are informational. They are shown, never counted, and never `next`:
+
+| Step | Says |
+| --- | --- |
+| `partner_ledger` | Whether Mynt reads the firm's own ledger or the sandbox. Sponsoring doesn't wait for it: Mynt reads the sandbox until the ledger is connected (see [Partner kit](#partner-kit)) |
+| `agreement_template` | How many program agreement templates are in use. Optional (see [E-signature](agreements.md#e-signature)) |
+| `first_sponsorship` | How many sponsorships are approved and how many requests wait (`facts.approved`, `facts.pending`). While the real-company check hasn't passed, it says an approval would be refused, before anyone tries |
+
+With `SPONSOR_LEGITIMACY_RULE` set to `off`, `firm_facts` and `real_company_check` are done, and `facts.passes` is `null`: not measured, never a pass.
+
+### What comes with the checklist
+
+- `progress` counts the steps done out of the seven counted, names the `next` one (the firm's own first, else what waits on Mynt) and says whether it is `complete`.
+- `ready_to_sponsor` is true when the firm is active, has a licence provider, passes the real-company check and holds a licence in force: what `approve_sponsorship` needs of the firm itself.
+- `legitimacy` is the same result `get_my_entity` shows.
+- `checks` lists every answer the public registers gave about the firm, newest first, up to 50: the register, its status in words, when, any note, and whether it was Mynt's own monthly re-check.
+
+With `all_firms`, each firm has its name and status, the number of licence providers, licences and approved sponsorships, whether the real-company check passes, `ready_to_sponsor` and `progress`.
+
+A figure Mynt doesn't measure (a firm not yet registered, a check that is off) is `null`, never 0.
+
+### My firm in Studio
+
+Mynt Studio shows the checklist to licence providers as My firm (`/firm`, in the sidebar only for accounts granted the licence-provider role; an admin's roles only imply it):
+
+- the firm's card, with the real-company check's latest result in words and **Set firm facts**;
+- the checklist, titled "Getting ready to sponsor", each step's status in words with a labelled button where Studio can do it: Set firm facts, Register licence, Add party, Review request;
+- the tabs Licences, Sponsorship requests, Sponsored products, Roster, People and Notices, each a table.
+
+See [My firm](studio.md#my-firm). The platform admin's Regulated firms section shows each firm's progress and its real-company check, with Run checks (see [Regulated firms section](platform-admin.md#regulated-firms-section)).
 
 ## Covenants
 

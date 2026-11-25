@@ -24,6 +24,8 @@ export function pageGateFor(pathname: string, access: StudioAccess, needsWorkspa
   if (!access.developer && access.licenceProvider && pathname === "/licences") return "none"
   // A service provider's own area (My services) needs neither the developer role nor a workspace.
   if (access.vendor && (pathname === "/vendor" || pathname.startsWith("/vendor/"))) return "none"
+  // A regulated firm's own area (My firm) needs neither the developer role nor a workspace.
+  if (access.firm && (pathname === "/firm" || pathname.startsWith("/firm/"))) return "none"
   if (!access.developer) return access.liquidity.liquidityProvider && investorPage ? "none" : "developer"
   // Everything but Earn needs a workspace (Earn's pools and positions are the user's own).
   if (needsWorkspace && pathname !== "/" && investorPage) return "none"
@@ -40,6 +42,11 @@ export function DeveloperGate() {
       {access?.vendor && (
         <Button asChild size="sm" className="mt-2" data-open-my-services>
           <a href="/vendor">Open My services</a>
+        </Button>
+      )}
+      {access?.firm && (
+        <Button asChild size="sm" className="mt-2" data-open-my-firm>
+          <a href="/firm">Open My firm</a>
         </Button>
       )}
     </div>

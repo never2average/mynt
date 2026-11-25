@@ -6,6 +6,7 @@ import { asDeveloper, json } from "@/lib/studio-route";
 import { callStudioTool, isAuthError, sessionIsDeveloper } from "@/lib/studio-server";
 import type { Session } from "@/lib/session-store";
 import { isVendor } from "@/lib/vendor-area";
+import { grantedLicenceProvider } from "@/lib/firm-server";
 
 export const dynamic = "force-dynamic";
 
@@ -28,7 +29,7 @@ async function grantedVendor(mynt: Client, session: Session): Promise<boolean> {
 // links, and the dashboard's Builder / Investor switch; and whether they're a licence provider (the
 // Licences page's Agreements tab). Roles come from Mynt's whoami, read again every few minutes; Mynt
 // checks every call. `admin`: a Mynt admin (the sidebar's Admin group). `vendor`: a service provider (the sidebar's
-// My services). `owner` is an opaque hash of the user, so a choice remembered in this browser is the user's own.
+// My services). `firm`: a regulated firm's own licence provider (the sidebar's My firm). `owner` is an opaque hash of the user, so a choice remembered in this browser is the user's own.
 export async function GET() {
   return asDeveloper(
     "reading liquidity roles",
@@ -39,6 +40,8 @@ export async function GET() {
         licenceProvider: isLicenceProvider(session.roles ?? []),
         admin: (session.roles ?? []).includes("admin"),
         vendor: await grantedVendor(mynt, session),
+        // My firm in the sidebar: the licence-provider role as granted (an admin's roles only imply it).
+        firm: await grantedLicenceProvider(mynt, session),
         owner: ownerOf(session),
       }),
     () => true,

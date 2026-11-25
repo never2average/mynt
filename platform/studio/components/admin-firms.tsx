@@ -12,10 +12,13 @@
 // status (set_entity_status), then Members (each with Change role and Remove: components/admin-members.tsx), Licences
 // (each with Verify licence, Reject licence or Suspend licence, as the Licences tab has them),
 // Offerings and Products (the firm's products, owned or sponsored: the platform admin has no products list of its own;
-// /platform/firms/<id>?tab=products opens it), each a table. What a firm keeps to
+// /platform/firms/<id>?tab=products opens it), Onboarding (a regulated firm's checklist towards sponsoring) and Checks
+// (every answer the public registers gave about it), each a table. The metadata card says where the real-company check
+// stands (its latest result, when, the rule and what's missing), with Run checks (run_firm_checks). The list's
+// Onboarding column says how far each regulated firm is ("5 of 7 steps done", and the next step). What a firm keeps to
 // itself (its encrypted health books, its signatures) isn't here: admins can't read or co-sign them. Server-renderable.
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { Building2, ShieldAlert, UserPlus } from "lucide-react"
+import { Building2, SearchCheck, ShieldAlert, UserPlus } from "lucide-react"
 
 import { LicenceActions, LicencesTab, LicenceStatus, ReviewLicenceSheet, type Decision } from "@/components/admin-licences"
 import { FirmMembersTable, InviteFirmMemberSheet } from "@/components/admin-members"
@@ -26,7 +29,8 @@ import { StageMark, StatusDot } from "@/components/promotion-view"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Tab, TabList } from "@/components/ui/tabs"
-import { conformanceWords, csvOf, dateOf, FIRM_TYPE_LABELS, FIRM_TYPES, FIRMS_TAB_LABELS, FIRMS_TABS, NOT_AVAILABLE, words, type AdminLicence, type AdminOffering, type AdminProduct, type Firm, type FirmsTab } from "@/lib/admin"
+import { conformanceWords, csvOf, dateOf, firmOnboardingWords, FIRM_TYPE_LABELS, FIRM_TYPES, FIRMS_TAB_LABELS, FIRMS_TABS, NOT_AVAILABLE, words, type AdminLicence, type AdminOffering, type AdminProduct, type Firm, type FirmsTab } from "@/lib/admin"
+import { STEP_STATUS_WORDS, type Onboarding, type RealCompanyCheck } from "@/lib/firm-area"
 import type { Stage } from "@/lib/workspaces"
 
 const typesOf = (f: Firm) => f.types.map((t) => FIRM_TYPE_LABELS[t]).join(", ") || "No members yet"
@@ -160,7 +164,7 @@ export function FirmsListView({ firms, onOpen, onChanged = () => undefined, shee
   )
   const { page, pages, shown: onPage, setPage } = usePaged(shown)
   const exportCsv = () =>
-    downloadCsv("regulated-firms.csv", csvOf(["Firm", "Type", "Status", "Members", "Licences", "Awaiting review", "Country", "Created", "Id"], shown.map((f) => [f.name, typesOf(f), f.status, f.members.length, f.licences.length, awaitingReviewWords(f), f.country ?? "", dateOf(f.createdAt), f.id])))
+    downloadCsv("regulated-firms.csv", csvOf(["Firm", "Type", "Status", "Onboarding", "Members", "Licences", "Awaiting review", "Country", "Created", "Id"], shown.map((f) => [f.name, typesOf(f), f.status, firmOnboardingWords(f), f.members.length, f.licences.length, awaitingReviewWords(f), f.country ?? "", dateOf(f.createdAt), f.id])))
   return (
     <>
       <AdminList
@@ -187,12 +191,15 @@ export function FirmsListView({ firms, onOpen, onChanged = () => undefined, shee
         onPage={setPage}
       >
         <AdminTable
-          head={["Firm", "Type", "Status", "Members", "Licences", "Awaiting review", "Country", "Created", ""]}
+          head={["Firm", "Type", "Status", "Onboarding", "Members", "Licences", "Awaiting review", "Country", "Created", ""]}
           rowKeys={onPage.map((f) => f.id)}
           rows={onPage.map((f) => [
             f.name,
             typesOf(f),
             <FirmStatus key="s" status={f.status} />,
+            <span key="o" data-firm-onboarding={f.id}>
+              {firmOnboardingWords(f)}
+            </span>,
             String(f.members.length),
             String(f.licences.length),
             <span key="w" data-awaiting-review={f.id}>
@@ -219,20 +226,75 @@ export function FirmsListView({ firms, onOpen, onChanged = () => undefined, shee
   )
 }
 
-export type FirmDetailTab = "members" | "licences" | "offerings" | "products"
+export type FirmDetailTab = "members" | "licences" | "offerings" | "products" | "onboarding" | "checks"
 type DetailTab = FirmDetailTab
-export const FIRM_DETAIL_TABS: readonly FirmDetailTab[] = ["members", "licences", "offerings", "products"]
+export const FIRM_DETAIL_TABS: readonly FirmDetailTab[] = ["members", "licences", "offerings", "products", "onboarding", "checks"]
 const DETAIL_TABS: { id: DetailTab; label: string }[] = [
   { id: "members", label: "Members" },
   { id: "licences", label: "Licences" },
   { id: "offerings", label: "Offerings" },
   { id: "products", label: "Products" },
+  { id: "onboarding", label: "Onboarding" },
+  { id: "checks", label: "Checks" },
 ]
-export type FirmDetail = { firm: Firm; offerings: AdminOffering[] | null; products: AdminProduct[] | null }
+// onboarding: the firm's checklist towards sponsoring, with its real-company check (null on a Mynt without it).
+export type FirmDetail = { firm: Firm; offerings: AdminOffering[] | null; products: AdminProduct[] | null; onboarding?: Onboarding | null }
 
-export function FirmDetailView({ detail, onBack, onChanged = () => undefined, initialTab = "members", sheet = null, fetcher }: { detail: FirmDetail; onBack: () => void; onChanged?: () => void; initialTab?: DetailTab; sheet?: "invite" | "status" | null; fetcher?: typeof fetch }) {
+/** The real-company check's latest result, in a few words (never colour alone; never a pass Mynt didn't measure). */
+export function checkResultWords(c: RealCompanyCheck | null | undefined): string {
+  if (!c) return NOT_AVAILABLE
+  if (c.passes === true) return "Passed"
+  if (c.passes === null) return c.status === "done" ? "Not required on this Mynt" : NOT_AVAILABLE
+  if (!c.lastRunAt) return "Not run yet"
+  if (!c.lastAnswerAt) return "Not known: the registers couldn't be reached"
+  return "Not passed"
+}
+/** What the firm still lacks for the check, in Mynt's words; "Nothing" once it passes. */
+export const checkMissingWords = (c: RealCompanyCheck | null | undefined) => (!c ? NOT_AVAILABLE : c.passes !== false ? "Nothing" : c.reasons.join("; ") || "Mynt didn't say")
+
+/** Run checks: Mynt asks the public registers about the firm now. */
+export function RunChecksSheet({ firm, check, open, onClose, onDone, fetcher }: { firm: Firm; check: RealCompanyCheck | null; open: boolean; onClose: () => void; onDone: () => void; fetcher?: typeof fetch }) {
+  const { busy, error, result, run, reset } = useAdminAction(fetcher)
+  useEffect(() => {
+    if (open) reset()
+  }, [open, reset])
+  return (
+    <AdminSheet
+      id="run-checks"
+      open={open}
+      onClose={onClose}
+      title="Run checks"
+      description="Mynt asks the public registers about this firm now: GLEIF's record of its LEI and FinCEN's MSB registrant list. Each answer is kept. A licence provider sponsors only once it passes; a mismatch or lapse drifts the products it sponsors."
+      error={error}
+      result={result}
+    >
+      <div className="flex flex-col gap-3" data-run-checks-form>
+        <p className="text-sm">{firm.name}</p>
+        {check?.ruleText && (
+          <p className="text-sm text-muted-foreground" data-run-checks-rule>
+            The rule: {check.ruleText}.
+          </p>
+        )}
+        <div>
+          <Button
+            disabled={busy}
+            onClick={async () => {
+              const r = await run(`/api/admin/firms/${encodeURIComponent(firm.id)}/checks`, {})
+              if (r?.ok) onDone()
+            }}
+            data-run-checks-submit
+          >
+            {busy ? "Asking the registers…" : result ? "Run checks again" : "Run checks"}
+          </Button>
+        </div>
+      </div>
+    </AdminSheet>
+  )
+}
+
+export function FirmDetailView({ detail, onBack, onChanged = () => undefined, initialTab = "members", sheet = null, fetcher }: { detail: FirmDetail; onBack: () => void; onChanged?: () => void; initialTab?: DetailTab; sheet?: "invite" | "status" | "checks" | null; fetcher?: typeof fetch }) {
   const [tab, setTab] = useState<DetailTab>(initialTab)
-  const [open, setOpen] = useState<"invite" | "status" | null>(sheet)
+  const [open, setOpen] = useState<"invite" | "status" | "checks" | null>(sheet)
   // The licence under review and what was picked for it (Verify licence, Reject licence or Suspend licence).
   const [reviewing, setReviewing] = useState<{ licence: AdminLicence; decision: Decision } | null>(null)
   const [dirty, setDirty] = useState(false)
@@ -242,6 +304,13 @@ export function FirmDetailView({ detail, onBack, onChanged = () => undefined, in
     if (dirty) onChanged()
   }
   const f = detail.firm
+  const onboarding = detail.onboarding ?? null
+  const check = onboarding?.check ?? null
+  const full = (text: string) => (
+    <span title={text} className="block truncate">
+      {text}
+    </span>
+  )
   return (
     <>
       <AdminDetail
@@ -257,6 +326,15 @@ export function FirmDetailView({ detail, onBack, onChanged = () => undefined, in
           ["Members", String(f.members.length)],
           ["Licences", String(f.licences.length)],
           ["Awaiting review", awaitingReviewWords(f)],
+          [
+            "Real-company check",
+            <span key="c" data-real-company-check={check ? (check.passes === true ? "passed" : check.passes === null ? "not_measured" : "not_passed") : "unknown"}>
+              {checkResultWords(check)}
+            </span>,
+          ],
+          ["Last checked", check ? (check.lastRunAt ? dateOf(check.lastRunAt) : "Never") : NOT_AVAILABLE],
+          ["The rule", full(check?.ruleText ?? NOT_AVAILABLE)],
+          ["What's missing", <span key="m" data-check-missing>{full(checkMissingWords(check))}</span>],
           ["Registered", dateOf(f.createdAt)],
           ["Id", <code key="i" className="text-xs">{f.id}</code>],
         ]}
@@ -269,6 +347,10 @@ export function FirmDetailView({ detail, onBack, onChanged = () => undefined, in
             <Button size="sm" variant="outline" onClick={() => setOpen("status")} data-set-firm-status>
               <ShieldAlert />
               Set firm status
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setOpen("checks")} data-run-checks>
+              <SearchCheck />
+              Run checks
             </Button>
           </>
         }
@@ -332,7 +414,49 @@ export function FirmDetailView({ detail, onBack, onChanged = () => undefined, in
               empty="This firm owns and sponsors no products."
             />
           ))}
+        {tab === "onboarding" &&
+          (onboarding === null ? (
+            <AdminTable head={["Step", "Status", "Where it stands", "Done by"]} rows={[]} empty="" unavailable="Regulated firms' onboarding comes with Mynt's next update." />
+          ) : (
+            <AdminTable
+              head={["Step", "Status", "Where it stands", "Done by"]}
+              rowKeys={onboarding.steps.map((s) => s.key)}
+              rows={onboarding.steps.map((s) => [
+                s.informational ? `${s.title} (for information)` : s.title,
+                <span key="s" data-step-status={s.status}>
+                  {STEP_STATUS_WORDS[s.status]}
+                </span>,
+                <span key="d" className="whitespace-normal">
+                  {s.detail}
+                </span>,
+                s.by === "admin" ? "Mynt" : s.by === "builder" ? "Builders" : "The firm",
+              ])}
+              empty="Mynt gave no steps for this firm."
+            />
+          ))}
+        {tab === "checks" &&
+          (onboarding === null ? (
+            <AdminTable head={["When", "Register", "Result", "Note", "Run"]} rows={[]} empty="" unavailable="The registers' answers come with Mynt's next update." />
+          ) : (
+            <AdminTable
+              head={["When", "Register", "Result", "Note", "Run"]}
+              rowKeys={onboarding.checks.map((c) => c.id)}
+              rows={onboarding.checks.map((c) => [
+                c.at ? c.at.slice(0, 16).replace("T", " ") : "—",
+                c.sourceName,
+                <span key="r" data-check-result={c.status}>
+                  {c.statusWords.charAt(0).toUpperCase() + c.statusWords.slice(1)}
+                </span>,
+                <span key="n" className="whitespace-normal">
+                  {c.note ?? "—"}
+                </span>,
+                c.scheduled ? "Mynt's monthly re-check" : "By an admin",
+              ])}
+              empty="No register has been asked about this firm yet. Run checks."
+            />
+          ))}
       </AdminDetail>
+      <RunChecksSheet firm={f} check={check} open={open === "checks"} onClose={close} onDone={() => setDirty(true)} fetcher={fetcher} />
       <InviteFirmMemberSheet firm={f} open={open === "invite"} onClose={close} onDone={() => setDirty(true)} />
       <FirmStatusSheet firm={f} open={open === "status"} onClose={close} onDone={() => setDirty(true)} />
       <ReviewLicenceSheet licence={reviewing?.licence ?? null} decision={reviewing?.decision ?? null} onClose={close} onDone={() => setDirty(true)} fetcher={fetcher} />
@@ -369,7 +493,7 @@ export function FirmsTab({
   onTab?: (t: FirmsTab) => void
 }) {
   const pickList = useCallback((b: Record<string, unknown>) => (Array.isArray(b.firms) ? (b.firms as Firm[]) : undefined), [])
-  const pickOne = useCallback((b: Record<string, unknown>) => (b.firm ? ({ firm: b.firm, offerings: b.offerings ?? null, products: b.products ?? null } as FirmDetail) : undefined), [])
+  const pickOne = useCallback((b: Record<string, unknown>) => (b.firm ? ({ firm: b.firm, offerings: b.offerings ?? null, products: b.products ?? null, onboarding: b.onboarding ?? null } as FirmDetail) : undefined), [])
   // Only what's on screen is read: the firms list on the Firms tab, the licences on theirs (LicencesTab reads them).
   const list = useAdminData(id || tab !== "firms" ? null : "/api/admin/firms", pickList)
   const one = useAdminData(id ? `/api/admin/firms/${encodeURIComponent(id)}` : null, pickOne)

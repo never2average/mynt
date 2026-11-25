@@ -166,6 +166,7 @@ Vendor services and pools:
 A licence provider (`license_provider`) is a firm that holds licences, verified by Mynt admins, and sponsors builders' products under them. It approves, declines or revokes sponsorship of a product's component under a licence it holds, in the jurisdictions that licence covers. Its firm is added by hand by a Mynt admin.
 
 - Sponsorship: `list_my_licenses`, `list_sponsorship_requests`, `approve_sponsorship`, `decline_sponsorship`, `revoke_sponsorship`, `list_sponsored_products` (see [Sponsorship](licence-providers.md#sponsorship))
+- Onboarding: `get_regulated_firm_onboarding` (see [Onboarding a regulated firm](licence-providers.md#onboarding-a-regulated-firm))
 - The firm: `get_my_entity`, `register_license`, `set_entity_facts`, `add_party`, `end_party`. Its roster fills the stakeholders its licences mandate (see [Legal entities](licence-providers.md#legal-entities))
 - Agreements apps propose to its firm: `list_app_agreements`, `respond_to_app_agreement`, `sign_app_agreement`, `terminate_app_agreement`, `get_agreement_signing_link`, `download_agreement_document` (see [App agreements](agreements.md#app-agreements))
 - Agreements it proposes to workspaces: `propose_workspace_agreement`, and `update_agreement_scopes` while one is proposed (see [Scopes](agreements.md#scopes))
@@ -187,7 +188,7 @@ A vendor offers standard services that builders plug into their products instead
 - Subscribers: `list_my_subscribers`, `reveal_subscription_secret`, `rotate_subscription_secret` (see [Subscriptions](vendors-and-marketplace.md#subscriptions))
 - The Mynt Ramp, for the firm that runs it: `set_ramp_adapter`, `link_ramp_partner_customer` (see [The Mynt Ramp](vendors-and-marketplace.md#the-mynt-ramp))
 - The firm: `get_my_entity`, `register_license`
-- Agreements with apps: see [App agreements](agreements.md#app-agreements)
+- Agreements with apps: see [App agreements](agreements.md#app-agreements). A vendor has no agreement templates: its terms are its offerings' standard terms
 
 ### Liquidity provider
 
@@ -201,7 +202,7 @@ A Mynt admin (`admin`) runs Mynt itself, from inside Mynt: regions, product type
 
 - Regions and product types: `define_region`, `define_product_category`, `recompute_product_derived` (see [The regulatory model](platform-admin.md#the-regulatory-model))
 - Who may sign in: `list_whitelist`, `invite_user`, `revoke_user` (see [Invite-only sign-in](workspaces-and-sign-in.md#invite-only-sign-in))
-- Firms: `register_firm`, `add_entity_member`, `remove_entity_member`, `recover_firm_member`, `run_firm_checks` (see [Firms and licence review](platform-admin.md#firms-and-licence-review))
+- Firms: `register_firm`, `add_entity_member`, `remove_entity_member`, `recover_firm_member`, `run_firm_checks`, `get_regulated_firm_onboarding` (see [Firms and licence review](platform-admin.md#firms-and-licence-review))
 - Oversight: `audit_log`, where each entry carries its `class`, `list_all_campaigns`, `admin_pause_campaign`, `admin_set_product_status` (see [Oversight](platform-admin.md#oversight))
 - Take rates: `define_take_rate`, `list_take_rates` (see [Take rates](platform-admin.md#take-rates))
 - Any workspace's members, by its owners' rules: `admin_invite_workspace_member`, `admin_change_workspace_member_role`, `admin_remove_workspace_member`, `admin_revoke_workspace_invite` (see [Members and invitations](workspaces-and-sign-in.md#members-and-invitations))

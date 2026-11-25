@@ -59,10 +59,10 @@ export const GET_STARTED: Record<Role, { tool: string; why: string }[]> = {
   ],
   license_provider: [
     { tool: "get_my_entity", why: "your firm, as an admin registered it; share its id with builders" },
+    { tool: "get_regulated_firm_onboarding", why: "where your onboarding stands, step by step, and what to do next before you can sponsor" },
     { tool: "register_license", why: "add the licences an admin will verify" },
     { tool: "list_sponsorship_requests", why: "builders asking you to sponsor their products" },
-    { tool: "approve_sponsorship", why: "sponsor a product under your licences, where they cover" },
-    { tool: "list_sponsored_products", why: "what you sponsor (revoke_sponsorship to stop)" },
+    { tool: "approve_sponsorship", why: "sponsor a product under your licences, where they cover (list_sponsored_products shows what you sponsor; revoke_sponsorship stops)" },
   ],
   vendor: [
     { tool: "get_my_entity", why: "your firm, as an admin registered it" },

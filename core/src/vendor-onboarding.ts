@@ -235,11 +235,25 @@ async function offeringOnboarding(store: Store, o: Offering, held: HeldLicense[]
     );
   else if (o.terms) raws.push(step("terms", "Set your standard terms", "done", `Version ${o.terms.version}, set on ${day(o.terms.set_at) ?? "an earlier date"}${o.terms.scopes.length ? `. Scope: ${o.terms.scopes.map(agreementScopeLabel).join(", ")}` : ""}.`, "update_vendor_offering", "vendor", termsFacts));
   else if (suspended) raws.push(step("terms", "Set your standard terms", "blocked", suspendedWords, "suspend_vendor_offering", "admin", termsFacts));
+  else if (o.status === "listed")
+    // Listed before any terms were set: the same gap, said the same way on both steps.
+    raws.push(
+      step(
+        "terms",
+        "Set your standard terms",
+        "todo",
+        "It's listed without standard terms: app teams see it in the Marketplace and can't subscribe until you set them, with their scope (technology, manpower or financial regulatory operations).",
+        "update_vendor_offering",
+        "vendor",
+        termsFacts,
+      ),
+    );
   else raws.push(step("terms", "Set your standard terms", "todo", "No standard terms yet: set them with their scope (technology, manpower or financial regulatory operations). App teams can't subscribe from the Marketplace without them.", "update_vendor_offering", "vendor", termsFacts));
 
   // Listing.
   const listedFacts = { offering_status: o.status };
-  if (o.status === "listed") raws.push(step("listed", "List the service", "done", "Listed in the Marketplace.", "update_vendor_offering", "vendor", listedFacts));
+  if (o.status === "listed")
+    raws.push(step("listed", "List the service", "done", o.terms ? "Listed in the Marketplace." : "Listed in the Marketplace, without standard terms: app teams can't subscribe until you set them.", "update_vendor_offering", "vendor", listedFacts));
   else if (suspended) raws.push(step("listed", "List the service", "blocked", suspendedWords, "suspend_vendor_offering", "admin", listedFacts));
   else if (o.status === "conformance_passed") raws.push(step("listed", "List the service", "todo", "It passed Mynt's test: list it in the Marketplace.", "update_vendor_offering", "vendor", listedFacts));
   else raws.push(step("listed", "List the service", "todo", "List it once it passes Mynt's conformance test.", "update_vendor_offering", "vendor", listedFacts));
@@ -249,7 +263,7 @@ async function offeringOnboarding(store: Store, o: Offering, held: HeldLicense[]
   raws.push(
     subscribers > 0
       ? step("first_subscriber", "First subscriber", "done", `${subscribers} ${subscribers === 1 ? "firm subscribes" : "firms subscribe"}.`, "subscribe_vendor_service", "subscriber", { subscribers }, true)
-      : step("first_subscriber", "First subscriber", "todo", "No subscribers yet. App teams subscribe from the Marketplace once it's listed with standard terms.", "subscribe_vendor_service", "subscriber", { subscribers }, true),
+      : step("first_subscriber", "First subscriber", "todo", o.status === "listed" && !o.terms ? "No subscribers yet. App teams can subscribe from the Marketplace once you set standard terms." : "No subscribers yet. App teams subscribe from the Marketplace once it's listed with standard terms.", "subscribe_vendor_service", "subscriber", { subscribers }, true),
   );
 
   const steps = settle(raws, gate);
