@@ -145,6 +145,37 @@ describe("the list", () => {
     expect(none).toContain("Not available. Reading financial products");
   });
 
+  it("Product risk models is a table with its own search and pager; what Mynt can't answer is one row under its headers", () => {
+    const heads = (sel: string) => [...document.querySelectorAll(`${sel} thead th`)].map((th) => th.textContent);
+    const bodyRows = (sel: string) => [...document.querySelectorAll(`${sel} tbody tr`)].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent));
+    const P = "[data-product-risk-models]";
+    const rows = models.productModelsFrom({
+      models: [
+        { product: { id: "fd", name: "Fixed deposit" }, firm: { id: FIRM, name: "Builder Inc" }, model: { id: "pd", name: "PD scorecard", purpose: "fraud_score" } },
+        { product: { id: "loan", name: "Term loan" }, firm: { id: FIRM, name: "Builder Inc" }, model: { id: "lgd", name: "Loss model", purpose: "fraud_score" } },
+      ],
+    });
+    const view = render(<RiskModelsAreaView data={data("regulated_product", rows)} />);
+    expect(document.querySelectorAll(`${P} table`)).toHaveLength(1);
+    expect(heads(P)).toEqual(["Product", "Firm", "Model", "Type", "Version"]);
+    expect(bodyRows(P).map((r) => r.slice(0, 3))).toEqual([
+      ["Fixed deposit", "Builder Inc", "PD scorecard"],
+      ["Term loan", "Builder Inc", "Loss model"],
+    ]);
+    expect(document.querySelector(`${P} [data-pager]`)!.textContent).toContain("2 rows · Page 1 of 1");
+    change(`${P} input[aria-label^="Search product risk models"]`, "loss");
+    expect(bodyRows(P).map((r) => r[2])).toEqual(["Loss model"]);
+    change(`${P} input[aria-label^="Search product risk models"]`, "nothing like it");
+    expect(bodyRows(P)).toEqual([["No product risk models match this search."]]);
+    view.unmount();
+    render(<RiskModelsAreaView data={{ ...data("regulated_product", { available: false, reason: "Reading financial products' own risk models comes with Mynt's next update." }), models: { available: false, reason: "Mynt didn't answer with its risk models." } }} />);
+    expect(heads(P)).toEqual(["Product", "Firm", "Model", "Type", "Version"]);
+    expect(bodyRows(P)).toEqual([["Not available. Reading financial products' own risk models comes with Mynt's next update."]]);
+    // Mynt's own models, when Mynt can't answer: the same table headers, one row with why.
+    expect(heads("[data-risk-models-area] > [data-table-view]")).toEqual(["Model", "Status", "Owner", "Version", "Last validated", "Next validation due"]);
+    expect(bodyRows("[data-risk-models-area] > [data-table-view]")).toEqual([["Not available. Mynt didn't answer with its risk models."]]);
+  });
+
   it("what Mynt can't answer is Not available, with why; an empty area says so in words", () => {
     const html = renderToStaticMarkup(<RiskModelsAreaView data={{ ...data(), models: { available: false, reason: "Mynt didn't answer with its risk models." } }} />);
     expect(html).toContain("Not available. Mynt didn&#x27;t answer with its risk models.");
@@ -181,6 +212,27 @@ describe("a model's page", () => {
   it("metadata card, the labelled actions, then Definition (method, inputs, outputs, thresholds as tables)", () => {
     const html = renderToStaticMarkup(<RiskModelDetailView data={{ detail: DETAIL, owners: [] }} />);
     for (const s of ["data-metadata-card", "Pool liquidity coverage", "Financial risk", "Active: in use", "Version 2", "2026-09-01 (overdue)", "Edit model", "Record validation", "Retire model", 'data-detail-tab="definition"', 'data-detail-tab="validations"', 'data-detail-tab="versions"', "Liquid assets over 30-day expected outflows", "liquid_assets", "pool ledger", "coverage_ratio", "minimum", "1.5", "Below it, new commitments pause", "Back to financial risk models"]) expect(html).toContain(s);
+  });
+
+  it("every tab is tables: Definition's method, inputs, outputs and thresholds, then Validations and Versions, by their column headers", async () => {
+    render(<RiskModelDetailView data={{ detail: DETAIL, owners: [] }} />);
+    const tables = () => [...document.querySelectorAll("[data-detail-table] table")].map((t) => [...t.querySelectorAll("thead th")].map((th) => th.textContent));
+    expect(tables()).toEqual([
+      ["Part", "What it says"],
+      ["Input", "Description", "Source"],
+      ["Output", "Description"],
+      ["Threshold", "Value", "What happens"],
+    ]);
+    expect([...document.querySelectorAll("[data-model-definition] table")[0].querySelectorAll("tbody tr")].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent))).toEqual([
+      ["Purpose", "Whether pools can meet withdrawals"],
+      ["Method", "Liquid assets over 30-day expected outflows"],
+    ]);
+    // Nothing in the tab but headings and tables.
+    expect(document.querySelector("[data-model-definition] p")).toBeNull();
+    await click('[data-detail-tab="validations"]');
+    expect(tables()).toEqual([["Validated", "Version", "Outcome", "Validated by", "Notes", "Next due"]]);
+    await click('[data-detail-tab="versions"]');
+    expect(tables()).toEqual([["Version", "Name", "Made", "By", "Why it changed"]]);
   });
 
   it("Validations and Versions: every one kept, newest version first", async () => {

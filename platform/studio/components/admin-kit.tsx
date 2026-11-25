@@ -123,8 +123,9 @@ export function AdminList({
 }
 
 /** A plain table: its head, its rows (cells), and what it says when there are none. With onRow, a row also opens on a
- * click anywhere in it (its labelled Open button stays, for the keyboard). */
-export function AdminTable({ head, rows, empty, rowKeys, onRow }: { head: string[]; rows: React.ReactNode[][]; empty: string; rowKeys?: string[]; onRow?: (i: number) => void }) {
+ * click anywhere in it (its labelled Open button stays, for the keyboard). With unavailable (why Mynt can't answer),
+ * the table keeps its head and has one row, "Not available." and that reason: never an empty table, never a 0. */
+export function AdminTable({ head, rows, empty, rowKeys, onRow, unavailable }: { head: readonly string[]; rows: React.ReactNode[][]; empty: string; rowKeys?: string[]; onRow?: (i: number) => void; unavailable?: string | null }) {
   return (
     <Table>
       <TableHeader className="sticky top-0 bg-card">
@@ -135,7 +136,13 @@ export function AdminTable({ head, rows, empty, rowKeys, onRow }: { head: string
         </TableRow>
       </TableHeader>
       <TableBody>
-        {rows.length ? (
+        {unavailable ? (
+          <TableRow data-not-available>
+            <TableCell colSpan={head.length} className="py-10 text-center whitespace-normal text-muted-foreground">
+              {`Not available. ${unavailable}`}
+            </TableCell>
+          </TableRow>
+        ) : rows.length ? (
           rows.map((cells, i) => (
             <TableRow key={rowKeys?.[i] ?? i} data-row={rowKeys?.[i]} className={onRow ? "cursor-pointer" : undefined} onClick={onRow ? () => onRow(i) : undefined}>
               {cells.map((c, j) => (

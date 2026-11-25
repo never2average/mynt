@@ -219,6 +219,14 @@ export interface Invite {
   created_at: string;
 }
 
+// Someone an admin added to a firm before they had an account: they join it at their first sign-in.
+export interface PendingFirmMember {
+  email: string;
+  entity_id: string;
+  added_by: string | null;
+  created_at: string;
+}
+
 // One record in a legal entity's GRC folder (or one of its parties' folders): it answers an item of a held
 // licence's GRC (see entity-grc.ts). Filing a record with the same key supersedes the current one.
 export interface GrcRecord {
@@ -1474,6 +1482,15 @@ const TABLES = `
     decided_at timestamptz
   );
   CREATE UNIQUE INDEX IF NOT EXISTS firm_member_requests_one_pending_idx ON financial_products.firm_member_requests (entity_id, user_id) WHERE status = 'pending';
+  -- Someone an admin added to a firm before they ever signed in (add_entity_member on a whitelisted email with no
+  -- account yet): they join the firm when they first sign in (firm-notices.ts, joinPendingFirm). One firm per email.
+  CREATE TABLE IF NOT EXISTS financial_products.firm_pending_members (
+    email text PRIMARY KEY,
+    entity_id uuid NOT NULL REFERENCES financial_products.entities(id) ON DELETE CASCADE,
+    added_by uuid REFERENCES financial_products.users(id),
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS firm_pending_members_entity_idx ON financial_products.firm_pending_members (entity_id);
   -- An admin's recovery of a request nobody at the firm can decide (firm-notices.ts): it waits 7 days, told to every
   -- current and past licence provider of the firm, any of whom can block it.
   ALTER TABLE financial_products.firm_member_requests ADD COLUMN IF NOT EXISTS recovery_reason text;
@@ -1813,6 +1830,7 @@ const toUser = (r: Row): User => {
 };
 
 const toInvite = (r: Row): Invite => ({ email: r.email as string, roles: r.roles as Role[], created_at: iso(r.created_at)! });
+const toPendingFirmMember = (r: Row): PendingFirmMember => ({ email: r.email as string, entity_id: r.entity_id as string, added_by: (r.added_by as string | null) ?? null, created_at: iso(r.created_at)! });
 
 // ---- Runtime layer mappers ----
 
@@ -3145,7 +3163,37 @@ export class Store {
   }
 
   async deleteInvite(email: string): Promise<boolean> {
+    // Someone no longer allowed in joins no firm either.
+    await this.db.query("DELETE FROM financial_products.firm_pending_members WHERE email = $1", [email.toLowerCase()]);
     return (await this.all("DELETE FROM financial_products.invites WHERE email = $1 RETURNING email", [email.toLowerCase()])).length > 0;
+  }
+
+  // People an admin added to a firm before they had an account (firm_pending_members): they join at their first sign-in.
+  async setPendingFirmMember(email: string, entityId: string, addedBy: string | null): Promise<PendingFirmMember> {
+    const r = await this.one(
+      `INSERT INTO financial_products.firm_pending_members (email, entity_id, added_by) VALUES ($1, $2, $3)
+       ON CONFLICT (email) DO UPDATE SET entity_id = EXCLUDED.entity_id, added_by = EXCLUDED.added_by, created_at = now() RETURNING *`,
+      [email.toLowerCase(), entityId, addedBy],
+    );
+    return toPendingFirmMember(r!);
+  }
+
+  async pendingFirmMember(email: string): Promise<PendingFirmMember | undefined> {
+    const r = await this.one("SELECT * FROM financial_products.firm_pending_members WHERE email = $1", [email.toLowerCase()]);
+    return r && toPendingFirmMember(r);
+  }
+
+  async pendingFirmMembers(entityId: string): Promise<(PendingFirmMember & { roles: Role[] })[]> {
+    const rows = await this.all(
+      `SELECT p.*, i.roles FROM financial_products.firm_pending_members p LEFT JOIN financial_products.invites i ON i.email = p.email
+       WHERE p.entity_id = $1 ORDER BY p.created_at, p.email`,
+      [entityId],
+    );
+    return rows.map((r) => ({ ...toPendingFirmMember(r), roles: ((r.roles as Role[] | null) ?? []) as Role[] }));
+  }
+
+  async clearPendingFirmMember(email: string): Promise<boolean> {
+    return (await this.all("DELETE FROM financial_products.firm_pending_members WHERE email = $1 RETURNING email", [email.toLowerCase()])).length > 0;
   }
 
   async listInvites(): Promise<Invite[]> {

@@ -5,8 +5,9 @@
 // version, last validated, next validation due with "overdue" in words) with a labelled Add risk model; a row opens
 // /platform/risk-models/<id>: its metadata card with Edit model (a change to what it is is a new version), Record
 // validation and Retire model, each a labelled button opening its sheet, then the tabs Definition (method, inputs,
-// outputs and thresholds as tables), Validations and Versions. The Regulated product risk tab also lists, read-only,
-// the risk models financial products declare in their own definitions, each linked to its firm's Products tab.
+// outputs and thresholds, each a table), Validations and Versions. The Regulated product risk tab also lists, read-only
+// in its own searched and paged table, the risk models financial products declare in their own definitions, each
+// linked to its firm's Products tab. What Mynt can't answer is one table row, "Not available." with why.
 // Server-renderable.
 import Link from "next/link"
 import { useRouter } from "next/navigation"
@@ -15,12 +16,12 @@ import { Archive, ClipboardCheck, ExternalLink, Pencil, Plus } from "lucide-reac
 
 import { AdminDetail, AdminList, AdminNotReady, AdminSheet, AdminTable, Field, fieldClass, useAdminAction, useAdminData } from "@/components/admin-kit"
 import { downloadCsv } from "@/components/licences-view"
-import { matches, usePaged } from "@/components/list-layout"
+import { ListLayout, matches, usePaged } from "@/components/list-layout"
 import { RiskAreaTabs, useAreaInAddress } from "@/components/risk-area-tabs"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { adminHref, csvOf } from "@/lib/admin"
-import { RISK_AREA_LABELS, RISK_AREAS, type RiskArea, type Unavailable } from "@/lib/risk-register"
+import { RISK_AREA_LABELS, RISK_AREAS, type RiskArea } from "@/lib/risk-register"
 import {
   dueWords,
   lastValidatedWords,
@@ -45,14 +46,6 @@ type Owner = { userId: string; name: string }
 export type RiskModelsData = { area: RiskArea; models: ModelList; owners: Owner[]; productModels: ProductRiskModels | null }
 export type RiskModelDetailData = { detail: ModelDetail; owners: Owner[] }
 const routeOf = (id?: string) => (id ? `/api/admin/risk-models/${encodeURIComponent(id)}` : "/api/admin/risk-models")
-
-function Gone({ reason }: { reason: string }) {
-  return (
-    <p className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground" data-not-available>
-      Not available. {reason}
-    </p>
-  )
-}
 
 // ---- the sheets ----
 
@@ -335,37 +328,40 @@ export function RetireRiskModelSheet({ model, open, onClose, onDone, fetcher }: 
 
 // ---- the list (one area's tab) ----
 
+export const PRODUCT_MODEL_HEAD = ["Product", "Firm", "Model", "Type", "Version"] as const
+
 function ProductRiskModelsSection({ data }: { data: ProductRiskModels }) {
+  const [query, setQuery] = useState("")
+  const all = data.available ? data.rows : []
+  const rows = useMemo(() => all.filter((r) => matches(query, r.productName, r.firmName, r.modelName, r.type)), [all, query])
+  const paged = usePaged(rows)
   return (
-    <section className="flex min-w-0 flex-col gap-2" data-product-risk-models aria-labelledby="product-risk-models">
+    <section className="flex min-w-0 shrink-0 flex-col gap-2" data-product-risk-models aria-labelledby="product-risk-models">
       <h2 id="product-risk-models" className="text-sm font-semibold">
         Product risk models
       </h2>
       <p className="text-xs text-muted-foreground">The risk models financial products declare in their own definitions. Read-only: each product&apos;s firm keeps them.</p>
-      {!data.available ? (
-        <Gone reason={data.reason} />
-      ) : (
-        <div className="min-w-0 overflow-x-auto rounded-lg border">
-          <AdminTable
-            head={["Product", "Firm", "Model", "Type", "Version"]}
-            rowKeys={data.rows.map((r) => r.key)}
-            rows={data.rows.map((r) => [
-              r.href ? (
-                <Link key="p" href={r.href} className="underline underline-offset-2" data-product-model-link={r.href}>
-                  {r.productName}
-                </Link>
-              ) : (
-                r.productName
-              ),
-              r.firmName ?? "Mynt's reference product",
-              r.modelName,
-              r.type,
-              r.version ?? "Not stated",
-            ])}
-            empty="No financial product declares a risk model in its definition yet."
-          />
-        </div>
-      )}
+      <ListLayout search={query} onSearch={setQuery} searchLabel="Search product risk models by product, firm, model or type" page={paged.page} pages={paged.pages} total={rows.length} onPage={paged.setPage}>
+        <AdminTable
+          head={PRODUCT_MODEL_HEAD}
+          unavailable={data.available ? null : data.reason}
+          rowKeys={paged.shown.map((r) => r.key)}
+          rows={paged.shown.map((r) => [
+            r.href ? (
+              <Link key="p" href={r.href} className="underline underline-offset-2" data-product-model-link={r.href}>
+                {r.productName}
+              </Link>
+            ) : (
+              r.productName
+            ),
+            r.firmName ?? "Mynt's reference product",
+            r.modelName,
+            r.type,
+            r.version ?? "Not stated",
+          ])}
+          empty={all.length ? "No product risk models match this search." : "No financial product declares a risk model in its definition yet."}
+        />
+      </ListLayout>
     </section>
   )
 }
@@ -390,7 +386,9 @@ export function RiskModelsAreaView({ data, onOpen = () => undefined, onChanged =
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-6" data-risk-models-area={data.area}>
       {!data.models.available ? (
-        <Gone reason={(data.models as Unavailable).reason} />
+        <div className="min-w-0 shrink-0 overflow-x-auto rounded-lg border" data-table-view>
+          <AdminTable head={MODEL_HEAD.slice(0, -1)} rows={[]} empty="" unavailable={data.models.reason} />
+        </div>
       ) : (
         <AdminList
           id="risk-models"
@@ -529,9 +527,16 @@ export function RiskModelDetailView({
           <div className="flex flex-col gap-4 p-3" data-model-definition>
             <section className="flex flex-col gap-1">
               <h3 className="text-sm font-semibold">Method</h3>
-              <p className="text-sm whitespace-pre-wrap" data-model-method>
-                {model.method || "Not stated"}
-              </p>
+              <div className="rounded-lg border">
+                <AdminTable
+                  head={["Part", "What it says"]}
+                  rows={[
+                    ["Purpose", <span key="p" className="block min-w-48 font-normal whitespace-pre-wrap">{model.purpose || "Not stated"}</span>],
+                    ["Method", <span key="m" className="block min-w-48 font-normal whitespace-pre-wrap" data-model-method>{model.method || "Not stated"}</span>],
+                  ]}
+                  empty="Not stated."
+                />
+              </div>
             </section>
             <section className="flex flex-col gap-1" data-model-inputs>
               <h3 className="text-sm font-semibold">Inputs</h3>

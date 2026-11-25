@@ -97,7 +97,7 @@ A firm's page has Invite member and Set firm status (`set_entity_status`), then 
 **Members** lists the firm's people (name, email, roles, status) with Change role and Remove on each.
 
 - The roles offered are the firm's own: what its members are. Mynt's admin role is never one.
-- Invite member runs `invite_user` with the role picked added to any roles the person already has (read with `list_whitelist`), then `add_entity_member`. Someone who hasn't signed in yet is allowed in, and the admin adds them to the firm once they have.
+- Invite member runs `invite_user` with the role picked added to any roles the person already has (read with `list_whitelist`), then `add_entity_member`. Someone who hasn't signed in yet has no account to add: they are allowed in, shown in the tab as "Invited, not yet signed in", and join the firm when they first sign in. Remove on that row cancels it.
 - Change role sets their roles for the firm to exactly the ones picked and keeps every other role they hold (Mynt admin, user). It says what it adds and removes.
 - Remove (`remove_entity_member`, confirmed by typing their email) takes them out of the firm. A licence provider loses its standing there, the firm's members are told, and their sign-in and roles stay.
 
@@ -151,29 +151,44 @@ See [Risk areas](risk.md#risk-areas) for the areas and how the older categories 
 **Risk models** lists Mynt's own risk models in the tab's area (`list_risk_models`): name, status in words, owner, version, last validated and next validation due ("overdue" when it has passed).
 
 - Add risk model runs `add_risk_model`. Inputs, outputs and thresholds are typed as JSON lists.
-- A row opens `/platform/risk-models/<id>`: its metadata card, then the tabs Definition (the method, and its inputs, outputs and thresholds as tables), Validations and Versions.
+- A row opens `/platform/risk-models/<id>`: its metadata card, then the tabs Definition (four tables: the purpose and method, the inputs, the outputs and the thresholds), Validations and Versions, each a table.
 - The card's actions are Edit model (`update_risk_model`: a change to what the model is makes a new version, and the old one is kept), Record validation (`validate_risk_model`) and Retire model (`retire_risk_model`, with a reason).
-- The Regulated product risk tab also lists, read-only, Product risk models: the risk models financial products declare in their definitions (`admin_list_product_risk_models`: product, firm, model and its type), each linked to its firm's Products tab.
+- The Regulated product risk tab also lists, read-only, Product risk models: a table, with its own search and pager, of the risk models financial products declare in their definitions (`admin_list_product_risk_models`: product, firm, model, its type and version), each linked to its firm's Products tab.
+- What Mynt can't answer is one table row under the table's headers: "Not available." with why.
 - Models overdue for validation count in `ops_status`.
 
-**Risk register** shows, on each tab, Mynt's own risk register in that area. These are risks on the `platform` subject, `subject_id` `mynt`, kept and read by Mynt admins only.
+**Risk register** shows, on each tab, three kinds of section, and every one is a table.
 
-- Filter chips show that area's risks and the Unassigned ones (no area yet).
-- Add risk starts on the tab's area; a platform risk always has one. Review risk can change its area.
-- Below, read-only, is Across apps and products: the open risks in that area on apps' and products' own registers (`admin_list_risks` with `risk_area`), each linked to its app's workspace page or its product's firm page.
+First is Mynt's own risk register in that area. These are risks on the `platform` subject, `subject_id` `mynt`, kept and read by Mynt admins only.
+
+- It is one table under the list toolbar: search, Filters, Import (off until Mynt's next update), Export CSV and Add risk.
+- Its columns are Risk, Category, Likelihood, Impact, Score (with its level in words), Owner, Status in words, Review by ("overdue" when it has passed) and Mitigation, which is cut short in the table and shown in full in the review sheet and the CSV.
+- Filters narrow it by status and by level, and Unassigned shows the risks with no area yet instead of the tab's.
+- Each row has a labelled Review risk, which can change the risk's area. Add risk starts on the tab's area; a platform risk always has one.
 - Overdue reviews of platform risks count in `ops_status` with the apps' and products'.
 
-Then come the area's signals. Each is a table, or "Not available." with why; never an empty table or 0 for something unmeasured.
+Second, read-only, is Across apps and products: the open risks in that area on apps' and products' own registers (`admin_list_risks` with `risk_area`), highest score first, with its own search and pager.
 
-| Area | Signals |
+- Its columns are Subject, Workspace / firm, Risk, Score (with its level), Status and Review by.
+- The subject links to its app's workspace page or its product's firm page. `admin_list_risks` sends the workspace's or firm's id, not its name, so the Workspace / firm column says which of the two keeps the risk.
+
+Then come the area's signals, each a table with its own columns. A signal Mynt doesn't measure is one row under those columns, "Not available." with why; one that is measured and clear is one row saying so in words. Neither is ever an empty table or a 0.
+
+| Area | Signal tables and their columns |
 | --- | --- |
-| Financial | Liquidity and treasury pool flags |
-| Compliance | Production apps without a signed program agreement, and overdue oversight audits |
-| Third-party | Vendors' failed conformance runs |
-| Operations | The agents' and hosting's failures |
-| Business process | Covenants (products paused, open breaches) and drifted products |
-| Regulated product | Covenants, product health and drifted products |
-| Technology | Security events in the last 30 days (`audit_log` entries of class security) and backups (last run, off-site copy, last restore test) |
+| Financial | Liquidity and treasury pools: Area, What needs attention |
+| Compliance | Apps missing a program agreement: App, Missing agreements. Overdue oversight audits: Overdue audits, Apps flagged |
+| Third-party | Vendor conformance (runs that failed): Service, Last conformance, Result |
+| Operations | Agents and hosting (failed and stuck runs, machines and apps): Area, Item, Since |
+| Business process | Covenants (products paused, open breaches): Area, What needs attention. Drifted products: Product, Detail |
+| Regulated product | Covenants and Product health: Area, What needs attention. Drifted products: Product, Detail |
+| Technology | Security events in the last 30 days (`audit_log` entries of class security): When, Action, Actor, Target. Backups: Last run, Result, Off-site, Last success, Last restore test |
+
+The signals come from `ops_status`, so they show what it reports and no more:
+
+- It counts an app's missing program agreements and the overdue audits, without naming the sponsor, the product or the audit.
+- It names a failed conformance run's service, not its vendor.
+- Where it has only a line for an operations area, and no list of runs behind it, the row's Since is "Not recorded".
 
 Drifted products are not available until `ops_status` counts them across firms.
 
@@ -204,7 +219,7 @@ The firms of licence providers, vendors and liquidity providers are added by han
 | Tool | Does |
 | --- | --- |
 | `register_firm` | Adds a legal entity, with no members yet |
-| `add_entity_member`, `remove_entity_member` | Attach a person to a firm, or take them out |
+| `add_entity_member`, `remove_entity_member` | Attach a person to a firm, or take them out. Someone whitelisted who hasn't signed in yet is kept as pending (`status: "pending_sign_in"`, `list_entities`' `pending_members`) and joins at their first sign-in; `remove_entity_member` or `revoke_user` cancels it. An email that isn't whitelisted is refused |
 | `set_entity_status` | Records the firm's status from its company registry: `active`, `suspended`, `under_liquidation`, `dissolved` or `struck_off`. Every published product resting on it is re-checked, and drifted ones pause new sales |
 | `list_entities` | Lists every firm with its members, licences, roster and Mynt's public checks on it |
 | `run_firm_checks` | Runs Mynt's public checks that a firm is a real company |
