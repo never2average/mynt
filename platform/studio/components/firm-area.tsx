@@ -187,11 +187,17 @@ type SheetState =
   | { kind: "decide"; person: FirmPerson }
   | null
 
-const unknown = (what: string) => (
-  <p className="p-4 text-sm text-muted-foreground" data-tab-unknown>
-    Mynt didn&apos;t say {what} just now. Please try again.
-  </p>
-)
+const HEADS = {
+  licences: ["Licence", "Regulator", "Region", "Issued for", "Number", "Valid from", "Valid to", "Status", "Covers", "Sponsorships"],
+  requests: ["Product", "Component", "Builder", "Asked for", "Approved in", "Status", "Asked on", ""],
+  sponsored: ["Product", "State", "Component", "Builder", "Under", "Where", "Since"],
+  roster: ["Party", "Kind", "Roles", "Relationship", "Since", "Status", ""],
+  people: ["Name", "Email", "Status", "Since", ""],
+  notices: ["When", "What", "Details", "Read"],
+} as const
+
+// A tab whose data Mynt didn't give keeps its table and says so in it: never an empty table, never a 0.
+const unknown = (tab: keyof typeof HEADS, what: string) => <AdminTable head={HEADS[tab]} rows={[]} empty="" unavailable={`Mynt didn't say ${what} just now. Please try again.`} />
 
 export function FirmView({
   data,
@@ -291,10 +297,10 @@ export function FirmView({
       <AdminList id={`firm-${tab}`} search={query} onSearch={(q) => (setQuery(q), list.paged.setPage(1))} searchLabel={list.search} onExport={list.csv} exportDisabled={!list.total} cta={cta} page={list.paged.page} pages={list.paged.pages} total={list.total} onPage={list.paged.setPage}>
         {tab === "licences" &&
           (data.licences === null ? (
-            unknown("which licences your firm holds")
+            unknown("licences", "which licences your firm holds")
           ) : (
             <AdminTable
-              head={["Licence", "Regulator", "Region", "Issued for", "Number", "Valid from", "Valid to", "Status", "Covers", "Sponsorships"]}
+              head={HEADS.licences}
               rowKeys={pagedLicences.shown.map((l) => l.id)}
               rows={pagedLicences.shown.map((l) => [
                 l.licenceType,
@@ -316,10 +322,10 @@ export function FirmView({
           ))}
         {tab === "requests" &&
           (data.requests === null || data.sponsored === null ? (
-            unknown("which requests your firm has")
+            unknown("requests", "which requests your firm has")
           ) : (
             <AdminTable
-              head={["Product", "Component", "Builder", "Asked for", "Approved in", "Status", "Asked on", ""]}
+              head={HEADS.requests}
               rowKeys={pagedRequests.shown.map((s) => s.id)}
               rows={pagedRequests.shown.map((s) => [
                 s.product,
@@ -348,10 +354,10 @@ export function FirmView({
           ))}
         {tab === "sponsored" &&
           (data.sponsored === null ? (
-            unknown("what your firm sponsors")
+            unknown("sponsored", "what your firm sponsors")
           ) : (
             <AdminTable
-              head={["Product", "State", "Component", "Builder", "Under", "Where", "Since"]}
+              head={HEADS.sponsored}
               rowKeys={pagedSponsored.shown.map((s) => s.id)}
               rows={pagedSponsored.shown.map((s) => [
                 s.product,
@@ -369,10 +375,10 @@ export function FirmView({
           ))}
         {tab === "roster" &&
           (firm === null ? (
-            unknown("who is on your firm's roster")
+            unknown("roster", "who is on your firm's roster")
           ) : (
             <AdminTable
-              head={["Party", "Kind", "Roles", "Relationship", "Since", "Status", ""]}
+              head={HEADS.roster}
               rowKeys={pagedRoster.shown.map((r) => r.key)}
               rows={pagedRoster.shown.map((r) => [
                 r.name,
@@ -400,7 +406,7 @@ export function FirmView({
           ))}
         {tab === "people" && (
           <AdminTable
-            head={["Name", "Email", "Status", "Since", ""]}
+            head={HEADS.people}
             rowKeys={pagedPeople.shown.map((p) => p.key)}
             rows={pagedPeople.shown.map((p) => [
               p.name ?? "—",
@@ -422,7 +428,7 @@ export function FirmView({
         {tab === "notices" &&
           (noticeRows === null ? (
             !hasFirm ? (
-              <AdminTable head={["When", "What", "Details", "Read"]} rows={[]} empty="Mynt hasn't added you to your firm yet." />
+              <AdminTable head={HEADS.notices} rows={[]} empty="Mynt hasn't added you to your firm yet." />
             ) : loadedNotices.state.kind === "ready" ? null : (
               <div className="p-4">
                 <AdminNotReady state={loadedNotices.state} what="Notices" />
@@ -430,7 +436,7 @@ export function FirmView({
             )
           ) : (
             <AdminTable
-              head={["When", "What", "Details", "Read"]}
+              head={HEADS.notices}
               rowKeys={pagedNotices.shown.map((n) => n.id)}
               rows={pagedNotices.shown.map((n) => [
                 when(n.at),

@@ -124,7 +124,7 @@ describe("a regulated firm's page: the real-company check", () => {
     // A Mynt without the checklist: the card says the check isn't available, the tabs say so too.
     const older = renderToStaticMarkup(<FirmDetailView detail={{ firm: FIRM_ROW, offerings: null, products: null }} onBack={() => undefined} initialTab="checks" />);
     expect(older).toContain('data-real-company-check="unknown">Not available<');
-    expect(older).toContain("The registers&#x27; answers aren&#x27;t available on this Mynt yet.");
+    expect(older).toMatch(/>Register<\/th>[\s\S]*?data-not-available[\s\S]*?Not available\. The registers&#x27; answers come with Mynt&#x27;s next update\./);
   });
 
   it("Run checks opens a sheet that posts to the firm's checks route and shows Mynt's answer", async () => {

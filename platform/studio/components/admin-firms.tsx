@@ -416,7 +416,7 @@ export function FirmDetailView({ detail, onBack, onChanged = () => undefined, in
           ))}
         {tab === "onboarding" &&
           (onboarding === null ? (
-            <p className="p-4 text-sm text-muted-foreground">Regulated firms&apos; onboarding isn&apos;t available on this Mynt yet.</p>
+            <AdminTable head={["Step", "Status", "Where it stands", "Done by"]} rows={[]} empty="" unavailable="Regulated firms' onboarding comes with Mynt's next update." />
           ) : (
             <AdminTable
               head={["Step", "Status", "Where it stands", "Done by"]}
@@ -436,7 +436,7 @@ export function FirmDetailView({ detail, onBack, onChanged = () => undefined, in
           ))}
         {tab === "checks" &&
           (onboarding === null ? (
-            <p className="p-4 text-sm text-muted-foreground">The registers&apos; answers aren&apos;t available on this Mynt yet.</p>
+            <AdminTable head={["When", "Register", "Result", "Note", "Run"]} rows={[]} empty="" unavailable="The registers' answers come with Mynt's next update." />
           ) : (
             <AdminTable
               head={["When", "Register", "Result", "Note", "Run"]}

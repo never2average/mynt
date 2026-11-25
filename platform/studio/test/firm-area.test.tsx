@@ -335,7 +335,7 @@ describe("the tabs, each a table in the list layout", () => {
 
   it("a tab whose data Mynt didn't give says so, never an empty table", () => {
     const html = renderToStaticMarkup(<FirmView data={{ ...DATA, licences: null }} notices={[]} />);
-    expect(html).toContain("Mynt didn&#x27;t say which licences your firm holds just now.");
+    expect(html).toMatch(/>Licence<\/th>[\s\S]*?data-not-available[\s\S]*?Not available\. Mynt didn&#x27;t say which licences your firm holds just now\. Please try again\./);
     expect(html).not.toContain("No licences yet");
   });
 });
