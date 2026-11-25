@@ -38,7 +38,6 @@ const SHOTS = [
   ["builds"],
   ["builds-empty"],
   ["licences"],
-  ["licences-map"],
   ["audits-security"],
   ["audits-obligations"],
   ["audits-agreements"],

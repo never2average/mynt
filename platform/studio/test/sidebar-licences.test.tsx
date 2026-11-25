@@ -6,7 +6,7 @@ import { createRef } from "react";
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider as UiSidebarProvider } from "@/components/ui/sidebar";
 
 // The sidebar's icon rail, the toggle separators, the Apps folders (one open at a time), and
-// the Licences page: only the table, with the coverage map in its place.
+// the Licences page's old addresses (the licence table and coverage map views), which come back to /licences.
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/",
@@ -21,10 +21,8 @@ const { TooltipProvider } = await import("@/components/ui/tooltip");
 const { NavFolders, FOLDER_KEY, initialFolder } = await import("@/components/nav-folders");
 const { SiteHeader } = await import("@/components/site-header");
 const { AppTopBar } = await import("@/components/app-top-bar");
-const { LicencesPageView } = await import("@/components/licences-page-view");
-const { licencesViewOf, regionOf } = await import("@/lib/licences-tabs");
+const { licencesRedirectOf } = await import("@/lib/licences-tabs");
 const { groupByStage } = await import("@/lib/workspaces");
-const { fromCoverage, fromLicences } = await import("@/lib/compliance");
 
 beforeAll(() => {
   window.matchMedia ??= ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, onchange: null, dispatchEvent: () => false })) as unknown as typeof window.matchMedia;
@@ -149,46 +147,33 @@ describe("the Apps folders", () => {
   });
 });
 
-const coverage = fromCoverage({ states: [{ code: "CA", status: "unlocked", partners: [{ name: "Harbor Bank" }] }, { code: "NY", status: "available" }] });
-const licences = fromLicences({ licences: [{ partner: "Harbor Bank", number: "MT-1", states: ["CA"], status: "verified", expires_at: "2020-01-01" }] });
+const redirected = async (run: () => unknown) => {
+  try {
+    await run();
+  } catch (e) {
+    return (e as { digest?: string }).digest?.split(";")[2];
+  }
+  return undefined;
+};
 
-describe("Licences: only the table, the map in its place", () => {
-  const view = (v: "table" | "map", c: Parameters<typeof LicencesPageView>[0]["coverage"] = { kind: "ready", data: coverage }) =>
-    renderToStaticMarkup(<LicencesPageView view={v} onView={() => undefined} coverage={c} licences={{ kind: "ready", data: licences }} />);
-
-  it("has no summary card and no tabs: the table, with the view toggle", () => {
-    const html = view("table");
-    expect(html).not.toContain("data-licences-summary");
-    expect(html).not.toContain('role="tablist"');
-    expect(html).not.toContain('data-slot="card"');
-    expect(html).toContain("data-table-view");
-    expect(html).toContain("MT-1");
-    expect(html).toMatch(/data-view-toggle="map"[^>]*>[\s\S]*?Map<\/button>/);
+describe("Licences: the table and map views are gone; their addresses come back to /licences", () => {
+  it("?view=, ?region=, ?tab=coverage and ?tab=licences go to /licences; ?tab=agreements is Business agreements; the four tabs stay", () => {
+    expect(licencesRedirectOf({ view: "map" })).toBe("/licences");
+    expect(licencesRedirectOf({ view: "table", region: "us" })).toBe("/licences");
+    expect(licencesRedirectOf({ tab: "coverage" })).toBe("/licences");
+    expect(licencesRedirectOf({ tab: "licences" })).toBe("/licences");
+    expect(licencesRedirectOf({ tab: "agreements" })).toBe("/licences");
+    expect(licencesRedirectOf({ tab: "nope" })).toBe("/licences");
+    for (const tab of ["business-agreements", "msa", "sla", "audit-obligations"]) expect(licencesRedirectOf({ tab })).toBeNull();
+    expect(licencesRedirectOf({})).toBeNull();
   });
 
-  it("the map view replaces the table in the same place; ?tab=coverage and ?view=map open it", () => {
-    expect([licencesViewOf({}), licencesViewOf({ tab: "coverage" }), licencesViewOf({ tab: "licences" }), licencesViewOf({ view: "map" }), licencesViewOf({ view: "table", tab: "coverage" })]).toEqual(["table", "map", "table", "map", "table"]);
-    expect([regionOf(undefined), regionOf("world"), regionOf("mars")]).toEqual(["us", "world", "us"]);
-    const html = view("map");
-    expect(html).toContain("data-map-view");
-    expect(html).not.toContain("data-table-view");
-    expect(html).toContain('data-region-shown="us"');
-  });
-
-  it("says what isn't available yet, never an empty map", () => {
-    const html = view("map", { kind: "unsupported" });
-    expect(html).toContain('data-empty="not-available"');
-    expect(html).not.toContain("data-map-view");
-  });
-
-  it("/coverage opens the map view (US)", async () => {
+  it("/coverage and /licences?view=map redirect to /licences", async () => {
     const { default: CoveragePage } = await import("@/app/(studio)/coverage/page");
-    let to: string | undefined;
-    try {
-      CoveragePage();
-    } catch (e) {
-      to = (e as { digest?: string }).digest;
-    }
-    expect(to).toContain("/licences?view=map&region=us");
+    expect(await redirected(() => CoveragePage())).toBe("/licences");
+    const { default: LicencesRoute } = await import("@/app/(studio)/licences/page");
+    expect(await redirected(() => LicencesRoute({ searchParams: Promise.resolve({ view: "map", region: "us" }) }))).toBe("/licences");
+    expect(await redirected(() => LicencesRoute({ searchParams: Promise.resolve({ tab: "agreements" }) }))).toBe("/licences");
+    expect(await redirected(() => LicencesRoute({ searchParams: Promise.resolve({ tab: "sla" }) }))).toBeUndefined();
   });
 });

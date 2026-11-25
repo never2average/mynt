@@ -40,6 +40,9 @@ export const AGREEMENT_ESIGN_TABLES = `
     CHECK ((source = 'upload' AND file_sealed IS NOT NULL AND sha256 IS NOT NULL) OR (source = 'provider_template' AND provider_template_id IS NOT NULL))
   );
   CREATE INDEX IF NOT EXISTS agreement_templates_entity_idx ON ${T}.agreement_templates (entity_id, active, created_at DESC);
+  -- The template a licence provider proposed an agreement on (app-agreements.ts propose_workspace_agreement): used for
+  -- its e-signature document in place of the firm's most specific active one.
+  ALTER TABLE ${T}.app_agreements ADD COLUMN IF NOT EXISTS template_id uuid REFERENCES ${T}.agreement_templates(id);
   -- The e-signature document of a program agreement: which template (and version) it was made from, the service's
   -- document id, who signs for each side, and, once complete, the signed copy and the service's audit certificate,
   -- each sealed under the vault key with its SHA-256.

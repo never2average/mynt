@@ -133,7 +133,7 @@ describe("the routes", () => {
     expect(fake.calls.find((c) => c.name === "list_agreement_templates")?.args).toEqual({ include_retired: true });
     // The Licences page's Agreements tab reads the rows (with each one's e-signature) from /api/agreements.
     fake.reply.list_app_agreements = { agreements: [programRow()] };
-    const rows = (await (await listRoute.GET()).json()).agreements;
+    const rows = (await (await listRoute.GET(new Request("http://localhost:3000/api/agreements"))).json()).agreements;
     expect(rows[0].esign).toMatchObject({ byEsign: true, appSigned: true, counterpartySigned: false });
     fake.session = session(["developer"]);
     expect((await templatesRoute.GET()).status).toBe(403);

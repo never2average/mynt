@@ -188,17 +188,33 @@ export const STUDIO_TOOLS = {
   // An app's Products, Agreements and Customers tabs: its products with their sponsors, its agreements with the firms
   // behind them (Propose agreement), and the personas it targets (Choose personas). Apps hold no licences themselves.
   // Without app_id: the Licences page's Agreements tab, a licence provider's list of what apps proposed to its firm.
-  list_app_agreements: z.object({ app_id: id.optional(), status: z.enum(["proposed", "accepted", "signed", "declined", "terminated"]).optional() }).strict(),
+  list_app_agreements: z.object({ app_id: id.optional(), workspace_id: workspaceId.optional(), status: z.enum(["proposed", "accepted", "signed", "declined", "terminated"]).optional() }).strict(),
   // Each side's row actions: the licence provider accepts or declines (Accept / Decline), either side signs (Sign) and
   // either side ends one with a reason (End agreement; Withdraw for the app's own proposal). Mynt decides who may.
   respond_to_app_agreement: z.object({ agreement_id: uuid, decision: z.enum(["accept", "decline"]), note: z.string().trim().max(2000).optional() }).strict(),
   sign_app_agreement: z.object({ agreement_id: uuid }).strict(),
   terminate_app_agreement: z.object({ agreement_id: uuid, reason: z.string().trim().min(3).max(2000) }).strict(),
+  // Either side proposes; the other accepts or declines, then both sign. Every agreement names its app: program, data
+  // sharing, MSA and SLA alike.
+  propose_workspace_agreement: z
+    .object({
+      workspace_id: workspaceId,
+      app_id: id,
+      kind: z.enum(["program", "data_sharing", "msa", "sla"]),
+      products: z.array(id).max(20).optional(),
+      terms_summary: z.string().trim().min(10).max(4000),
+      document_url: z.string().url().max(2000).refine((u) => u.startsWith("https://"), "an https link").optional(),
+      document_sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+      template_id: uuid.optional(),
+      effective_from: auditDate.optional(),
+      effective_to: auditDate.optional(),
+    })
+    .strict(),
   propose_app_agreement: z
     .object({
       app_id: id,
       counterparty_entity_id: uuid,
-      kind: z.enum(["program", "vendor", "data_sharing"]),
+      kind: z.enum(["program", "vendor", "data_sharing", "msa", "sla"]),
       products: z.array(id).max(20),
       terms_summary: z.string().trim().min(10).max(4000),
       document_url: z.string().url().max(2000).refine((u) => u.startsWith("https://"), "an https link").optional(),
@@ -368,6 +384,33 @@ export const STUDIO_TOOLS = {
     })
     .strict(),
   respond_to_agreement_audit_finding: z.object({ audit_id: uuid, finding_id: uuid, response: z.string().trim().min(3).max(4000) }).strict(),
+  // The Licences page's SLA tab: the measurable commitments of a service level agreement (Commitments) and their
+  // breaches. Either party adds commitments before it's signed and records or resolves breaches once it is; Mynt checks.
+  list_agreement_slas: z
+    .object({ workspace_id: workspaceId.optional(), app_id: id.optional(), agreement_id: uuid.optional(), side: z.enum(["app", "counterparty"]).optional(), include_retired: z.boolean().optional() })
+    .strict(),
+  add_agreement_sla: z
+    .object({
+      agreement_id: uuid,
+      metric: z.string().trim().min(3).max(200),
+      target: z.union([z.number().finite(), z.string().trim().min(1).max(200)]),
+      unit: z.string().trim().max(40).optional(),
+      measurement_window: z.enum(["daily", "weekly", "monthly", "quarterly"]),
+      measurement_source: z.string().trim().min(3).max(500),
+      remedy: z.string().trim().max(2000).optional(),
+    })
+    .strict(),
+  retire_agreement_sla: z.object({ sla_id: uuid, reason: z.string().trim().min(3).max(2000) }).strict(),
+  record_sla_breach: z
+    .object({
+      sla_id: uuid,
+      period_start: auditDate,
+      period_end: auditDate,
+      measured_value: z.union([z.number().finite(), z.string().trim().min(1).max(200)]),
+      note: z.string().trim().max(2000).optional(),
+    })
+    .strict(),
+  resolve_sla_breach: z.object({ breach_id: uuid, note: z.string().trim().max(2000).optional() }).strict(),
   // Compliance pages (read-only): Coverage, Licences and Audits, for the selected workspace
   // (no workspace_id for the implicit Personal one).
   get_compliance_coverage: z.object({ workspace_id: workspaceId.optional() }).strict(),

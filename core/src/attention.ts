@@ -4,6 +4,7 @@ import type { Db } from "./db.js";
 import { effectiveStages, stageChecks, staleSignoff } from "./promotions.js";
 import { PENDING } from "./repo-approvals.js";
 import { overdueAuditsOfApps } from "./agreement-audits.js";
+import { openBreachesOfApps } from "./agreement-slas.js";
 import type { Store, User } from "./store.js";
 import { workspaceLicences } from "./workspace-compliance.js";
 import { workspaceRole, type WorkspaceRole } from "./workspaces.js";
@@ -222,6 +223,41 @@ export async function workspaceAttention(store: Store, user: Pick<User, "id">, w
       at: a.due_at,
     });
 
+  // Service levels under the apps' agreements missed and not resolved yet (agreement-slas.ts): each flags its app.
+  for (const b of await openBreachesOfApps(store, ids))
+    items.push({
+      id: `agreement_sla_breach:${b.id}`,
+      kind: "agreement_sla_breach",
+      severity: "medium",
+      title: `${name.get(b.app_id)}: ${b.metric} SLA breached`,
+      detail: `${b.counterparty ?? "The licence provider"}'s service level (target ${b.target}) measured ${b.measured_value} from ${b.period_start} to ${b.period_end}; resolve it once it's dealt with`,
+      href: "/licences?tab=sla",
+      at: b.at,
+    });
+
+  // Agreements a licence provider proposed for one of the workspace's apps, waiting for its answer (app-agreements.ts
+  // propose_workspace_agreement): the owners and admins accept or decline them.
+  {
+    const KIND: Record<string, string> = { program: "program agreement", data_sharing: "data-sharing agreement", msa: "master services agreement", sla: "service-level agreement", vendor: "vendor contract" };
+    const waiting = await rowsOf(
+      db,
+      `SELECT g.id::text AS id, g.app_id::text AS app_id, g.kind, g.proposed_at, e.name AS firm FROM ${T}.app_agreements g LEFT JOIN ${T}.entities e ON e.id = g.counterparty_entity_id
+        WHERE g.status = 'proposed' AND g.proposed_by_side = 'counterparty' AND g.app_id::text = ANY($1)
+        ORDER BY g.proposed_at DESC LIMIT 50`,
+      [ids],
+    );
+    for (const g of waiting)
+      items.push({
+        id: `app_agreement_proposed:${g.id}`,
+        kind: "app_agreement_proposed",
+        severity: manager ? "medium" : "low",
+        title: `${name.get(g.app_id as string)}: ${g.firm ?? "A licence provider"} proposed a ${KIND[g.kind as string] ?? "agreement"}`,
+        detail: manager ? "Review it, then accept or decline it on the Licences page's Business Agreements tab" : "It waits for an owner or admin to accept or decline it",
+        href: "/licences?tab=business-agreements",
+        at: iso(g.proposed_at),
+      });
+  }
+
   // The other firm's side of the apps' agreements, lately: accepted, declined, signed or ended by it (app-agreements.ts).
   // This is how the app's side hears of them; their own actions they know. Signing is the owners' and admins' to do.
   if (ids.length) {
@@ -237,14 +273,15 @@ export async function workspaceAttention(store: Store, user: Pick<User, "id">, w
        FROM ${T}.audit_log l JOIN ${T}.app_agreements g ON g.id::text = l.target LEFT JOIN ${T}.entities e ON e.id = g.counterparty_entity_id
          LEFT JOIN ${T}.app_agreement_documents doc ON doc.agreement_id = g.id
        WHERE l.action = ANY($1) AND l.details->>'app_id' = ANY($2) AND l.created_at > now() - make_interval(days => $3)
-         AND (l.action IN ('accept_app_agreement', 'decline_app_agreement', 'esign_completed', 'esign_declined', 'esign_expired', 'esign_canceled') OR l.details->>'side' = 'counterparty')
+         AND (l.action IN ('esign_completed', 'esign_declined', 'esign_expired', 'esign_canceled') OR (l.action IN ('accept_app_agreement', 'decline_app_agreement') AND l.details->>'side' IS DISTINCT FROM 'app') OR l.details->>'side' = 'counterparty')
        ORDER BY l.created_at DESC LIMIT 50`,
       [[...Object.keys(WORDS), ...Object.keys(ESIGN)], ids, RECENT_DAYS],
     );
     for (const d of done) {
       const details = (d.details ?? {}) as Record<string, unknown>;
       const app = String(details.app_id);
-      const what = String(d.kind) === "program" ? "program agreement" : String(d.kind) === "vendor" ? "vendor contract" : "data-sharing agreement";
+      const KINDS: Record<string, string> = { program: "program agreement", vendor: "vendor contract", data_sharing: "data-sharing agreement", msa: "master services agreement", sla: "service-level agreement" };
+      const what = KINDS[String(d.kind)] ?? "agreement";
       const esign = String(d.action) in ESIGN;
       const ended = d.action === "terminate_app_agreement" || d.action === "esign_expired" || d.action === "esign_canceled";
       const declined = d.action === "decline_app_agreement" || d.action === "esign_declined";

@@ -91,8 +91,13 @@ export async function emitEvent(store: Store, appIds: string[], type: WebhookEve
 // running; its upgrades wait for an admin's review).
 // covenant.breached, covenant.cleared: to a licence provider, one of its rules on a sponsored product tripped or
 // passed again (covenants.ts), with the observed value sealed until it's sent.
+// app_agreement.proposed, app_agreement.signed, app_agreement.terminated, app_agreement.answered: an app agreement
+// (app-agreements.ts) proposed to the firm (or, by a licence provider, to a workspace's firms), signed, ended, or
+// accepted or declined by the app's side.
 // agreement_audit.opened, agreement_audit.submitted, agreement_audit.closed: an oversight audit under an app agreement
 // (agreement-audits.ts) opened, answered by the app's side, or passed, failed or waived; told to both parties' firms.
+// agreement_sla.breached: a service level under an app agreement (agreement-slas.ts) was missed in a period, recorded by
+// either party; told to both parties' firms.
 // Developer-side data only; customers never see it.
 export const FIRM_WEBHOOK_EVENTS = [
   "vendor_action.completed",
@@ -123,9 +128,11 @@ export const FIRM_WEBHOOK_EVENTS = [
   "app_agreement.proposed",
   "app_agreement.signed",
   "app_agreement.terminated",
+  "app_agreement.answered",
   "agreement_audit.opened",
   "agreement_audit.submitted",
   "agreement_audit.closed",
+  "agreement_sla.breached",
 ] as const;
 export type FirmWebhookEvent = (typeof FIRM_WEBHOOK_EVENTS)[number];
 

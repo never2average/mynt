@@ -8,6 +8,7 @@ import { z } from "zod";
 import type { Db } from "./db.js";
 import { namesMoneyMovement } from "./money-rails.js";
 import { overdueAgreementAudits } from "./agreement-audits.js";
+import { openSlaBreaches } from "./agreement-slas.js";
 import { QUOTA_PATTERN } from "./transient.js";
 import { overdueRiskReviews } from "./risk-register.js";
 import { overdueRiskModelValidations } from "./risk-models.js";
@@ -243,6 +244,8 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
   const riskModels = (await exists("risk_models")) ? await overdueRiskModelValidations(db) : null;
   // App agreements' oversight audits past their due date and not closed (agreement-audits.ts): each flags its app.
   const agreementAudits = await overdueAgreementAudits({ db });
+  // Service levels under app agreements missed and not resolved yet (agreement-slas.ts).
+  const slaBreaches = await openSlaBreaches(db);
   // Production apps without a signed program agreement in force with a product's sponsor (an agreement ended or
   // expired after they got there: they keep running, flagged; app-agreements.ts programAgreementCoverage, in SQL).
   const appsMissingAgreements = (await exists("app_agreements")) && (await exists("app_promotions")) && (await exists("sponsorships"))
@@ -264,6 +267,7 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     : [];
   const attention = [
     ...(agreementAudits.audits ? [`agreement audits: ${agreementAudits.audits} overdue oversight audits (on ${agreementAudits.apps} apps): past their due date and not closed; the licence provider and the app's side see them in list_agreement_audits (overdue: true)`] : []),
+    ...(slaBreaches.open ? [`agreement SLAs: ${slaBreaches.open} open SLA breach(es) on ${slaBreaches.agreements} app agreement(s): a service level missed and not resolved yet; both parties see them in list_agreement_slas`] : []),
     ...(appsMissingAgreements.length ? [`apps: ${appsMissingAgreements.length} production app(s) without a signed program agreement in force with a product's sponsor (ended or expired since they went live); they keep running and their workspaces are told (get_workspace_attention), but their production checks fail until one is signed: ${appsMissingAgreements.map((a) => a.app_name).join(", ")}`] : []),
     ...(risks.count ? [`risks: ${risks.count} risk review(s) overdue (review date passed, not closed) on apps' or products' risk registers; their keepers review them with update_risk`] : []),
     ...(riskModels?.count ? [`risk models: ${riskModels.count} of Mynt's risk model(s) overdue for validation (next validation date passed, not retired): ${riskModels.models.map((m) => m.name).join(", ")}; record one with validate_risk_model`] : []),
@@ -300,7 +304,7 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...(covenants.blocked_webhooks ? [`covenants: ${covenants.blocked_webhooks} firm webhook(s) blocked: their creator can no longer receive covenant alerts, so a member with the licence-provider role must create them again (list_firm_webhooks)`] : []),
     ...(covenantTimerIdle ? [`covenants: ${covenants.active_rules} rule(s), but the covenant timer ${covenants.timer_last_ran ? `last ran ${covenants.timer_last_ran}` : "has never run"}`] : []),
   ];
-  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors: { ...vendors, money_name_mismatches: moneyNameMismatches }, solana, product_health: productHealth, covenants, agreement_audits: { overdue: agreementAudits.audits, apps_flagged: agreementAudits.apps }, workspaces: { failed_offboards: offboards, webhook_secrets_rotated_on_offboard: rotatedOnOffboard, org_missing: orgMissing, org_backfill_pending: backfillPending, org_sync: orgSync }, apps: { production_without_program_agreements: appsMissingAgreements }, risks: { overdue_reviews: risks.count, overdue: risks.risks }, risk_models: riskModels ? { overdue_validations: riskModels.count, overdue: riskModels.models } : null, backups: backups.section };
+  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors: { ...vendors, money_name_mismatches: moneyNameMismatches }, solana, product_health: productHealth, covenants, agreement_audits: { overdue: agreementAudits.audits, apps_flagged: agreementAudits.apps }, sla_breaches: { open: slaBreaches.open, agreements: slaBreaches.agreements }, workspaces: { failed_offboards: offboards, webhook_secrets_rotated_on_offboard: rotatedOnOffboard, org_missing: orgMissing, org_backfill_pending: backfillPending, org_sync: orgSync }, apps: { production_without_program_agreements: appsMissingAgreements }, risks: { overdue_reviews: risks.count, overdue: risks.risks }, risk_models: riskModels ? { overdue_validations: riskModels.count, overdue: riskModels.models } : null, backups: backups.section };
 }
 
 export function registerOpsTools(server: McpServer, db: Db) {

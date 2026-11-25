@@ -28,6 +28,7 @@ export type EsignInfo = {
   counterpartySigned: boolean;
   signedCopy: boolean; // Mynt holds the signed copy
   template: string | null; // "name, version n"
+  templateId?: string | null; // the agreement template (MSA) version the document was made from
 };
 
 export function esignOf(agreement: unknown): EsignInfo | null {
@@ -44,6 +45,7 @@ export function esignOf(agreement: unknown): EsignInfo | null {
     counterpartySigned: signed("counterparty"),
     signedCopy: Boolean(d && isObj(d.signed_copy)),
     template: t && str(t.name) ? `${str(t.name)}, version ${typeof t.version === "number" ? t.version : "?"}` : null,
+    templateId: t ? str(t.id) : null,
   };
 }
 

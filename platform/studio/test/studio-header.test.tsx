@@ -296,21 +296,22 @@ const index = searchIndex({
     { id: "a3", name: "Crypto vault", stage: "idea" },
   ],
   members: [{ userId: "u1", name: "Ines Diaz", email: "ines@example.com", role: "owner" }],
-  licences: [{ partner: "Lead Bank", type: "Money transmitter", regulator: "NYDFS", number: "MT-1", states: ["NY"], status: "active" }],
   auditActions: ["app.created", "member.invited", "app.created"],
 });
 
 describe("search", () => {
-  it("finds pages, apps by name or stage, members, licences and audit actions", () => {
+  it("finds pages, apps by name or stage, members and audit actions", () => {
     const labels = (q: string) => searchStudio(index, q).map((i) => `${i.group}:${i.label}`);
     expect(labels("budg")).toEqual(["Apps:Budgeting"]);
     expect(labels("staging")).toEqual(["Apps:Budgeting"]);
     expect(labels("production")).toEqual(["Apps:Round-up savings"]);
-    expect(labels("ines")).toEqual(["Members:Ines Diaz"]);
-    expect(labels("nydfs")).toEqual(["Licences:Lead Bank · Money transmitter"]);
+    expect(labels("ines diaz")).toEqual(["Members:Ines Diaz"]);
     expect(labels("invited")).toEqual(["Audit actions:member.invited"]);
-    expect(labels("cover")).toEqual(["Pages:Coverage", "Pages:Licences"]); // Coverage is a tab of Licences
-    expect(searchStudio(index, "coverage")[0].href).toBe("/licences?view=map&region=us");
+    // The Licences page's tabs are pages of their own in search; the coverage map is gone from it.
+    expect(labels("coverage")).toEqual([]);
+    expect(labels("sla")).toEqual(["Pages:SLA", "Pages:Licences"]);
+    expect(searchStudio(index, "master services")[0].href).toBe("/licences?tab=msa");
+    expect(searchStudio(index, "audit obligations").map((i) => i.href)).toContain("/licences?tab=audit-obligations");
     expect(labels("zzz")).toEqual([]);
     // Every word must match; empty lists the pages and apps.
     expect(labels("round savings")).toEqual(["Apps:Round-up savings"]);
@@ -331,7 +332,7 @@ describe("search", () => {
     expect(searchStudio(index, "budgeting risk register")[0].href).toBe("/a2?tab=security");
     expect(labels("crypto security")).toContain("Apps:Crypto vault: Security & risk");
     expect(labels("budg")).toEqual(["Apps:Budgeting"]);
-    expect(searchStudio(index, "").some((i) => i.href.includes("?tab="))).toBe(false);
+    expect(searchStudio(index, "").some((i) => i.group === "Apps" && i.href.includes("?tab="))).toBe(false);
     expect(index.some((i) => /Licences$/.test(i.label) && i.group === "Apps")).toBe(false);
   });
 
@@ -394,7 +395,7 @@ describe("search", () => {
     expect(ask.textContent).toContain(NOT_CONFIGURED);
     const input = screen.getByPlaceholderText("Search");
     await act(async () => {
-      fireEvent.change(input, { target: { value: "ines" } });
+      fireEvent.change(input, { target: { value: "ines diaz" } });
     });
     expect([...document.querySelectorAll("[data-result]")].map((e) => e.textContent)).toEqual(["Ines Diazowner"]);
     await act(async () => {

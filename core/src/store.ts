@@ -12,6 +12,7 @@ import { RISK_REGISTER_TABLES } from "./risk-register-schema.js";
 import { RISK_MODEL_TABLES } from "./risk-models-schema.js";
 import { AGREEMENT_ESIGN_TABLES } from "./agreement-esign-schema.js";
 import { AGREEMENT_AUDIT_TABLES } from "./agreement-audits-schema.js";
+import { AGREEMENT_SLA_TABLES } from "./agreement-slas-schema.js";
 import { grandfatherLiveApps, PROMOTION_TABLES, seedAppStages } from "./promotion-schema.js";
 import { WORKSPACE_TABLES, migrateAppWorkspaces, personalWorkspace } from "./workspaces.js";
 import { fingerprint, runProductTests, type TestReport } from "./product-tests.js";
@@ -1772,6 +1773,7 @@ ${RISK_REGISTER_TABLES}
 ${RISK_MODEL_TABLES}
 ${AGREEMENT_ESIGN_TABLES}
 ${AGREEMENT_AUDIT_TABLES}
+${AGREEMENT_SLA_TABLES}
 `;
 
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");

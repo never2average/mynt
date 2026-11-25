@@ -46,13 +46,15 @@ const DEVELOPER_TOOLS = [
   "demote_app", "get_promotion_checks", "get_workspace_attention", "promote_app", "request_promotion_signoff", "set_app_target_states",
   "enable_webhook",
   // an app's agreements with the firms behind its products, and the customers it targets
-  "get_app_customers", "list_app_agreements", "propose_app_agreement", "set_app_target_segments", "sign_app_agreement", "terminate_app_agreement",
+  "get_app_customers", "list_app_agreements", "propose_app_agreement", "respond_to_app_agreement", "set_app_target_segments", "sign_app_agreement", "terminate_app_agreement",
   // the risk registers of its apps and products
   "add_risk", "list_risks", "update_risk",
   // signing program agreements by e-signature, and the signed copies
   "download_agreement_document", "get_agreement_signing_link",
   // the app side of oversight audits under those agreements: read them, submit evidence, answer findings
   "get_agreement_audit", "list_agreement_audits", "respond_to_agreement_audit_finding", "submit_agreement_audit_evidence",
+  // service-level commitments under SLA agreements: set and retire them, record and resolve breaches, read them
+  "add_agreement_sla", "list_agreement_slas", "record_sla_breach", "resolve_sla_breach", "retire_agreement_sla",
 ];
 const INNOVATOR_TOOLS = [
   "create_product", "list_my_products", "publish_product", "test_product", "unpublish_product", "update_product",

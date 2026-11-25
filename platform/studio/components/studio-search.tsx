@@ -3,7 +3,7 @@
 // The header's search: a search field that opens a Cmd+K modal, with Ask AI in the same modal
 // (the field, or Cmd+K / Ctrl+K anywhere, opens it). Typing
 // searches the studio: its pages, the selected workspace's apps (by name or stage), the user's own financial products, members,
-// licences and audit actions, with the arrow keys and Enter (shadcn's Command, cmdk). "Ask AI"
+// and audit actions, with the arrow keys and Enter (shadcn's Command, cmdk). "Ask AI"
 // switches the modal to a conversation with the studio's assistant (components/ask-ai.tsx),
 // streamed, with follow-ups, Stop and New chat; Search goes back. The conversation is kept in
 // memory while the tab stays open (never in storage), so closing and reopening the modal keeps it.
@@ -152,7 +152,7 @@ const pick = async <T,>(url: string, read: (body: Record<string, unknown>) => T 
 // What search covers, for the selected workspace: loaded each time the modal opens.
 function useSearchSources(open: boolean): SearchSources {
   const { selected, loading } = useWorkspace();
-  // Apps, members, licences and audit actions are developers' (their routes are developer-only).
+  // Apps, members and audit actions are developers' (their routes are developer-only).
   const access = useStudioAccess();
   const developer = access?.developer === true;
   // The platform admin's sections, only for Mynt admins (its pages are a 404 for anyone else).
@@ -170,7 +170,6 @@ function useSearchSources(open: boolean): SearchSources {
     if (!selected.implicit)
       void pick(`/api/workspaces/${ws}/members`, (b) => b.members as SearchSources["members"]).then((members) => set({ members: members ?? [] }));
     else set({ members: [] });
-    void pick(withWorkspace("/api/licences", selected), (b) => b.licences as SearchSources["licences"]).then((licences) => set({ licences: licences ?? [] }));
     void pick(withWorkspace("/api/audit", selected), (b) => (b.page as { events?: { action: string }[] } | undefined)?.events).then((events) =>
       set({ auditActions: (events ?? []).map((e) => e.action) }),
     );
@@ -338,7 +337,7 @@ function StudioSearchDialog() {
       >
         <DialogTitle className="sr-only">{mode === "ai" ? "Ask AI" : "Search the studio"}</DialogTitle>
         <DialogDescription className="sr-only">
-          {mode === "ai" ? "Ask about your apps, builds, workspaces and compliance." : "Search pages, apps, members, licences and audit actions, or ask AI."}
+          {mode === "ai" ? "Ask about your apps, builds, workspaces and compliance." : "Search pages, apps, members and audit actions, or ask AI."}
         </DialogDescription>
         {mode === "search" ? (
           <Command shouldFilter={false} loop className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground">
