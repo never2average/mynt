@@ -6,6 +6,16 @@ const T = "financial_products";
 export const APP_AGREEMENT_KINDS = ["program", "vendor", "data_sharing", "msa", "sla"] as const;
 export const AGREEMENT_SIDES = ["app", "counterparty"] as const;
 export const APP_AGREEMENT_STATUSES = ["proposed", "accepted", "signed", "declined", "terminated"] as const;
+// What an agreement covers: one or more of these scopes, recorded when it's proposed, part of what the other side
+// accepts and what's signed. The studio shows the same labels (platform/studio/lib, mirrored there).
+export const AGREEMENT_SCOPES = [
+  { key: "technology", label: "Technology" }, // a platform or software licence
+  { key: "manpower", label: "Manpower" }, // people and staffing
+  { key: "financial_regulatory_operations", label: "Financial regulatory operations" }, // compliance and regulatory operations
+] as const;
+export const AGREEMENT_SCOPE_KEYS = AGREEMENT_SCOPES.map((s) => s.key) as unknown as readonly ["technology", "manpower", "financial_regulatory_operations"];
+export type AgreementScope = (typeof AGREEMENT_SCOPES)[number]["key"];
+export const agreementScopeLabel = (key: string) => AGREEMENT_SCOPES.find((s) => s.key === key)?.label ?? key;
 
 export const APP_AGREEMENT_TABLES = `
   -- A business agreement between an app's workspace (the developer side) and another firm on Mynt: a program agreement
@@ -68,6 +78,11 @@ export const APP_AGREEMENT_TABLES = `
   -- A vendor's standard terms on each offering (vendor-terms.ts): the document (https) and its SHA-256, a short summary,
   -- the pricing (billed by the vendor directly, never through Mynt) and a version that goes up when any of them changes.
   -- Listing an offering with terms is the vendor's standing acceptance of them; who set them and when is kept.
+  -- What each agreement covers (AGREEMENT_SCOPES): one or more scopes for every new one. NOT VALID: agreements from
+  -- before scopes keep an empty list ("Not set"), never an invented one.
+  ALTER TABLE ${T}.app_agreements ADD COLUMN IF NOT EXISTS scopes text[] NOT NULL DEFAULT '{}';
+  ALTER TABLE ${T}.app_agreements DROP CONSTRAINT IF EXISTS app_agreements_scopes_check;
+  ALTER TABLE ${T}.app_agreements ADD CONSTRAINT app_agreements_scopes_check CHECK (scopes <@ ARRAY['technology', 'manpower', 'financial_regulatory_operations']::text[]) NOT VALID;
   ALTER TABLE ${T}.vendor_offerings ADD COLUMN IF NOT EXISTS terms_version integer;
   ALTER TABLE ${T}.vendor_offerings ADD COLUMN IF NOT EXISTS terms_document_url text;
   ALTER TABLE ${T}.vendor_offerings ADD COLUMN IF NOT EXISTS terms_document_sha256 text;

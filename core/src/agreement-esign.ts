@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { AGREEMENT_TEMPLATE_SOURCES, SIGNATURE_PLACEMENTS } from "./agreement-esign-schema.js";
+import { agreementScopeLabel } from "./app-agreements-schema.js";
 import { ESIGN_NOT_CONFIGURED, ESignError, type ESign, type ESignDocument, type ESignSigner } from "./esign/provider.js";
 import { schedulePdf } from "./esign/schedule-pdf.js";
 import { currentEsign, type EsignSource } from "./esign-settings.js";
@@ -21,7 +22,7 @@ import { appRole, memberApp } from "./workspaces.js";
 //    manage them, never an admin on their behalf.
 // 2. When the firm accepts an app's program agreement (respond_to_app_agreement), Mynt picks the firm's most specific
 //    active template (the sponsorship's, else a licence's behind the products' sponsorships, else the firm's default),
-//    appends its program schedule (what Mynt fills in: both parties, the developer's firm, the app, the products, the
+//    appends its program schedule (what Mynt fills in: both parties, the developer's firm, the app, the products, the scope, the
 //    states, the dates, the template's version and SHA-256) and creates the e-signature document with two signers: the
 //    person who accepted for the firm and the person who proposed for the app, signing in either order. If the firm
 //    has no template yet, or the service can't be reached, the agreement stays accepted and the document is made the
@@ -48,7 +49,7 @@ type Row = Record<string, unknown>;
 export { ESIGN_WEBHOOK_PATH } from "./esign-settings.js";
 export const MAX_TEMPLATE_BYTES = 5 * 1024 * 1024;
 // The variables Mynt fills in; a provider template maps each it wants to one of its own fields (field_map).
-export const TEMPLATE_VARIABLES = ["licence_provider", "developer_firm", "app", "products", "states", "effective_from", "effective_to", "agreement_id", "terms_summary"] as const;
+export const TEMPLATE_VARIABLES = ["licence_provider", "developer_firm", "app", "products", "states", "effective_from", "effective_to", "agreement_id", "terms_summary", "scope"] as const;
 type Variable = (typeof TEMPLATE_VARIABLES)[number];
 
 const MANAGERS = ["owner", "admin"];
@@ -204,6 +205,8 @@ async function valuesFor(store: Store, a: Row): Promise<Record<Variable, string>
     effective_to: day(a.effective_to) || "Until ended by either party",
     agreement_id: a.id as string,
     terms_summary: (a.terms_summary as string) ?? "",
+    // What it covers, in words, as the other side accepted it ("Not set" on an agreement from before scopes).
+    scope: Array.isArray(a.scopes) && a.scopes.length ? (a.scopes as string[]).map(agreementScopeLabel).join("; ") : "Not set",
   };
 }
 
@@ -217,6 +220,7 @@ const LABELS: Record<Variable, string> = {
   effective_to: "Effective until",
   agreement_id: "Mynt agreement id",
   terms_summary: "Summary of the terms (as proposed)",
+  scope: "Scope of the agreement",
 };
 
 export function scheduleFor(values: Record<Variable, string>, template: TemplateRecord, signers: ESignSigner[]): Buffer {
@@ -224,7 +228,7 @@ export function scheduleFor(values: Record<Variable, string>, template: Template
     "Program schedule (filled in by Mynt)",
     [
       { heading: "Parties", lines: [[LABELS.licence_provider, values.licence_provider], [LABELS.developer_firm, values.developer_firm]] },
-      { heading: "What the agreement covers", lines: (["app", "products", "states", "effective_from", "effective_to", "terms_summary"] as const).map((k) => [LABELS[k], values[k]]) },
+      { heading: "What the agreement covers", lines: (["app", "products", "scope", "states", "effective_from", "effective_to", "terms_summary"] as const).map((k) => [LABELS[k], values[k]]) },
       {
         heading: "Agreement",
         lines: [
@@ -235,7 +239,7 @@ export function scheduleFor(values: Record<Variable, string>, template: Template
         ],
       },
     ],
-    "This schedule forms part of the agreement it is attached to. Where the agreement and this schedule differ on the parties, the app, the products or the states covered, this schedule governs. The products are each covered by the licence provider's sponsorship on Mynt; the app itself holds no licence.",
+    "This schedule forms part of the agreement it is attached to. Where the agreement and this schedule differ on the parties, the app, the products, the scope or the states covered, this schedule governs. The products are each covered by the licence provider's sponsorship on Mynt; the app itself holds no licence.",
   );
 }
 
@@ -487,7 +491,7 @@ export function registerAgreementEsignTools(server: McpServer, store: Store, use
       {
         title: "Upload a program agreement template",
         description:
-          "Licence provider (your firm's own licence providers only): add your firm's program agreement, which apps sign with you when you accept their program agreement. Either upload the document (source 'upload': a PDF or DOCX as base64, at most 5 MB; Mynt keeps it sealed with its SHA-256) or name a template your firm keeps at this deployment's e-signature service (source 'provider_template', with its placeholders for the two signers and field_map from Mynt's variables to the template's field ids). Attach it to one of your licences (licence_id) or sponsorships (sponsorship_id), or neither for your firm's default; the most specific active one is used. Mynt appends a program schedule stating the parties, the developer's firm, the app, the products, the states and the dates. Versions never change: a new upload under the same name is the next version and the active one. Audited.",
+          "Licence provider (your firm's own licence providers only): add your firm's program agreement, which apps sign with you when you accept their program agreement. Either upload the document (source 'upload': a PDF or DOCX as base64, at most 5 MB; Mynt keeps it sealed with its SHA-256) or name a template your firm keeps at this deployment's e-signature service (source 'provider_template', with its placeholders for the two signers and field_map from Mynt's variables to the template's field ids). Attach it to one of your licences (licence_id) or sponsorships (sponsorship_id), or neither for your firm's default; the most specific active one is used. Mynt appends a program schedule stating the parties, the developer's firm, the app, the products, the scope, the states and the dates. Versions never change: a new upload under the same name is the next version and the active one. Audited.",
         inputSchema: {
           name: z.string().trim().min(3).max(120),
           source: z.enum(AGREEMENT_TEMPLATE_SOURCES).default("upload"),

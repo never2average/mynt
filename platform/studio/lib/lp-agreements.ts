@@ -6,7 +6,7 @@
 // One row type for both, so one table shows them. Pure, so the route, the view and the tests share it; Mynt checks
 // every action again.
 import { esignOf, esignStatusLine, type EsignInfo } from "./agreement-esign";
-import { AGREEMENT_KIND_LABELS, AGREEMENT_STATUS_LABELS, agreementActions, documentLink, type AgreementAction } from "./app-panel";
+import { AGREEMENT_KIND_LABELS, AGREEMENT_STATUS_LABELS, agreementActions, documentLink, scopeLabelOf, scopesOf, type AgreementAction, type AgreementScope } from "./app-panel";
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -39,6 +39,8 @@ export type LpAgreementRow = {
   products: string[];
   kind: string; // the label
   kindKey: string;
+  scopes: AgreementScope[]; // what it covers (AGREEMENT_SCOPES); none on agreements from before scopes
+  scopeLabel: string; // in words, "Not set" for none
   status: string; // in words, from the row's side
   statusKey: string;
   signatures: string | null;
@@ -89,6 +91,8 @@ export function agreementRowOf(a: Obj, side: AgreementSide, app?: { id: string; 
     products: arr(a.products).map((p) => (isObj(p) ? (str(p.name) ?? str(p.id)) : str(p))).filter((p): p is string => Boolean(p)),
     kind: AGREEMENT_KIND_LABELS[str(a.kind) ?? ""] ?? str(a.kind) ?? "Agreement",
     kindKey: str(a.kind) ?? "",
+    scopes: scopesOf(a.scopes),
+    scopeLabel: scopeLabelOf(scopesOf(a.scopes)),
     // A proposal waits for whichever side didn't make it.
     status: statusKey === "proposed" ? (proposedBy === side ? "Proposed: waiting for them" : "Proposed: waiting for your answer") : (statusWords[statusKey] ?? statusKey),
     statusKey,

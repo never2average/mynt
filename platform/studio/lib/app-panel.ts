@@ -143,6 +143,26 @@ export function appProductsFrom(reply: unknown): AppProduct[] {
 export const stateLabel = (code: string) => (code.includes("-") ? code.split("-").slice(1).join("-") : code).toUpperCase();
 
 export const AGREEMENT_KIND_LABELS: Record<string, string> = { program: "Program agreement", vendor: "Vendor contract", data_sharing: "Data sharing", msa: "Master services agreement", sla: "Service level agreement" };
+// What an agreement covers, one or more of a fixed list (Mynt: AGREEMENT_SCOPES in core/src/app-agreements-schema.ts,
+// mirrored here; test/lp-agreements.test.ts checks the two agree). Agreements from before scopes keep none: "Not set".
+export const AGREEMENT_SCOPES = [
+  { key: "technology", label: "Technology" },
+  { key: "manpower", label: "Manpower" },
+  { key: "financial_regulatory_operations", label: "Financial regulatory operations" },
+] as const;
+export type AgreementScope = (typeof AGREEMENT_SCOPES)[number]["key"];
+export const AGREEMENT_SCOPE_KEYS = AGREEMENT_SCOPES.map((s) => s.key) as [AgreementScope, ...AgreementScope[]];
+export const SCOPE_NOT_SET = "Not set";
+const SCOPE_LABEL: Record<string, string> = Object.fromEntries(AGREEMENT_SCOPES.map((s) => [s.key, s.label]));
+/** An agreement's scopes as Mynt sends them: the known keys, in the list's order. */
+export const scopesOf = (v: unknown): AgreementScope[] => {
+  const given = new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  return AGREEMENT_SCOPE_KEYS.filter((k) => given.has(k));
+};
+/** The scopes in words, joined; "Not set" for an agreement from before scopes. */
+export const scopeLabelOf = (scopes: readonly string[]) => (scopes.length ? scopes.map((k) => SCOPE_LABEL[k] ?? k).join(", ") : SCOPE_NOT_SET);
+/** The words for each scope, for filters ("Not set" for none). */
+export const scopeWordsOf = (scopes: readonly string[]) => (scopes.length ? scopes.map((k) => SCOPE_LABEL[k] ?? k) : [SCOPE_NOT_SET]);
 export const AGREEMENT_STATUS_LABELS: Record<string, string> = {
   proposed: "Proposed: waiting for them",
   accepted: "Accepted: waiting for signatures",
@@ -167,6 +187,8 @@ export type AgreementRow = {
   documentUrl: string | null; // https only
   endedReason: string | null;
   proposedBy?: "app" | "counterparty"; // either side proposes; the other accepts or declines
+  scopes: AgreementScope[]; // what it covers (AGREEMENT_SCOPES); none on agreements from before scopes
+  scopeLabel: string; // in words, "Not set" for none
 };
 // termsVersion: the provider's standard terms accepted for this app (the Marketplace's click-through); noStandardTerms:
 // subscribed with none on file (or before the provider had any).
@@ -268,6 +290,8 @@ export function fromAgreements(reply: unknown): AppAgreements | null {
             documentUrl: documentLink(a.document_url),
             endedReason: str(a.termination_reason),
             proposedBy: a.proposed_by_side === "counterparty" ? "counterparty" : "app",
+            scopes: scopesOf(a.scopes),
+            scopeLabel: scopeLabelOf(scopesOf(a.scopes)),
           },
         ];
       }),

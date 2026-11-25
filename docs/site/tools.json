@@ -16,7 +16,7 @@
       "id": "apps",
       "title": "Apps & developers",
       "summary": "Register apps, read a product's developer contract, make an app's agreements with the firms behind its products and run their oversight audits, keep apps' and products' risk registers, and start from app kinds and ideas.",
-      "tools": 55
+      "tools": 56
     },
     {
       "id": "builds",
@@ -122,7 +122,7 @@
     {
       "role": "developer",
       "summary": "the builder role, under its other name: builds apps (keys, webhooks, SDKs, journeys, GTM campaigns) with coding agents Mynt verifies and hosts, and composes and publishes products too. The same tools as innovator. Also a consumer.",
-      "tools": 249,
+      "tools": 250,
       "get_started": [
         {
           "tool": "list_buildable_products",
@@ -149,7 +149,7 @@
     {
       "role": "innovator",
       "summary": "the builder role: composes, tests, publishes and versions financial products from regulated primitives, decides who may build on them, and builds apps on them. Needn't be licensed: a licence provider can sponsor a product under its licences. The same tools as developer. Also a consumer.",
-      "tools": 249,
+      "tools": 250,
       "get_started": [
         {
           "tool": "create_entity",
@@ -176,7 +176,7 @@
     {
       "role": "vendor",
       "summary": "a firm offering standard services per region (identity, KYC, account data, bureau, e-sign, e-mandate, the ramp) that builders plug into products. A peer of builders.",
-      "tools": 48,
+      "tools": 49,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -203,7 +203,7 @@
     {
       "role": "license_provider",
       "summary": "a firm, added by an admin, holding licences (verified by admins) that sponsor builders' products: it approves, declines or revokes sponsorship of a product's component under a held licence, in the jurisdictions it covers. A peer of builders.",
-      "tools": 100,
+      "tools": 101,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Holds every other role.",
-      "tools": 410,
+      "tools": 411,
       "get_started": [
         {
           "tool": "define_region",
@@ -9710,7 +9710,7 @@
     {
       "name": "list_app_agreements",
       "title": "App agreements",
-      "description": "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, program_coverage (each product and the licence provider sponsoring it where the app serves, and whether a signed program agreement in force covers it: production needs every one; production_gate says what's missing, and flagged when the app is already in production without one), the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on (each with the version of the vendor's standard terms accepted for this app, or no_standard_terms when none were), and introductions the business-development agent has in progress for its members (null when that agent isn't running here). With workspace_id (developer, any member): every agreement of the workspace's apps (all kinds), can_manage, and proposable_counterparties (the sponsors of its apps' products). Without either (licence provider or vendor): the agreements made with your firm, both those apps' workspaces proposed and those your firm proposed, and proposable_workspaces (those whose apps use products your firm sponsors, or that already have an agreement with it). Each agreement says which side proposed it (proposed_by_side), the template it was made on, your_side and what you may do now (actions: accept, decline, sign, withdraw, end). status filters any list.",
+      "description": "With app_id (developer, any member of the app's workspace): the app's agreements with other firms, program_coverage (each product and the licence provider sponsoring it where the app serves, and whether a signed program agreement in force covers it: production needs every one; production_gate says what's missing, and flagged when the app is already in production without one), the products it uses (each with its stage, the licence providers sponsoring it and the states they sponsor it in: an app's licence coverage is its products'), the vendor services its workspace relies on (each with the version of the vendor's standard terms accepted for this app, or no_standard_terms when none were), and introductions the business-development agent has in progress for its members (null when that agent isn't running here). With workspace_id (developer, any member): every agreement of the workspace's apps (all kinds), can_manage, and proposable_counterparties (the sponsors of its apps' products). Without either (licence provider or vendor): the agreements made with your firm, both those apps' workspaces proposed and those your firm proposed, and proposable_workspaces (those whose apps use products your firm sponsors, or that already have an agreement with it). Each agreement says which side proposed it (proposed_by_side), the template it was made on, your_side and what you may do now (actions: accept, decline, sign, withdraw, end). Each agreement carries its scopes (what it covers: technology, manpower, financial_regulatory_operations; empty on one from before scopes were recorded) and scope_labels. status and scope filter any list.",
       "area": "apps",
       "roles": [
         "developer",
@@ -9742,6 +9742,15 @@
               "signed",
               "declined",
               "terminated"
+            ]
+          },
+          "scope": {
+            "description": "Only agreements covering this scope",
+            "type": "string",
+            "enum": [
+              "technology",
+              "manpower",
+              "financial_regulatory_operations"
             ]
           }
         },
@@ -12472,7 +12481,7 @@
     {
       "name": "propose_app_agreement",
       "title": "Propose an agreement for an app",
-      "description": "Developer (the app's workspace owners and admins): propose a business agreement between the app's workspace and another firm, for that app: 'program' with a licence provider that sponsors every product named (see list_app_agreements' products and their sponsors), 'vendor' with a firm that lists vendor services on Mynt, 'data_sharing' with either, 'msa' (a master services agreement) or 'sla' (service levels, set with add_agreement_sla) with either. Name the products it covers (from the app's own), a short summary of the terms, and optionally a link to the document (https) with its SHA-256 and the dates it runs between. The other firm is told and accepts or declines it (respond_to_app_agreement); then both sides sign (sign_app_agreement). Apps hold no licences themselves: licence coverage is the products'. Audited.",
+      "description": "Developer (the app's workspace owners and admins): propose a business agreement between the app's workspace and another firm, for that app: 'program' with a licence provider that sponsors every product named (see list_app_agreements' products and their sponsors), 'vendor' with a firm that lists vendor services on Mynt, 'data_sharing' with either, 'msa' (a master services agreement) or 'sla' (service levels, set with add_agreement_sla) with either. Name the products it covers (from the app's own), its scopes (one or more of technology, manpower, financial_regulatory_operations: what it covers, part of what the other side accepts and what's signed; change them with update_agreement_scopes while it's proposed), a short summary of the terms, and optionally a link to the document (https) with its SHA-256 and the dates it runs between. The other firm is told and accepts or declines it (respond_to_app_agreement); then both sides sign (sign_app_agreement). Apps hold no licences themselves: licence coverage is the products'. Audited.",
       "area": "apps",
       "roles": [
         "developer",
@@ -12516,6 +12525,20 @@
               "maxLength": 200
             }
           },
+          "scopes": {
+            "minItems": 1,
+            "maxItems": 3,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "technology",
+                "manpower",
+                "financial_regulatory_operations"
+              ]
+            },
+            "description": "What the agreement covers, one or more of: technology (a platform or software licence), manpower (people and staffing), financial_regulatory_operations (compliance and regulatory operations)"
+          },
           "terms_summary": {
             "type": "string",
             "minLength": 10,
@@ -12543,6 +12566,7 @@
           "app_id",
           "counterparty_entity_id",
           "kind",
+          "scopes",
           "terms_summary"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -12658,7 +12682,7 @@
     {
       "name": "propose_workspace_agreement",
       "title": "Propose an agreement to a workspace's app",
-      "description": "Licence provider (for your own firm): propose a business agreement for one app (app_id) of a developer workspace whose apps use products your firm sponsors (see list_app_agreements without app_id: proposable_workspaces): 'program' covering products you sponsor for it, 'data_sharing', 'msa' (a master services agreement) or 'sla' (service levels, set with add_agreement_sla). Optionally name one of your firm's active agreement templates (template_id: a program agreement signed by e-signature is made from it), a link to the document (https) with its SHA-256, and the dates it runs between. The workspace's owners and admins accept or decline it (respond_to_app_agreement); then both sides sign. Audited; the workspace is told.",
+      "description": "Licence provider (for your own firm): propose a business agreement for one app (app_id) of a developer workspace whose apps use products your firm sponsors (see list_app_agreements without app_id: proposable_workspaces): 'program' covering products you sponsor for it, 'data_sharing', 'msa' (a master services agreement) or 'sla' (service levels, set with add_agreement_sla), with its scopes (one or more of technology, manpower, financial_regulatory_operations). Optionally name one of your firm's active agreement templates (template_id: a program agreement signed by e-signature is made from it), a link to the document (https) with its SHA-256, and the dates it runs between. The workspace's owners and admins accept or decline it (respond_to_app_agreement); then both sides sign. Audited; the workspace is told.",
       "area": "apps",
       "roles": [
         "license_provider",
@@ -12699,6 +12723,20 @@
               "maxLength": 200
             }
           },
+          "scopes": {
+            "minItems": 1,
+            "maxItems": 3,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "technology",
+                "manpower",
+                "financial_regulatory_operations"
+              ]
+            },
+            "description": "What the agreement covers, one or more of: technology (a platform or software licence), manpower (people and staffing), financial_regulatory_operations (compliance and regulatory operations)"
+          },
           "terms_summary": {
             "type": "string",
             "minLength": 10,
@@ -12731,6 +12769,7 @@
           "workspace_id",
           "app_id",
           "kind",
+          "scopes",
           "terms_summary"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -17649,6 +17688,50 @@
       }
     },
     {
+      "name": "update_agreement_scopes",
+      "title": "Change what a proposed agreement covers",
+      "description": "The side that proposed an agreement changes its scopes (what it covers: technology, manpower, financial_regulatory_operations; one or more, each once) while it's still proposed, before the other side answers: the app's workspace owners and admins for one their side proposed, a licence provider for one its firm proposed. Nothing else about it changes. Audited (the scopes before and after), and the other side is told.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "vendor",
+        "license_provider",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agreement_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "scopes": {
+            "minItems": 1,
+            "maxItems": 3,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "technology",
+                "manpower",
+                "financial_regulatory_operations"
+              ]
+            },
+            "description": "What the agreement covers, one or more of: technology (a platform or software licence), manpower (people and staffing), financial_regulatory_operations (compliance and regulatory operations)"
+          }
+        },
+        "required": [
+          "agreement_id",
+          "scopes"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "update_app",
       "title": "Update an app experience",
       "description": "Developer: change one of your app experiences. Only fields you pass are changed.",
@@ -18689,7 +18772,7 @@
     {
       "name": "upload_agreement_template",
       "title": "Upload a program agreement template",
-      "description": "Licence provider (your firm's own licence providers only): add your firm's program agreement, which apps sign with you when you accept their program agreement. Either upload the document (source 'upload': a PDF or DOCX as base64, at most 5 MB; Mynt keeps it sealed with its SHA-256) or name a template your firm keeps at this deployment's e-signature service (source 'provider_template', with its placeholders for the two signers and field_map from Mynt's variables to the template's field ids). Attach it to one of your licences (licence_id) or sponsorships (sponsorship_id), or neither for your firm's default; the most specific active one is used. Mynt appends a program schedule stating the parties, the developer's firm, the app, the products, the states and the dates. Versions never change: a new upload under the same name is the next version and the active one. Audited.",
+      "description": "Licence provider (your firm's own licence providers only): add your firm's program agreement, which apps sign with you when you accept their program agreement. Either upload the document (source 'upload': a PDF or DOCX as base64, at most 5 MB; Mynt keeps it sealed with its SHA-256) or name a template your firm keeps at this deployment's e-signature service (source 'provider_template', with its placeholders for the two signers and field_map from Mynt's variables to the template's field ids). Attach it to one of your licences (licence_id) or sponsorships (sponsorship_id), or neither for your firm's default; the most specific active one is used. Mynt appends a program schedule stating the parties, the developer's firm, the app, the products, the scope, the states and the dates. Versions never change: a new upload under the same name is the next version and the active one. Audited.",
       "area": "apps",
       "roles": [
         "vendor",
@@ -18770,7 +18853,8 @@
                 "effective_from",
                 "effective_to",
                 "agreement_id",
-                "terms_summary"
+                "terms_summary",
+                "scope"
               ]
             },
             "additionalProperties": {

@@ -4,14 +4,15 @@
 // managing the workspace proposes to a firm sponsoring its apps' products; a licence provider proposes to a workspace
 // whose apps use products its firm sponsors. The other side accepts or declines; it's in force once both have signed.
 // The sheet asks for the other party, the app (every agreement is for one app, MSAs and SLAs too), the kind
-// (the tab's kinds), the products a program agreement covers, a summary of the terms, the document (a link, or for a
+// (the tab's kinds), its scope (one or more of AGREEMENT_SCOPES, required), the products a program agreement covers, a summary of the terms, the document (a link, or for a
 // licence provider one of its firm's templates as the starting document) and the dates. Mynt checks everything again.
 import { useEffect, useState } from "react"
 
+import { ScopeField } from "@/components/agreement-scope-field"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import type { TemplateRow } from "@/lib/agreement-esign"
-import { AGREEMENT_KIND_LABELS } from "@/lib/app-panel"
+import { AGREEMENT_KIND_LABELS, type AgreementScope } from "@/lib/app-panel"
 import type { AgreementSide, ProposeTarget } from "@/lib/lp-agreements"
 
 const field = "rounded-md border border-input bg-background px-2 py-1.5 text-sm"
@@ -22,6 +23,7 @@ export type ProposalBody = {
   target_id: string
   app_id?: string
   kind: string
+  scopes: AgreementScope[] // what it covers: one or more of AGREEMENT_SCOPES
   products: string[]
   terms_summary: string
   document_url?: string
@@ -56,6 +58,7 @@ export function ProposeView({
   const [appId, setAppId] = useState(target?.apps[0]?.id ?? "")
   const app = target?.apps.find((a) => a.id === appId)
   const [products, setProducts] = useState<string[]>([])
+  const [scopes, setScopes] = useState<AgreementScope[]>([])
   const [terms, setTerms] = useState("")
   const [doc, setDoc] = useState("")
   const [template, setTemplate] = useState("")
@@ -63,7 +66,7 @@ export function ProposeView({
   const [to, setTo] = useState("")
   const usable = templates.filter((t) => t.active)
   // Every agreement is for one app: program, data sharing, MSA and SLA alike.
-  const ready = Boolean(target) && Boolean(app) && terms.trim().length >= 10 && (kind !== "program" || products.length > 0)
+  const ready = Boolean(target) && Boolean(app) && scopes.length > 0 && terms.trim().length >= 10 && (kind !== "program" || products.length > 0)
   if (!targets.length)
     return (
       <p className="text-sm text-muted-foreground" data-propose-nobody>
@@ -82,6 +85,7 @@ export function ProposeView({
           target_id: target.id,
           ...(app ? { app_id: app.id } : {}),
           kind,
+          scopes,
           products: kind === "program" || kind === "data_sharing" ? products : [],
           terms_summary: terms.trim(),
           ...(doc.trim() ? { document_url: doc.trim() } : {}),
@@ -136,6 +140,7 @@ export function ProposeView({
           ))}
         </select>
       </label>
+      <ScopeField value={scopes} onChange={setScopes} />
       {(kind === "program" || kind === "data_sharing") && app && (
         <fieldset className="flex flex-col gap-1 text-sm" data-propose-products>
           <legend>Products it covers{kind === "program" ? "" : " (optional)"}</legend>

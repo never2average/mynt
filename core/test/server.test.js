@@ -46,7 +46,7 @@ const DEVELOPER_TOOLS = [
   "demote_app", "get_promotion_checks", "get_workspace_attention", "promote_app", "request_promotion_signoff", "set_app_target_states",
   "enable_webhook",
   // an app's agreements with the firms behind its products, and the customers it targets
-  "get_app_customers", "list_app_agreements", "propose_app_agreement", "respond_to_app_agreement", "set_app_target_segments", "sign_app_agreement", "terminate_app_agreement",
+  "get_app_customers", "list_app_agreements", "propose_app_agreement", "respond_to_app_agreement", "set_app_target_segments", "sign_app_agreement", "terminate_app_agreement", "update_agreement_scopes",
   // the risk registers of its apps and products
   "add_risk", "list_risks", "update_risk",
   // signing program agreements by e-signature, and the signed copies
@@ -103,7 +103,7 @@ const VENDOR_TOOLS = [
   "link_ramp_partner_customer", "set_ramp_adapter",
   // apps' agreements with its firm
   "download_agreement_document", "get_agreement_signing_link", "list_agreement_templates", "list_app_agreements",
-  "respond_to_app_agreement", "retire_agreement_template", "sign_app_agreement", "terminate_app_agreement", "upload_agreement_template",
+  "respond_to_app_agreement", "retire_agreement_template", "sign_app_agreement", "terminate_app_agreement", "update_agreement_scopes", "upload_agreement_template",
 ];
 
 async function connect(store, user = null) {

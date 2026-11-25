@@ -67,8 +67,8 @@ async function setup() {
     assert.equal(r.isError, false, JSON.stringify(r.data));
     return r.data;
   };
-  const program = ok(await dev.call("propose_app_agreement", { app_id: app.id, counterparty_entity_id: lpFirm.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" }));
-  const agreement = ok(await dev.call("propose_app_agreement", { app_id: app.id, counterparty_entity_id: lpFirm.id, kind: "sla", terms_summary: "Service levels for the Pay app" }));
+  const program = ok(await dev.call("propose_app_agreement", { app_id: app.id, counterparty_entity_id: lpFirm.id, scopes: ["technology"], kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" }));
+  const agreement = ok(await dev.call("propose_app_agreement", { app_id: app.id, counterparty_entity_id: lpFirm.id, scopes: ["technology"], kind: "sla", terms_summary: "Service levels for the Pay app" }));
   assert.equal(agreement.app_id, app.id);
   const sign = async () => {
     ok(await lp.call("respond_to_app_agreement", { agreement_id: agreement.id, decision: "accept" }));
@@ -228,10 +228,10 @@ test("an SLA agreement the licence provider proposed: the app's side answers and
   const w = await setup();
   const { ok } = w;
   // Every SLA agreement names its app, from either side.
-  refused(await w.dev.call("propose_app_agreement", { workspace_id: w.workspace, counterparty_entity_id: w.lpFirm.id, kind: "sla", terms_summary: "Service levels for the workspace" }));
-  refused(await w.lp.call("propose_workspace_agreement", { workspace_id: w.workspace, kind: "sla", terms_summary: "Service levels for the workspace" }));
+  refused(await w.dev.call("propose_app_agreement", { workspace_id: w.workspace, counterparty_entity_id: w.lpFirm.id, scopes: ["technology"], kind: "sla", terms_summary: "Service levels for the workspace" }));
+  refused(await w.lp.call("propose_workspace_agreement", { workspace_id: w.workspace, scopes: ["technology"], kind: "sla", terms_summary: "Service levels for the workspace" }));
   ok(await w.dev.call("terminate_app_agreement", { agreement_id: w.agreement.id, reason: "Replaced by the sponsor's" }));
-  const appSla = ok(await w.lp.call("propose_workspace_agreement", { workspace_id: w.workspace, app_id: w.app.id, kind: "sla", terms_summary: "Service levels for the Pay app" }));
+  const appSla = ok(await w.lp.call("propose_workspace_agreement", { workspace_id: w.workspace, app_id: w.app.id, scopes: ["technology"], kind: "sla", terms_summary: "Service levels for the Pay app" }));
   assert.equal(appSla.proposed_by_side, "counterparty");
   const { sla } = ok(await w.dev.call("add_agreement_sla", uptime(appSla.id)));
   ok(await w.dev.call("respond_to_app_agreement", { agreement_id: appSla.id, decision: "accept" }));

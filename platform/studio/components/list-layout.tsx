@@ -75,7 +75,7 @@ export const COL = {
  * narrow for it (a phone), the row scrolls sideways and every button keeps its label. The padding
  * (offset by the negative margin) keeps focus rings from being clipped by the scroll.
  */
-export const TOOLBAR_ROW = "-m-1 flex flex-nowrap items-center gap-2 overflow-x-auto p-1 [scrollbar-width:none] [&>*]:shrink-0"
+export const TOOLBAR_ROW = "-m-1 flex flex-nowrap items-center gap-2 overflow-x-auto p-1 scrollbar-none [&>*]:shrink-0"
 /** The toolbar's search: it takes the room left, never less than it needs to read. */
 export const TOOLBAR_SEARCH = "relative min-w-48 flex-1 sm:min-w-64"
 

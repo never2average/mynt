@@ -405,6 +405,7 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
                 <TableRow>
                   <TableHead>With</TableHead>
                   <TableHead>Kind</TableHead>
+                  <TableHead>Scope</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Products covered</TableHead>
                   <TableHead>Effective</TableHead>
@@ -426,6 +427,9 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
                       )}
                     </TableCell>
                     <TableCell>{a.kind}</TableCell>
+                    <TableCell className={`whitespace-normal${a.scopes.length ? "" : " text-muted-foreground"}`} data-agreement-scope={a.id}>
+                      {a.scopeLabel}
+                    </TableCell>
                     <TableCell className="whitespace-normal">
                       {a.status}
                       {a.signatures && <div className="text-xs text-muted-foreground">{a.signatures}</div>}
@@ -558,7 +562,7 @@ export function AgreementsTabView({ appId, data, onChanged }: { appId: string; d
         <AgreementActionSheet
           url={acting ? `/api/apps/${encodeURIComponent(appId)}/agreements/${encodeURIComponent(acting.row.id)}` : ""}
           action={acting?.action ?? null}
-          agreement={acting ? { id: acting.row.id, title: `${acting.row.kind} with ${acting.row.counterparty}`, lines: [`Covers: ${acting.row.products.join(", ") || "no products named"}`, `Effective: ${dates(acting.row.from, acting.row.to)}`, acting.row.status] } : null}
+          agreement={acting ? { id: acting.row.id, title: `${acting.row.kind} with ${acting.row.counterparty}`, lines: [`Covers: ${acting.row.products.join(", ") || "no products named"}`, `Scope: ${acting.row.scopeLabel}`, `Effective: ${dates(acting.row.from, acting.row.to)}`, acting.row.status] } : null}
           onClose={() => setActing(null)}
           onDone={() => onChanged?.()}
         />

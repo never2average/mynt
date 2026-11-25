@@ -81,8 +81,13 @@ describe("Propose agreement", () => {
     fireEvent.change(document.querySelector("[data-agreement-terms]")!, { target: { value: "Lead Bank's card program, standard terms" } });
     fireEvent.change(document.querySelector("[data-agreement-document]")!, { target: { value: "https://docs.example.com/p.pdf" } });
     fireEvent.change(document.querySelector("[data-agreement-from]")!, { target: { value: "2026-12-01" } });
+    // The scope is required: a labelled checkbox group, at least one ticked.
+    expect([...document.querySelectorAll("[data-propose-scopes] label")].map((l) => l.textContent)).toEqual(["Technology", "Manpower", "Financial regulatory operations"]);
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(document.querySelector('[data-propose-scope="manpower"]')!);
+    expect(submit.disabled).toBe(false);
     fireEvent.click(submit);
-    expect(sent).toEqual([{ counterparty_entity_id: SPONSOR, kind: "program", products: ["p1"], terms_summary: "Lead Bank's card program, standard terms", document_url: "https://docs.example.com/p.pdf", effective_from: "2026-12-01" }]);
+    expect(sent).toEqual([{ counterparty_entity_id: SPONSOR, kind: "program", scopes: ["manpower"], products: ["p1"], terms_summary: "Lead Bank's card program, standard terms", document_url: "https://docs.example.com/p.pdf", effective_from: "2026-12-01" }]);
     // Another sponsor: its products only.
     fireEvent.change(document.querySelector("[data-agreement-counterparty]")!, { target: { value: OTHER_SPONSOR } });
     expect([...document.querySelectorAll("[data-agreement-product]")].map((e) => e.getAttribute("data-agreement-product"))).toEqual(["p2"]);
@@ -104,8 +109,10 @@ describe("Propose agreement", () => {
     await act(async () => undefined);
     expect(screen.getByRole("heading", { name: "Propose agreement" })).toBeTruthy();
     fireEvent.change(document.querySelector("[data-agreement-terms]")!, { target: { value: "Lead Bank's card program" } });
+    fireEvent.click(document.querySelector('[data-propose-scope="technology"]')!);
     await act(async () => void fireEvent.click(document.querySelector("[data-propose-agreement-submit]")!));
     expect(requests[0].url).toBe(`/api/apps/${APP}/agreements`);
+    expect((requests[0].body as { scopes: string[] }).scopes).toEqual(["technology"]);
     expect(document.querySelector("[data-agreement-error]")?.textContent).toBe("Lead Bank doesn't sponsor 'p2'");
     expect(done).toBe(0);
     reply = { status: 200, body: { ok: true, message: "Agreement proposed." } };
@@ -115,16 +122,18 @@ describe("Propose agreement", () => {
   });
 
   it("the route: own origin, valid arguments, the user's app, then propose_app_agreement", async () => {
-    const body = { counterparty_entity_id: SPONSOR, kind: "program", products: ["p1"], terms_summary: "Lead Bank's card program", document_url: "", effective_to: "" };
+    const body = { counterparty_entity_id: SPONSOR, kind: "program", scopes: ["technology", "manpower"], products: ["p1"], terms_summary: "Lead Bank's card program", document_url: "", effective_to: "" };
     fake.sameOrigin = false;
     expect((await post(agreementsRoute, body)).status).toBe(403);
     fake.sameOrigin = true;
     expect((await post(agreementsRoute, { ...body, kind: "licence" })).status).toBe(400);
     expect((await post(agreementsRoute, { ...body, app_id: "a9" })).status).toBe(400); // the app is the route's
+    // The scope is required: at least one, from the fixed list, each once.
+    for (const scopes of [undefined, [], ["catering"], ["manpower", "manpower"]]) expect((await post(agreementsRoute, { ...body, scopes })).status, JSON.stringify(scopes)).toBe(400);
     expect((await post(agreementsRoute, body, "not-mine")).status).toBe(404);
     const res = await post(agreementsRoute, body);
     expect(res.status).toBe(200);
-    expect(fake.calls.find((c) => c.name === "propose_app_agreement")?.args).toEqual({ app_id: APP, counterparty_entity_id: SPONSOR, kind: "program", products: ["p1"], terms_summary: "Lead Bank's card program" });
+    expect(fake.calls.find((c) => c.name === "propose_app_agreement")?.args).toEqual({ app_id: APP, counterparty_entity_id: SPONSOR, kind: "program", scopes: ["technology", "manpower"], products: ["p1"], terms_summary: "Lead Bank's card program" });
     fake.refuse = "Only the workspace's owners and admins make agreements for its apps";
     const refused = await post(agreementsRoute, body);
     expect(refused.status).toBe(422);

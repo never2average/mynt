@@ -40,7 +40,7 @@ const AGREEMENTS = {
   app: { id: APP, name: "Cards" },
   can_manage: true,
   agreements: [
-    { id: "g1", kind: "program", status: "accepted", counterparty: { entity_id: SPONSOR, name: "Lead Bank" }, products: [{ id: "p1", name: "Card" }], effective_from: "2026-12-01", effective_to: null, signatures: { app_side: true, counterparty_side: false } },
+    { id: "g1", kind: "program", status: "accepted", counterparty: { entity_id: SPONSOR, name: "Lead Bank" }, products: [{ id: "p1", name: "Card" }], scopes: ["technology", "manpower"], effective_from: "2026-12-01", effective_to: null, signatures: { app_side: true, counterparty_side: false } },
     { id: "g2", kind: "data_sharing", status: "terminated", counterparty: { entity_id: SPONSOR, name: "Lead Bank" }, products: [], effective_from: null, effective_to: null, signatures: { app_side: false, counterparty_side: false } },
   ],
   products: [
@@ -322,8 +322,10 @@ describe("the app panel route", () => {
     expect(parseStudioCall("get_app_customers", { app_id: APP, extra: 1 })).toHaveProperty("error");
     expect(parseStudioCall("set_app_target_segments", { app_id: APP, segments: [{ product_id: "p1", segment_id: "retail" }] })).toHaveProperty("tool");
     expect(parseStudioCall("set_app_target_segments", { app_id: APP, segments: [{ product_id: "p1" }] })).toHaveProperty("error");
-    const proposal = { app_id: APP, counterparty_entity_id: SPONSOR, kind: "program", products: ["p1"], terms_summary: "Lead Bank's card program" };
+    const proposal = { app_id: APP, counterparty_entity_id: SPONSOR, kind: "program", scopes: ["financial_regulatory_operations"], products: ["p1"], terms_summary: "Lead Bank's card program" };
     expect(parseStudioCall("propose_app_agreement", proposal)).toHaveProperty("tool");
+    const { scopes: _none, ...unscoped } = proposal;
+    expect(parseStudioCall("propose_app_agreement", unscoped)).toHaveProperty("error"); // the scope is required
     expect(parseStudioCall("propose_app_agreement", { ...proposal, counterparty_entity_id: "not-a-firm" })).toHaveProperty("error");
     expect(parseStudioCall("propose_app_agreement", { ...proposal, kind: "licence" })).toHaveProperty("error");
     expect(parseStudioCall("propose_app_agreement", { ...proposal, document_url: "http://plain.example.com/x" })).toHaveProperty("error");
@@ -365,6 +367,19 @@ describe("the tabs' content", () => {
     expect(viewer).toContain("No agreements yet.");
     expect(viewer).toContain("business-development agent isn&#x27;t running here");
     expect(fromAgreements({ nope: true })).toBeNull();
+  });
+
+  it("Agreements: a Scope column with each agreement's scopes in words, and Not set for one from before scopes", () => {
+    const data = fromAgreements(AGREEMENTS)!;
+    expect(data.agreements.map((a) => [a.scopes, a.scopeLabel])).toEqual([
+      [["technology", "manpower"], "Technology, Manpower"],
+      [[], "Not set"],
+    ]);
+    const doc = new DOMParser().parseFromString(renderToStaticMarkup(<views.AgreementsTabView appId={APP} data={data} />), "text/html");
+    const heads = [...doc.querySelectorAll("[data-app-agreements] th")].map((h) => h.textContent);
+    expect(heads.slice(0, 4)).toEqual(["With", "Kind", "Scope", "Status"]);
+    expect(doc.querySelector('[data-agreement-scope="g1"]')?.textContent).toBe("Technology, Manpower");
+    expect(doc.querySelector('[data-agreement-scope="g2"]')?.textContent).toBe("Not set");
   });
 
   it("Agreements: an Audits column with the count, next due and overdue in words, linking to Audits filtered to the agreement", () => {

@@ -189,7 +189,7 @@ test("click-through: the current version, for apps the caller manages; creates t
   refused(await w.dev.call("subscribe_vendor_service", { offering_id: id, accept_terms_version: 3, app_ids: [w.app2.id] }), /already subscribes/);
 
   // A negotiated vendor agreement can still be proposed beside it.
-  ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.vendorFirm.id, kind: "vendor", products: [], terms_summary: "A bespoke volume deal for this app" }));
+  ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.vendorFirm.id, scopes: ["technology"], kind: "vendor", products: [], terms_summary: "A bespoke volume deal for this app" }));
 });
 
 test("ending: unsubscribing ends the agreements; ending the last agreement ends the subscription", async () => {

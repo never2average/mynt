@@ -82,8 +82,8 @@ export async function GET(req: Request) {
 }
 
 // What the Propose agreement sheet sends, from either side: the other party (target_id: the firm, for the app's side;
-// the workspace, for a licence provider), the app (every agreement is for one app, MSAs and SLAs too), the kind and
-// the terms. An empty optional field is left out.
+// the workspace, for a licence provider), the app (every agreement is for one app, MSAs and SLAs too), the kind, its
+// scope (one or more of AGREEMENT_SCOPES, required) and the terms. An empty optional field is left out.
 const blank = (v: unknown) => (typeof v === "string" && !v.trim() ? undefined : v);
 const W = STUDIO_TOOLS.propose_workspace_agreement.shape;
 const Proposal = z
@@ -92,6 +92,7 @@ const Proposal = z
     target_id: z.string().trim().min(1).max(200),
     app_id: z.preprocess(blank, W.app_id.optional()),
     kind: W.kind,
+    scopes: W.scopes,
     products: z.array(z.string().trim().min(1).max(200)).max(20).default([]),
     terms_summary: W.terms_summary,
     document_url: z.preprocess(blank, W.document_url),
@@ -121,7 +122,7 @@ export async function POST(req: Request) {
       if (p.side === "counterparty" ? !isLicenceProvider(roles) : !isDeveloper(roles)) return json({ error: "forbidden", message: "You can't propose from that side." }, 403);
       const tool = p.side === "app" ? "propose_app_agreement" : "propose_workspace_agreement";
       if (!(await listMyntTools(mynt)).some((t) => t.name === tool)) return json({ error: "unsupported", message: "Proposing this agreement comes with Mynt's next update." }, 501);
-      const terms = { kind: p.kind, products: p.products, terms_summary: p.terms_summary, document_url: p.document_url, document_sha256: p.document_sha256, effective_from: p.effective_from, effective_to: p.effective_to };
+      const terms = { kind: p.kind, scopes: p.scopes, products: p.products, terms_summary: p.terms_summary, document_url: p.document_url, document_sha256: p.document_sha256, effective_from: p.effective_from, effective_to: p.effective_to };
       let args: Record<string, unknown>;
       if (p.side === "app") {
         if (!z.string().uuid().safeParse(p.target_id).success) return json({ error: "bad_request", message: "Choose the firm." }, 400);
