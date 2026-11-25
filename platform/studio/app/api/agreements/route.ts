@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { fromAgreements } from "@/lib/app-panel";
-import { appAgreementsFrom, isLicenceProvider, lpAgreementsFrom, proposeTargetsFrom, WORKSPACE_KINDS, type LpAgreementRow, type ProposeTarget } from "@/lib/lp-agreements";
+import { appAgreementsFrom, isLicenceProvider, lpAgreementsFrom, proposeTargetsFrom, type LpAgreementRow, type ProposeTarget } from "@/lib/lp-agreements";
 import { fromOwnOrigin } from "@/lib/session";
 import { callStudioTool, listMyntTools } from "@/lib/studio-server";
 import { isDeveloper, STUDIO_TOOLS } from "@/lib/studio-tools";
@@ -48,7 +48,7 @@ export async function GET(req: Request) {
           const mine = (Array.isArray(list) ? list : []).filter(isObj).filter((a) => typeof a.id === "string").slice(0, MAX_APPS);
           const names = new Map(mine.map((a) => [a.id as string, typeof a.name === "string" && a.name.trim() ? a.name : "Untitled app"]));
           if (scope.workspace && takes(tools, "list_app_agreements", "workspace_id")) {
-            // The whole workspace at once: its apps' agreements and its own (an MSA or SLA with a firm).
+            // The whole workspace at once: its apps' agreements, every kind.
             const reply = await callStudioTool(mynt, "list_app_agreements", { workspace_id: scope.workspace });
             const read = appAgreementsFrom(reply);
             if (read) {
@@ -82,15 +82,15 @@ export async function GET(req: Request) {
 }
 
 // What the Propose agreement sheet sends, from either side: the other party (target_id: the firm, for the app's side;
-// the workspace, for a licence provider), the app (optional for an MSA or SLA), the kind and the terms. An empty
-// optional field is left out.
+// the workspace, for a licence provider), the app (every agreement is for one app, MSAs and SLAs too), the kind and
+// the terms. An empty optional field is left out.
 const blank = (v: unknown) => (typeof v === "string" && !v.trim() ? undefined : v);
 const W = STUDIO_TOOLS.propose_workspace_agreement.shape;
 const Proposal = z
   .object({
     side: z.enum(["app", "counterparty"]),
     target_id: z.string().trim().min(1).max(200),
-    app_id: z.preprocess(blank, W.app_id),
+    app_id: z.preprocess(blank, W.app_id.optional()),
     kind: W.kind,
     products: z.array(z.string().trim().min(1).max(200)).max(20).default([]),
     terms_summary: W.terms_summary,
@@ -101,7 +101,7 @@ const Proposal = z
     effective_to: z.preprocess(blank, W.effective_to),
   })
   .strict()
-  .refine((p) => p.app_id || WORKSPACE_KINDS.includes(p.kind), { message: "Choose the app this agreement covers." })
+  .refine((p) => Boolean(p.app_id), { message: "Choose the app this agreement covers." })
   .refine((p) => p.side === "counterparty" || !p.template_id, { message: "Templates are the licence provider's to choose." });
 
 const defined = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && !(Array.isArray(v) && v.length === 0)));
@@ -125,14 +125,8 @@ export async function POST(req: Request) {
       let args: Record<string, unknown>;
       if (p.side === "app") {
         if (!z.string().uuid().safeParse(p.target_id).success) return json({ error: "bad_request", message: "Choose the firm." }, 400);
-        let workspace: string | null = null;
-        if (!p.app_id) {
-          const scope = await scopeFor(mynt, req, workspaceSupport(await listMyntTools(mynt)));
-          if (scope.unavailable !== undefined || !scope.workspace) return json({ error: "bad_request", message: "Choose a shared workspace for an agreement with the whole workspace." }, 400);
-          workspace = scope.workspace;
-        }
         // propose_app_agreement always takes the products, even none.
-        args = { ...defined({ ...(p.app_id ? { app_id: p.app_id } : { workspace_id: workspace }), counterparty_entity_id: p.target_id, ...terms }), products: p.products };
+        args = { ...defined({ app_id: p.app_id, counterparty_entity_id: p.target_id, ...terms }), products: p.products };
       } else {
         if (!STUDIO_TOOLS.propose_workspace_agreement.shape.workspace_id.safeParse(p.target_id).success) return json({ error: "bad_request", message: "Choose the workspace." }, 400);
         args = defined({ workspace_id: p.target_id, app_id: p.app_id, template_id: p.template_id, ...terms });

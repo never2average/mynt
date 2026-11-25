@@ -5,18 +5,18 @@ import { SLA_WINDOWS } from "./agreement-slas-schema.js";
 import type { Db } from "./db.js";
 import { noticeFirm } from "./firm-notices.js";
 import { effectiveRoles, type App, type Store, type User } from "./store.js";
-import { appRole, memberApp, workspaceRole } from "./workspaces.js";
+import { appRole, memberApp } from "./workspaces.js";
 
-// Service levels under a service-level agreement (app-agreements.ts, kind 'sla', for one app or a whole workspace).
+// Service levels under an app's service-level agreement (app-agreements.ts, kind 'sla').
 // An SLA agreement carries commitments: a metric (uptime, complaint response time, ...), its target and unit, the
 // window it's measured over, where the measurement comes from and the remedy when it's missed. Each commitment (1:n on
 // the agreement) has breaches over time (1:n): a period in which the measured value missed the target.
 //
-// - Either party (the counterparty firm's licence providers, or the workspace's owners and admins) adds commitments
+// - Either party (the counterparty firm's licence providers, or the app's workspace owners and admins) adds commitments
 //   while the agreement is proposed or accepted, and retires them while it's open. There's no acceptance of each
 //   commitment: they're the agreement's terms, in force once it's signed.
 // - Either party records a breach once the agreement is signed and while the commitment is active, and either resolves
-//   it. Any member of the workspace reads them.
+//   it. Any member of the app's workspace reads them.
 // - Only the agreement's two parties read its SLAs.
 // - An open breach flags the app (get_workspace_attention, agreement_sla_breach) and shows in ops_status.
 // Every change is audited in the obligations class (with the app's id); a breach is told to both parties' firms on
@@ -132,19 +132,18 @@ export async function openSlaBreaches(db: Pick<Db, "query">) {
 }
 
 // The open breaches on some apps' agreements, for the workspace's attention list.
-// workspaceId: also the breaches under the workspace's own SLA agreements (no app).
-export async function openBreachesOfApps(store: Pick<Store, "db">, appIds: string[], workspaceId?: string) {
-  if ((!appIds.length && !workspaceId) || !(await tableExists(store.db, "agreement_sla_breaches"))) return [];
+export async function openBreachesOfApps(store: Pick<Store, "db">, appIds: string[]) {
+  if (!appIds.length || !(await tableExists(store.db, "agreement_sla_breaches"))) return [];
   const { rows } = await store.db.query(
     `SELECT b.id, b.created_at, b.period_start, b.period_end, b.measured_value, a.app_id::text AS app_id, a.id AS agreement_id, s.metric, s.target, s.unit, e.name AS counterparty
        FROM ${T}.agreement_sla_breaches b JOIN ${T}.agreement_slas s ON s.id = b.sla_id
        JOIN ${T}.app_agreements a ON a.id = b.agreement_id LEFT JOIN ${T}.entities e ON e.id = a.counterparty_entity_id
-      WHERE (a.app_id::text = ANY($1) OR (a.app_id IS NULL AND a.workspace_id::text = $2)) AND b.resolved_at IS NULL ORDER BY b.created_at`,
-    [appIds, workspaceId ?? null],
+      WHERE a.app_id::text = ANY($1) AND b.resolved_at IS NULL ORDER BY b.created_at`,
+    [appIds],
   );
   return rows.map((r) => ({
     id: r.id as string,
-    app_id: (r.app_id as string | null) ?? null,
+    app_id: r.app_id as string,
     agreement_id: r.agreement_id as string,
     metric: r.metric as string,
     target: `${r.target as string}${r.unit ? ` ${r.unit as string}` : ""}`,
@@ -157,13 +156,12 @@ export async function openBreachesOfApps(store: Pick<Store, "db">, appIds: strin
 }
 
 // The firms of the app's workspace's members (or its owner's), told of a breach.
-async function appSideFirms(store: Store, a: { app_id: string | null; workspace_id: string | null }): Promise<string[]> {
+async function appSideFirms(store: Store, a: { app_id: string | null }): Promise<string[]> {
   const app = a.app_id ? await store.getApp(a.app_id) : undefined;
-  const workspace = app ? app.workspace_id : a.workspace_id;
-  if (!app && !workspace) return [];
-  const { rows } = workspace
-    ? await store.db.query(`SELECT DISTINCT u.entity_id FROM ${T}.workspace_members m JOIN ${T}.users u ON u.id = m.user_id WHERE m.workspace_id = $1 AND u.entity_id IS NOT NULL`, [workspace])
-    : await store.db.query(`SELECT entity_id FROM ${T}.users WHERE id = $1 AND entity_id IS NOT NULL`, [app!.owner_id]);
+  if (!app) return [];
+  const { rows } = app.workspace_id
+    ? await store.db.query(`SELECT DISTINCT u.entity_id FROM ${T}.workspace_members m JOIN ${T}.users u ON u.id = m.user_id WHERE m.workspace_id = $1 AND u.entity_id IS NOT NULL`, [app.workspace_id])
+    : await store.db.query(`SELECT entity_id FROM ${T}.users WHERE id = $1 AND entity_id IS NOT NULL`, [app.owner_id]);
   return rows.map((r) => r.entity_id as string);
 }
 
@@ -175,14 +173,11 @@ export function registerAgreementSlaTools(server: McpServer, store: Store, user:
     const me = await store.getUser(user.id);
     return me?.entity_id && effectiveRoles(me.roles).includes("license_provider") ? me.entity_id : null;
   };
-  // The caller's role on the app's side: in the app's workspace, or the agreement's workspace when it names no app.
+  // The caller's role on the app's side: in the app's workspace.
   const appSideRole = async (a: AgreementRef): Promise<string | null> => {
-    if (!sides.app) return null;
-    if (a.app_id) {
-      const app: App | undefined = await memberApp(store, user, a.app_id);
-      return app ? ((await appRole(store, user, app)) ?? null) : null;
-    }
-    return a.workspace_id ? workspaceRole(store.db, a.workspace_id, user.id) : null;
+    if (!sides.app || !a.app_id) return null;
+    const app: App | undefined = await memberApp(store, user, a.app_id);
+    return app ? ((await appRole(store, user, app)) ?? null) : null;
   };
   const access = async (a: AgreementRef) => {
     const role = await appSideRole(a);
@@ -209,7 +204,7 @@ export function registerAgreementSlaTools(server: McpServer, store: Store, user:
     {
       title: "Add a service-level commitment to an SLA agreement",
       description:
-        "Either party to a service-level agreement (kind 'sla', for one app or a whole workspace: the counterparty firm's licence providers, or the workspace's owners and admins): add a commitment while the agreement is proposed or accepted: the metric, its target (a number or words) and unit, the window it's measured over (daily, weekly, monthly, quarterly), where the measurement comes from and the remedy when it's missed. Commitments are the agreement's terms: there's no separate acceptance, and they're in force once it's signed. Either party records breaches then (record_sla_breach). Audited; both sides see it in list_agreement_slas.",
+        "Either party to a service-level agreement (kind 'sla', for one app: the counterparty firm's licence providers, or the app's workspace owners and admins): add a commitment while the agreement is proposed or accepted: the metric, its target (a number or words) and unit, the window it's measured over (daily, weekly, monthly, quarterly), where the measurement comes from and the remedy when it's missed. Commitments are the agreement's terms: there's no separate acceptance, and they're in force once it's signed. Either party records breaches then (record_sla_breach). Audited; both sides see it in list_agreement_slas.",
       inputSchema: {
         agreement_id: UUID,
         metric: z.string().trim().min(3).max(200),
@@ -351,15 +346,6 @@ export function registerAgreementSlaTools(server: McpServer, store: Store, user:
           appIds = [app.id];
         } else appIds = (await store.appsVisibleTo(user.id, workspace_id)).map((x) => x.id);
         if (appIds.length) (await store.db.query(`SELECT id FROM ${T}.app_agreements WHERE app_id = ANY($1::uuid[]) AND kind = 'sla'`, [appIds])).rows.forEach((r) => ids.add(r.id as string));
-        // The workspace's own SLA agreements (no app), in the workspaces the caller belongs to.
-        if (!app_id)
-          (
-            await store.db.query(
-              `SELECT g.id FROM ${T}.app_agreements g JOIN ${T}.workspace_members m ON m.workspace_id = g.workspace_id AND m.user_id = $1
-                WHERE g.app_id IS NULL AND g.kind = 'sla' AND ($2::text IS NULL OR g.workspace_id::text = $2)`,
-              [user.id, workspace_id ?? null],
-            )
-          ).rows.forEach((r) => ids.add(r.id as string));
       }
       const firm = side === "app" ? null : await myFirm();
       if (firm) (await store.db.query(`SELECT id FROM ${T}.app_agreements WHERE counterparty_entity_id = $1 AND kind = 'sla' AND ($2::uuid IS NULL OR app_id = $2::uuid)`, [firm, app_id ?? null])).rows.forEach((r) => ids.add(r.id as string));

@@ -31,6 +31,37 @@ export const RISK_STATUS_LABELS: Record<RiskStatus, string> = {
   accepted: "Accepted: living with it",
   closed: "Closed",
 };
+// The platform's seven risk areas (core/src/risk-register-schema.ts): the tabs of the platform admin's Risk models and
+// Risk register, in this order. A risk's fine-grained category falls under one by default (other under none:
+// unassigned until a review gives it one), as Mynt backfilled the risks made before areas existed.
+export const RISK_AREAS = ["financial", "compliance", "third_party", "operations", "business_process", "technology", "regulated_product"] as const;
+export type RiskArea = (typeof RISK_AREAS)[number];
+export const RISK_AREA_LABELS: Record<RiskArea, string> = {
+  financial: "Financial risk",
+  compliance: "Compliance risk",
+  third_party: "Third-party risk",
+  operations: "Operations risk",
+  business_process: "Business process risk",
+  technology: "Technology risk",
+  regulated_product: "Regulated product risk",
+};
+export const RISK_AREA_OF_CATEGORY: Record<RiskCategory, RiskArea | null> = {
+  credit: "financial",
+  liquidity: "financial",
+  compliance: "compliance",
+  conduct: "compliance",
+  vendor: "third_party",
+  operational: "operations",
+  fraud: "operations",
+  security: "technology",
+  other: null,
+};
+export const isRiskArea = (v: unknown): v is RiskArea => typeof v === "string" && (RISK_AREAS as readonly string[]).includes(v);
+/** A risk's area: the one Mynt gave it, else its category's (an older Mynt that sends none). */
+export const areaOfRisk = (r: { riskArea?: RiskArea | null; category: string }): RiskArea | null =>
+  r.riskArea !== undefined ? r.riskArea : (RISK_AREA_OF_CATEGORY[r.category as RiskCategory] ?? null);
+export const areaWords = (a: RiskArea | null | undefined) => (a ? RISK_AREA_LABELS[a] : "Unassigned");
+
 export const RISK_LEVEL_LABELS: Record<string, string> = { low: "Low", medium: "Medium", high: "High", critical: "Critical" };
 /** A 5×5 score's level, as Mynt grades it: 1-4 low, 5-9 medium, 10-14 high, 15-25 critical. */
 export const riskLevel = (score: number) => (score <= 4 ? "low" : score <= 9 ? "medium" : score <= 14 ? "high" : "critical");
@@ -40,6 +71,7 @@ export type RiskRow = {
   id: string;
   title: string;
   category: RiskCategory;
+  riskArea?: RiskArea | null; // undefined: Mynt didn't say (an older Mynt); null: unassigned
   description: string | null;
   likelihood: number;
   impact: number;
@@ -69,7 +101,8 @@ export function riskRowsFrom(v: unknown): RiskRow[] {
       const impact = int(r.impact);
       if (!id || !title || likelihood === null || impact === null || !isCategory(r.category) || !isStatus(r.status)) return [];
       const owner = isObj(r.owner) && str(r.owner.user_id) ? { userId: str(r.owner.user_id)!, name: str(r.owner.name) } : null;
-      return [{ id, title, category: r.category, description: str(r.description), likelihood, impact, score: likelihood * impact, owner, mitigation: str(r.mitigation), status: r.status, reviewBy: str(r.review_by), overdue: r.overdue === true }];
+      const riskArea = "risk_area" in r ? (isRiskArea(r.risk_area) ? r.risk_area : null) : undefined;
+      return [{ id, title, category: r.category, ...(riskArea !== undefined ? { riskArea } : {}), description: str(r.description), likelihood, impact, score: likelihood * impact, owner, mitigation: str(r.mitigation), status: r.status, reviewBy: str(r.review_by), overdue: r.overdue === true }];
     });
 }
 
@@ -136,5 +169,5 @@ export function signalsFrom(reply: unknown): AppSignals {
 
 /** What a register's sheets send: Add risk (add) or Review risk (review). The route adds the subject. */
 export type RiskChange =
-  | { action: "add"; title: string; category: RiskCategory; likelihood: number; impact: number; description?: string; mitigation?: string; owner_user_id?: string; review_by?: string }
-  | { action: "review"; risk_id: string; status?: RiskStatus; mitigation?: string; likelihood?: number; impact?: number; owner_user_id?: string; review_by?: string; note?: string };
+  | { action: "add"; title: string; category: RiskCategory; risk_area?: RiskArea; likelihood: number; impact: number; description?: string; mitigation?: string; owner_user_id?: string; review_by?: string }
+  | { action: "review"; risk_id: string; status?: RiskStatus; risk_area?: RiskArea; mitigation?: string; likelihood?: number; impact?: number; owner_user_id?: string; review_by?: string; note?: string };

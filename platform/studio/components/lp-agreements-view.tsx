@@ -67,7 +67,7 @@ export const takesAuditRequirements = (r: LpAgreementRow) => r.side === "counter
 
 const summaryOf = (r: LpAgreementRow): AgreementSummary => ({
   id: r.id,
-  title: `${r.kind} with ${otherParty(r)} for ${r.appName === "Whole workspace" ? "the whole workspace" : r.appName}`,
+  title: `${r.kind} with ${otherParty(r)} for ${r.appName}`,
   lines: [`Covers: ${r.products.join(", ") || "no products named"}`, `Effective: ${dates(r.from, r.to)}`, r.status],
 })
 

@@ -9,6 +9,7 @@ import { APP_IDEA_TABLES } from "./app-ideas-schema.js";
 import { CHAT_SESSION_TABLES } from "./chat-sessions-schema.js";
 import { APP_AGREEMENT_TABLES } from "./app-agreements-schema.js";
 import { RISK_REGISTER_TABLES } from "./risk-register-schema.js";
+import { RISK_MODEL_TABLES } from "./risk-models-schema.js";
 import { AGREEMENT_ESIGN_TABLES } from "./agreement-esign-schema.js";
 import { AGREEMENT_AUDIT_TABLES } from "./agreement-audits-schema.js";
 import { AGREEMENT_SLA_TABLES } from "./agreement-slas-schema.js";
@@ -1769,6 +1770,7 @@ ${APP_IDEA_TABLES}
 ${CHAT_SESSION_TABLES}
 ${APP_AGREEMENT_TABLES}
 ${RISK_REGISTER_TABLES}
+${RISK_MODEL_TABLES}
 ${AGREEMENT_ESIGN_TABLES}
 ${AGREEMENT_AUDIT_TABLES}
 ${AGREEMENT_SLA_TABLES}

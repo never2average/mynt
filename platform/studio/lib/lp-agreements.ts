@@ -31,7 +31,7 @@ export type LpAgreementRow = {
   id: string;
   side: AgreementSide; // which side the signed-in person is on for this row
   proposedBy: AgreementSide; // who proposed it: the other side accepts or declines
-  appName: string; // "Whole workspace" for an MSA or SLA between the firm and the workspace
+  appName: string; // every agreement, MSAs and SLAs too, is for one app
   appId: string | null;
   template: { id: string | null; name: string; version: number | null } | null; // the template (MSA) its document came from
   workspace: string;
@@ -81,7 +81,7 @@ export function agreementRowOf(a: Obj, side: AgreementSide, app?: { id: string; 
     id,
     side,
     proposedBy,
-    appName: str(appObj.name) ?? app?.name ?? (str(appObj.id) || app?.id ? "Unnamed app" : "Whole workspace"),
+    appName: str(appObj.name) ?? app?.name ?? "Unnamed app",
     appId: str(appObj.id) ?? app?.id ?? null,
     template: t && str(t.name) ? { id: str(t.id), name: str(t.name)!, version: typeof t.version === "number" ? t.version : null } : null,
     workspace: str(ws.name) ?? app?.workspace ?? "Unnamed workspace",
@@ -169,9 +169,6 @@ export function proposeTargetsFrom(reply: unknown, side: AgreementSide, appNames
 
 // The agreement kinds each tab of the Licences page lists (and proposes).
 export const TAB_KINDS = { business: ["program", "data_sharing"], msa: ["msa"], sla: ["sla"] } as const;
-/** Kinds that bind the firm and the whole workspace: an app is optional. */
-export const WORKSPACE_KINDS: readonly string[] = ["msa", "sla"];
-
 // The status filter's choices, in the order an agreement moves through them.
 export const LP_STATUS_FILTERS = ["proposed", "accepted", "signed", "declined", "terminated"] as const;
 

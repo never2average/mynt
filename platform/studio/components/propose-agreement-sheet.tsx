@@ -3,7 +3,7 @@
 // Propose agreement, on the Licences page's Business agreements, MSA and SLA tabs, from either side: a developer
 // managing the workspace proposes to a firm sponsoring its apps' products; a licence provider proposes to a workspace
 // whose apps use products its firm sponsors. The other side accepts or declines; it's in force once both have signed.
-// The sheet asks for the other party, the app (optional for an MSA or SLA, which bind the whole workspace), the kind
+// The sheet asks for the other party, the app (every agreement is for one app, MSAs and SLAs too), the kind
 // (the tab's kinds), the products a program agreement covers, a summary of the terms, the document (a link, or for a
 // licence provider one of its firm's templates as the starting document) and the dates. Mynt checks everything again.
 import { useEffect, useState } from "react"
@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import type { TemplateRow } from "@/lib/agreement-esign"
 import { AGREEMENT_KIND_LABELS } from "@/lib/app-panel"
-import { WORKSPACE_KINDS, type AgreementSide, type ProposeTarget } from "@/lib/lp-agreements"
+import type { AgreementSide, ProposeTarget } from "@/lib/lp-agreements"
 
 const field = "rounded-md border border-input bg-background px-2 py-1.5 text-sm"
 const SIDE_WORD: Record<AgreementSide, string> = { app: "Your workspace (the app's side)", counterparty: "Your firm (the licence provider)" }
@@ -53,8 +53,7 @@ export function ProposeView({
   const [targetId, setTargetId] = useState(mine[0]?.id ?? "")
   const target = mine.find((t) => t.id === targetId) ?? mine[0]
   const [kind, setKind] = useState(kinds[0] ?? "program")
-  const workspaceKind = WORKSPACE_KINDS.includes(kind)
-  const [appId, setAppId] = useState(workspaceKind ? "" : (target?.apps[0]?.id ?? ""))
+  const [appId, setAppId] = useState(target?.apps[0]?.id ?? "")
   const app = target?.apps.find((a) => a.id === appId)
   const [products, setProducts] = useState<string[]>([])
   const [terms, setTerms] = useState("")
@@ -63,8 +62,8 @@ export function ProposeView({
   const [from, setFrom] = useState("")
   const [to, setTo] = useState("")
   const usable = templates.filter((t) => t.active)
-  const needsApp = !workspaceKind
-  const ready = Boolean(target) && (!needsApp || Boolean(app)) && terms.trim().length >= 10 && (kind !== "program" || products.length > 0)
+  // Every agreement is for one app: program, data sharing, MSA and SLA alike.
+  const ready = Boolean(target) && Boolean(app) && terms.trim().length >= 10 && (kind !== "program" || products.length > 0)
   if (!targets.length)
     return (
       <p className="text-sm text-muted-foreground" data-propose-nobody>
@@ -129,7 +128,7 @@ export function ProposeView({
       <label className="flex flex-col gap-1 text-sm">
         App
         <select className={field} value={app?.id ?? ""} onChange={(e) => { setAppId(e.target.value); setProducts([]) }} data-propose-app>
-          {workspaceKind ? <option value="">The whole workspace</option> : <option value="">Choose an app</option>}
+          <option value="">Choose an app</option>
           {(target?.apps ?? []).map((a) => (
             <option key={a.id} value={a.id}>
               {a.name}

@@ -400,7 +400,7 @@ test("a licence provider proposes to a workspace: its owners answer (not members
   assert.deepEqual(ws.apps.map((a) => a.id), [w.app.id]);
 
   const proposal = { workspace_id: w.workspace, app_id: w.app.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" };
-  refused(await w.lp.call("propose_workspace_agreement", { ...proposal, app_id: undefined }), /names its app/);
+  refused(await w.lp.call("propose_workspace_agreement", { ...proposal, app_id: undefined }), /app_id/);
   refused(await w.lp.call("propose_workspace_agreement", { ...proposal, products: ["fixed-deposit"] }), /doesn't sponsor/);
   refused(await w.lp.call("propose_workspace_agreement", { ...proposal, template_id: "00000000-0000-4000-8000-000000000000" }), /No template/);
   const a = ok(await w.lp.call("propose_workspace_agreement", proposal));
@@ -446,36 +446,44 @@ test("a licence provider proposes to a workspace: its owners answer (not members
   assert.ok(ok(await w.dev.call("list_app_agreements", { app_id: w.app.id })).program_coverage.some((c) => c.sponsor_entity_id === w.lpFirm.id && c.covered));
 });
 
-test("msa and sla with a whole workspace (no app), from either side; the developer flow is unchanged", async () => {
+test("msa and sla are app agreements too, from either side, never without an app; the developer flow is unchanged", async () => {
   const w = await setup();
-  refused(await w.dev.call("propose_app_agreement", { workspace_id: w.workspace, counterparty_entity_id: w.lpFirm.id, kind: "program", products: ["savings-account"], terms_summary: "A program for everything" }), /Only an msa or sla/);
-  refused(await w.member.call("propose_app_agreement", { workspace_id: w.workspace, counterparty_entity_id: w.lpFirm.id, kind: "msa", terms_summary: "Master services for the workspace" }), /owners and admins/);
-  refused(await w.dev.call("propose_app_agreement", { app_id: w.app.id, workspace_id: w.workspace, counterparty_entity_id: w.lpFirm.id, kind: "msa", terms_summary: "Master services for the workspace" }), /one of them/);
-  const msa = ok(await w.dev.call("propose_app_agreement", { workspace_id: w.workspace, counterparty_entity_id: w.lpFirm.id, kind: "msa", terms_summary: "Master services for the workspace" }));
-  assert.equal(msa.app_id, null);
+  // Every kind names its app: a workspace alone is refused by both tools.
+  refused(await w.dev.call("propose_app_agreement", { workspace_id: w.workspace, counterparty_entity_id: w.lpFirm.id, kind: "msa", terms_summary: "Master services for the workspace" }));
+  refused(await w.lp.call("propose_workspace_agreement", { workspace_id: w.workspace, kind: "msa", terms_summary: "Master services for the workspace" }));
+  refused(await w.lp.call("propose_workspace_agreement", { workspace_id: w.workspace, kind: "sla", terms_summary: "Service levels for the workspace" }));
+  refused(await w.member.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, kind: "msa", terms_summary: "Master services for the Pay app" }), /owners and admins/);
+
+  // The developer's msa for the app.
+  const msa = ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, kind: "msa", terms_summary: "Master services for the Pay app" }));
+  assert.equal(msa.app_id, w.app.id);
   assert.equal(msa.workspace_id, w.workspace);
   assert.equal(msa.proposed_by_side, "app");
   assert.deepEqual(msa.actions, ["withdraw"]);
-  refused(await w.dev.call("propose_app_agreement", { workspace_id: w.workspace, counterparty_entity_id: w.lpFirm.id, kind: "msa", terms_summary: "Master services for the workspace" }), /already an open msa/);
+  refused(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, kind: "msa", terms_summary: "Master services for the Pay app" }), /already an open msa/);
   // The proposer can't accept its own; the firm does.
   refused(await w.dev.call("respond_to_app_agreement", { agreement_id: msa.id, decision: "accept" }), /Your side proposed it/);
   const firmView = ok(await w.lp.call("list_app_agreements")).agreements.find((x) => x.id === msa.id);
-  assert.deepEqual([firmView.your_side, firmView.actions, firmView.app, firmView.workspace.id], ["counterparty", ["accept", "decline"], null, w.workspace]);
+  assert.deepEqual([firmView.your_side, firmView.actions, firmView.app.id, firmView.workspace.id], ["counterparty", ["accept", "decline"], w.app.id, w.workspace]);
   ok(await w.lp.call("respond_to_app_agreement", { agreement_id: msa.id, decision: "accept" }));
   ok(await w.dev.call("sign_app_agreement", { agreement_id: msa.id }));
   assert.equal(ok(await w.lp.call("sign_app_agreement", { agreement_id: msa.id })).status, "signed");
+  // The firm's side shows in the workspace's attention list as for any other kind.
+  assert.ok(ok(await w.dev.call("get_workspace_attention", { workspace_id: w.workspace })).items.some((i) => i.kind === "app_agreement_update" && i.title === "Pay app: Sponsor Bank signed the master services agreement"));
 
-  // The firm's sla with the workspace: no app. The proposer withdraws it before it's answered.
-  const sla = ok(await w.lp.call("propose_workspace_agreement", { workspace_id: w.workspace, kind: "sla", terms_summary: "Service levels for the workspace's apps" }));
-  assert.equal(sla.app_id, null);
+  // The firm's sla for the app; the proposer withdraws it before it's answered.
+  const sla = ok(await w.lp.call("propose_workspace_agreement", { workspace_id: w.workspace, app_id: w.app.id, kind: "sla", terms_summary: "Service levels for the Pay app" }));
+  assert.equal(sla.app_id, w.app.id);
   const waiting = ok(await w.dev.call("get_workspace_attention", { workspace_id: w.workspace })).items.find((i) => i.kind === "app_agreement_proposed");
-  assert.match(waiting.title, /Sponsor Bank proposed a service-level agreement with your workspace/);
-  assert.equal(ok(await w.lp.call("terminate_app_agreement", { agreement_id: sla.id, reason: "Wrong targets" })).status, "terminated");
+  assert.equal(waiting.title, "Pay app: Sponsor Bank proposed a service-level agreement");
 
-  // Listed with the workspace's other agreements.
+  // The app's own list has both, and so has the workspace's.
+  const appList = ok(await w.member.call("list_app_agreements", { app_id: w.app.id }));
+  assert.deepEqual(appList.agreements.map((x) => x.kind).sort(), ["msa", "sla"]);
   const listed = ok(await w.member.call("list_app_agreements", { workspace_id: w.workspace }));
   assert.deepEqual(listed.agreements.map((x) => x.kind).sort(), ["msa", "sla"]);
-  assert.ok(listed.agreements.every((x) => x.template === null && x.your_side === "app"));
+  assert.ok(listed.agreements.every((x) => x.template === null && x.your_side === "app" && x.app.id === w.app.id));
+  assert.equal(ok(await w.lp.call("terminate_app_agreement", { agreement_id: sla.id, reason: "Wrong targets" })).status, "terminated");
 
   // A developer's own program proposal still works as before.
   const program = ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" }));

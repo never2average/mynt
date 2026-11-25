@@ -91,7 +91,7 @@ export function fromSlaList(reply: unknown): SlaList | null {
           source: str(s.measurement_source) ?? "—",
           remedy: str(s.remedy),
           status: str(s.status) ?? "active",
-          appName: (isObj(s["app"]) ? str(s["app"].name) : null) ?? "Whole workspace",
+          appName: (isObj(s["app"]) ? str(s["app"].name) : null) ?? "Unnamed app",
           counterparty: (isObj(s.counterparty) ? str(s.counterparty.name) : null) ?? "Unnamed firm",
           openBreaches: typeof s.open_breaches === "number" ? s.open_breaches : breaches.filter((b) => b.open).length,
           breaches,

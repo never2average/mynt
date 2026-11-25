@@ -4,8 +4,6 @@
 const T = "financial_products";
 
 export const APP_AGREEMENT_KINDS = ["program", "vendor", "data_sharing", "msa", "sla"] as const;
-// Kinds made between a firm and a whole workspace: they may name no app.
-export const WORKSPACE_AGREEMENT_KINDS = ["msa", "sla"] as const;
 export const AGREEMENT_SIDES = ["app", "counterparty"] as const;
 export const APP_AGREEMENT_STATUSES = ["proposed", "accepted", "signed", "declined", "terminated"] as const;
 
@@ -55,16 +53,17 @@ export const APP_AGREEMENT_TABLES = `
   -- and subscription (a vendor with several offerings has one per subscription).
   DROP INDEX IF EXISTS ${T}.app_agreements_one_open_idx;
   CREATE UNIQUE INDEX IF NOT EXISTS app_agreements_one_open_negotiated_idx ON ${T}.app_agreements (app_id, counterparty_entity_id, kind) WHERE status IN ('proposed', 'accepted', 'signed') AND vendor_subscription_id IS NULL;
-  -- Master services agreements (msa) and service-level agreements (sla) are made between a firm and a whole workspace
-  -- as well as for one app, and either side proposes any agreement (proposed_by_side); the other side answers it.
+  -- Master services agreements (msa) and service-level agreements (sla) join the kinds, each for one app like the
+  -- others, and either side proposes any agreement (proposed_by_side); the other side answers it.
   ALTER TABLE ${T}.app_agreements DROP CONSTRAINT IF EXISTS app_agreements_kind_check;
   ALTER TABLE ${T}.app_agreements ADD CONSTRAINT app_agreements_kind_check CHECK (kind IN ('program', 'vendor', 'data_sharing', 'msa', 'sla'));
   ALTER TABLE ${T}.app_agreements ADD COLUMN IF NOT EXISTS proposed_by_side text NOT NULL DEFAULT 'app';
   ALTER TABLE ${T}.app_agreements DROP CONSTRAINT IF EXISTS app_agreements_proposed_by_side_check;
   ALTER TABLE ${T}.app_agreements ADD CONSTRAINT app_agreements_proposed_by_side_check CHECK (proposed_by_side IN ('app', 'counterparty'));
   ALTER TABLE ${T}.app_agreements DROP CONSTRAINT IF EXISTS app_agreements_scope_check;
-  ALTER TABLE ${T}.app_agreements ADD CONSTRAINT app_agreements_scope_check CHECK (app_id IS NOT NULL OR (workspace_id IS NOT NULL AND kind IN ('msa', 'sla')));
-  CREATE UNIQUE INDEX IF NOT EXISTS app_agreements_one_open_workspace_idx ON ${T}.app_agreements (workspace_id, counterparty_entity_id, kind) WHERE status IN ('proposed', 'accepted', 'signed') AND app_id IS NULL;
+  -- Every new agreement names its app (NOT VALID: rows from before apps were required stay as they are).
+  ALTER TABLE ${T}.app_agreements ADD CONSTRAINT app_agreements_scope_check CHECK (app_id IS NOT NULL) NOT VALID;
+  DROP INDEX IF EXISTS ${T}.app_agreements_one_open_workspace_idx;
   CREATE UNIQUE INDEX IF NOT EXISTS app_agreements_one_open_subscription_idx ON ${T}.app_agreements (app_id, vendor_subscription_id) WHERE status IN ('proposed', 'accepted', 'signed') AND vendor_subscription_id IS NOT NULL;
   -- A vendor's standard terms on each offering (vendor-terms.ts): the document (https) and its SHA-256, a short summary,
   -- the pricing (billed by the vendor directly, never through Mynt) and a version that goes up when any of them changes.

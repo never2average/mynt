@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ChatKindSchema, SessionEvent, SessionId, SessionMetadata } from "./chat-sessions";
 import { isCalendarDate } from "./compliance";
 import { HORIZONS, LIQUIDITY, PRODUCT_ACTIONS, PRODUCT_LINES, ProductId, RETURN_TYPES, RISK_LEVELS } from "./products";
-import { RISK_CATEGORIES, RISK_STATUSES } from "./risk-register";
+import { RISK_AREAS, RISK_CATEGORIES, RISK_STATUSES } from "./risk-register";
 import { CLUSTER, SIGNATURE, SOLANA_ADDRESS } from "./wallets";
 import { AGREEMENT_FILE_MAX_BYTES } from "./agreement-esign";
 
@@ -45,6 +45,7 @@ const riskSubject = z.enum(["app", "product"]);
 const riskCategory = z.enum(RISK_CATEGORIES);
 const riskStatus = z.enum(RISK_STATUSES);
 const riskScore = z.number().int().min(1).max(5);
+const riskArea = z.enum(RISK_AREAS);
 // An app kind's id, as Mynt's kind files name them (core/schemas/app-kind.schema.json).
 export const appKindId = z.string().regex(/^[a-z][a-z0-9-]{1,39}$/);
 // A service provider's service (My services): its endpoints (https only), price per call, notes, the firm's licences it
@@ -193,12 +194,12 @@ export const STUDIO_TOOLS = {
   respond_to_app_agreement: z.object({ agreement_id: uuid, decision: z.enum(["accept", "decline"]), note: z.string().trim().max(2000).optional() }).strict(),
   sign_app_agreement: z.object({ agreement_id: uuid }).strict(),
   terminate_app_agreement: z.object({ agreement_id: uuid, reason: z.string().trim().min(3).max(2000) }).strict(),
-  // Either side proposes; the other accepts or declines, then both sign. An MSA or SLA binds the firm and the whole
-  // workspace (workspace_id), an app optional; a program or data-sharing agreement names its app.
+  // Either side proposes; the other accepts or declines, then both sign. Every agreement names its app: program, data
+  // sharing, MSA and SLA alike.
   propose_workspace_agreement: z
     .object({
       workspace_id: workspaceId,
-      app_id: id.optional(),
+      app_id: id,
       kind: z.enum(["program", "data_sharing", "msa", "sla"]),
       products: z.array(id).max(20).optional(),
       terms_summary: z.string().trim().min(10).max(4000),
@@ -211,8 +212,7 @@ export const STUDIO_TOOLS = {
     .strict(),
   propose_app_agreement: z
     .object({
-      app_id: id.optional(),
-      workspace_id: workspaceId.optional(),
+      app_id: id,
       counterparty_entity_id: uuid,
       kind: z.enum(["program", "vendor", "data_sharing", "msa", "sla"]),
       products: z.array(id).max(20),
@@ -311,6 +311,8 @@ export const STUDIO_TOOLS = {
       subject_id: id,
       title: z.string().trim().min(3).max(200),
       category: riskCategory,
+      // The platform's risk area; Mynt gives an app's or a product's risk its category's when it's left out.
+      risk_area: riskArea.optional(),
       likelihood: riskScore,
       impact: riskScore,
       description: z.string().trim().max(4000).optional(),
@@ -323,6 +325,7 @@ export const STUDIO_TOOLS = {
     .object({
       risk_id: uuid,
       status: riskStatus.optional(),
+      risk_area: riskArea.optional(),
       mitigation: z.string().trim().max(4000).optional(),
       likelihood: riskScore.optional(),
       impact: riskScore.optional(),
@@ -545,6 +548,17 @@ const query = z.string().trim().max(200).optional();
 const snake = z.string().regex(/^[a-z][a-z0-9_]*$/).max(60);
 const jsonObject = z.record(z.string(), z.unknown());
 const licenceTypeIds = z.array(z.string().trim().min(1).max(120)).max(20);
+// A risk model's definition (core/src/risk-models.ts): inputs, outputs and thresholds are lists of small objects.
+const modelField = z.string().trim().min(1).max(120);
+const modelText = z.string().trim().max(2000);
+export const riskModelDefinition = {
+  name: z.string().trim().min(3).max(200),
+  purpose: z.string().trim().min(3).max(4000),
+  method: z.string().trim().min(3).max(8000),
+  inputs: z.array(z.object({ name: modelField, description: modelText.optional(), source: modelText.optional() }).strict()).max(50),
+  outputs: z.array(z.object({ name: modelField, description: modelText.optional() }).strict()).max(50),
+  thresholds: z.array(z.object({ name: modelField, value: z.union([z.number(), z.string().trim().min(1).max(200)]), meaning: modelText.optional() }).strict()).max(50),
+};
 
 export const ADMIN_TOOLS = {
   // Overview: what needs attention across Mynt.
@@ -586,15 +600,16 @@ export const ADMIN_TOOLS = {
   remove_entity_member: z.object({ email, entity_id: uuid }).strict(),
   // Audit trails, and Security & risk's security events: Mynt's audit log, newest first, each entry with its class.
   audit_log: z.object({ limit: z.number().int().min(1).max(500).optional() }).strict(),
-  // Security & risk: Mynt's own risk register (the platform subject, Mynt admins only), and the open risks across
-  // every app and product.
-  list_risks: z.object({ subject_type: z.literal("platform"), subject_id: z.literal("mynt"), risk_id: uuid.optional() }).strict(),
+  // Risk register (/platform/risk-register): Mynt's own risk register (the platform subject, Mynt admins only), one
+  // risk area per tab (or the unassigned ones), and the open risks across every app and product in that area.
+  list_risks: z.object({ subject_type: z.literal("platform"), subject_id: z.literal("mynt"), risk_area: z.enum([...RISK_AREAS, "unassigned"]).optional(), risk_id: uuid.optional() }).strict(),
   add_risk: z
     .object({
       subject_type: z.literal("platform"),
       subject_id: z.literal("mynt"),
       title: z.string().trim().min(3).max(200),
       category: STUDIO_TOOLS.add_risk.shape.category,
+      risk_area: z.enum(RISK_AREAS), // every risk on Mynt's own register has one
       likelihood: STUDIO_TOOLS.add_risk.shape.likelihood,
       impact: STUDIO_TOOLS.add_risk.shape.impact,
       description: z.string().trim().max(4000).optional(),
@@ -604,7 +619,41 @@ export const ADMIN_TOOLS = {
     })
     .strict(),
   update_risk: STUDIO_TOOLS.update_risk,
-  admin_list_risks: z.object({ limit: z.number().int().min(1).max(100).optional(), subject_type: z.enum(["app", "product", "platform"]).optional() }).strict(),
+  admin_list_risks: z
+    .object({ limit: z.number().int().min(1).max(100).optional(), subject_type: z.enum(["app", "product", "platform"]).optional(), risk_area: z.enum([...RISK_AREAS, "unassigned"]).optional() })
+    .strict(),
+  // Risk models (/platform/risk-models): Mynt's own, per risk area, each edit a new version; validations and retiring
+  // are their own actions. And the risk models financial products declare in their definitions, read-only.
+  list_risk_models: z.object({ risk_area: z.enum(RISK_AREAS).optional(), status: z.enum(["draft", "active", "retired"]).optional(), model_id: uuid.optional() }).strict(),
+  add_risk_model: z
+    .object({
+      risk_area: z.enum(RISK_AREAS),
+      ...riskModelDefinition,
+      owner_user_id: uuid.optional(),
+      status: z.enum(["draft", "active"]).optional(),
+      next_validation_due: auditDate.optional(),
+    })
+    .strict(),
+  update_risk_model: z
+    .object({
+      model_id: uuid,
+      name: riskModelDefinition.name.optional(),
+      purpose: riskModelDefinition.purpose.optional(),
+      method: riskModelDefinition.method.optional(),
+      inputs: riskModelDefinition.inputs.optional(),
+      outputs: riskModelDefinition.outputs.optional(),
+      thresholds: riskModelDefinition.thresholds.optional(),
+      owner_user_id: uuid.optional(),
+      status: z.enum(["draft", "active"]).optional(),
+      next_validation_due: auditDate.optional(),
+      note: z.string().trim().max(2000).optional(),
+    })
+    .strict(),
+  validate_risk_model: z
+    .object({ model_id: uuid, outcome: z.enum(["passed", "passed_with_findings", "failed"]), notes: z.string().trim().min(3).max(4000), next_validation_due: auditDate })
+    .strict(),
+  retire_risk_model: z.object({ model_id: uuid, reason: z.string().trim().min(3).max(2000) }).strict(),
+  admin_list_product_risk_models: z.object({ query: z.string().trim().max(200).optional(), limit: z.number().int().min(1).max(500).optional() }).strict(),
   set_entity_status: z.object({ entity_id: uuid, status: z.enum(ENTITY_STATUSES), note: z.string().trim().max(2000).optional() }).strict(),
   // Licences: firms' registered licences by review status, and the decision on one.
   list_license_reviews: z.object({ status: z.enum(["pending", "verified", "rejected", "suspended"]).optional() }).strict(),

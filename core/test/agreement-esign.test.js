@@ -369,3 +369,32 @@ test("with e-signature, the production check names whose signature is missing, a
   assert.equal(expired.severity, "high");
   assert.match(expired.detail, /Production needs a signed program agreement/);
 });
+
+test("a licence provider proposes on its own template: the document is made from that template, signed by the proposer and the app side's accepter", async () => {
+  const w = await setup();
+  // The firm's most specific template (attached to the sponsorship), and a default one it chooses to propose on.
+  const specific = ok(await w.lp.call("upload_agreement_template", { ...upload, sponsorship_id: w.sponsorshipId }));
+  const chosen = ok(await w.lp.call("upload_agreement_template", { ...upload, name: "Sponsor Bank short-form agreement" }));
+  refused(await w.otherLp.call("propose_workspace_agreement", { workspace_id: w.app.workspace_id, app_id: w.app.id, kind: "program", products: ["savings-account"], terms_summary: "Not their sponsorship to offer", template_id: chosen.id }), /sponsor|template/);
+  // Lars proposes (not Lena), so Lars signs for the firm.
+  const a = ok(await w.lp2.call("propose_workspace_agreement", { workspace_id: w.app.workspace_id, app_id: w.app.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product", template_id: chosen.id }));
+  assert.equal(a.proposed_by_side, "counterparty");
+  assert.deepEqual(a.template, { id: chosen.id, name: "Sponsor Bank short-form agreement", version: 1 });
+  assert.equal(w.service.calls.filter((c) => c.method === "POST").length, 0, "no document before it's accepted");
+
+  // The app's owner accepts: the document is made from the chosen template, not the more specific one.
+  const accepted = ok(await w.dev.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }));
+  assert.deepEqual(accepted.signing, { ready: true });
+  assert.deepEqual(accepted.signature_document.template, { id: chosen.id, name: "Sponsor Bank short-form agreement", version: 1 });
+  const doc = (await w.store.db.query(`SELECT template_id, template_version, counterparty_signer_id, app_signer_id FROM ${T}.app_agreement_documents WHERE agreement_id = $1`, [a.id])).rows[0];
+  assert.equal(doc.template_id, chosen.id);
+  assert.notEqual(doc.template_id, specific.id);
+  assert.equal(doc.template_version, 1);
+  // Signers by the proposing side: the licence provider who proposed it, and the app's side who accepted it.
+  assert.deepEqual([doc.counterparty_signer_id, doc.app_signer_id], [w.lp2.user.id, w.dev.user.id]);
+  const [created] = w.service.calls.filter((c) => c.method === "POST");
+  assert.deepEqual(created.body.recipients.map((r) => [r.id, r.email]), [["1", "lars@example.test"], ["2", "dana@example.test"]]);
+  refused(await w.lp.call("get_agreement_signing_link", { agreement_id: a.id }), /Lars signs this for your side/);
+  assert.ok(ok(await w.lp2.call("get_agreement_signing_link", { agreement_id: a.id })).signing_url);
+  assert.ok(ok(await w.dev.call("get_agreement_signing_link", { agreement_id: a.id })).signing_url);
+});

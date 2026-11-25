@@ -13,11 +13,10 @@ import { auditClass } from "../dist/audit-classes.js";
 import { FIRM_WEBHOOK_EVENTS } from "../dist/runtime.js";
 import { CATALOG } from "./helpers.js";
 
-// Service-level commitments under an SLA agreement (kind 'sla', here with the whole workspace, so it names no app):
-// either party adds them (1:n) while it's proposed or accepted and retires them while it's open; once signed, either
-// party records breaches (1:n per commitment) and either resolves them. Only the agreement's parties read them, plain
-// workspace members read but don't act, an open breach flags the workspace and shows in ops_status, and every change is
-// audited in the obligations class.
+// Service-level commitments under an app's SLA agreement (kind 'sla'): either party adds them (1:n) while it's proposed
+// or accepted and retires them while it's open; once signed, either party records breaches (1:n per commitment) and
+// either resolves them. Only the agreement's parties read them, plain workspace members read but don't act, an open
+// breach flags the app and shows in ops_status, and every change is audited in the obligations class.
 
 const T = "financial_products";
 
@@ -69,8 +68,8 @@ async function setup() {
     return r.data;
   };
   const program = ok(await dev.call("propose_app_agreement", { app_id: app.id, counterparty_entity_id: lpFirm.id, kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" }));
-  const agreement = ok(await dev.call("propose_app_agreement", { workspace_id: workspace, counterparty_entity_id: lpFirm.id, kind: "sla", terms_summary: "Service levels for the workspace's apps" }));
-  assert.equal(agreement.app_id, null);
+  const agreement = ok(await dev.call("propose_app_agreement", { app_id: app.id, counterparty_entity_id: lpFirm.id, kind: "sla", terms_summary: "Service levels for the Pay app" }));
+  assert.equal(agreement.app_id, app.id);
   const sign = async () => {
     ok(await lp.call("respond_to_app_agreement", { agreement_id: agreement.id, decision: "accept" }));
     ok(await dev.call("sign_app_agreement", { agreement_id: agreement.id }));
@@ -152,7 +151,7 @@ test("breaches by either side, told to both, flagged until resolved; retiring st
   const memberView = ok(await w.member.call("list_agreement_slas", { workspace_id: w.workspace }));
   assert.equal(memberView.slas.length, 1);
   assert.deepEqual(memberView.slas[0].actions, []);
-  assert.deepEqual(memberView.agreements.map((a) => [a.id, a.kind, a.your_side, a.can_add_slas, a.app, a.workspace.id, a.counterparty.name]), [[w.agreement.id, "sla", "app", false, null, w.workspace, "Sponsor Bank"]]);
+  assert.deepEqual(memberView.agreements.map((a) => [a.id, a.kind, a.your_side, a.can_add_slas, a.app.name, a.workspace.id, a.counterparty.name]), [[w.agreement.id, "sla", "app", false, "Pay app", w.workspace, "Sponsor Bank"]]);
   refused(await w.member.call("record_sla_breach", { sla_id: sla.id, period_start: "2026-10-01", period_end: "2026-10-31", measured_value: 99.1 }), /owners and admins/);
 
   // Each side sees what it may do.
@@ -182,11 +181,11 @@ test("breaches by either side, told to both, flagged until resolved; retiring st
   assert.equal(b.open, true);
   assert.deepEqual(b.actions, ["resolve"]);
 
-  // The workspace is flagged, and ops_status counts them.
+  // The app is flagged, and ops_status counts them.
   const attention = await workspaceAttention(w.store, w.dev.user, w.workspace, { role: "owner" });
   const items = attention.items.filter((i) => i.kind === "agreement_sla_breach");
   assert.equal(items.length, 2, JSON.stringify(attention.items));
-  assert.equal(items[0].title, "Your workspace: API uptime SLA breached");
+  assert.equal(items[0].title, "Pay app: API uptime SLA breached");
   assert.equal(items[0].severity, "medium");
   assert.equal(items[0].href, "/licences?tab=sla");
   const ops = await opsStatus(w.store.db);
@@ -217,17 +216,21 @@ test("breaches by either side, told to both, flagged until resolved; retiring st
   assert.equal(all.slas[0].status, "retired");
   assert.deepEqual(all.slas[0].actions, []);
 
-  // Audited, with the workspace and agreement, in the obligations class.
+  // Audited, with the app, workspace and agreement, in the obligations class.
   assert.deepEqual(await actions(w.store, sla.id), ["add_agreement_sla", "retire_agreement_sla"]);
   assert.deepEqual(await actions(w.store, byLp.breach.id), ["record_sla_breach", "resolve_sla_breach"]);
   const rows = (await w.store.db.query(`SELECT details FROM ${T}.audit_log WHERE target = ANY($1::text[])`, [[sla.id, byLp.breach.id, byDev.breach.id]])).rows;
-  assert.ok(rows.every((r) => r.details.workspace_id === w.workspace && r.details.agreement_id === w.agreement.id));
+  assert.ok(rows.every((r) => r.details.app_id === w.app.id && r.details.workspace_id === w.workspace && r.details.agreement_id === w.agreement.id));
   for (const a of ["add_agreement_sla", "retire_agreement_sla", "record_sla_breach", "resolve_sla_breach"]) assert.equal(auditClass(a), "obligations", a);
 });
 
-test("an SLA agreement for one app: its breaches flag that app", async () => {
+test("an SLA agreement the licence provider proposed: the app's side answers and adds commitments; never without an app", async () => {
   const w = await setup();
   const { ok } = w;
+  // Every SLA agreement names its app, from either side.
+  refused(await w.dev.call("propose_app_agreement", { workspace_id: w.workspace, counterparty_entity_id: w.lpFirm.id, kind: "sla", terms_summary: "Service levels for the workspace" }));
+  refused(await w.lp.call("propose_workspace_agreement", { workspace_id: w.workspace, kind: "sla", terms_summary: "Service levels for the workspace" }));
+  ok(await w.dev.call("terminate_app_agreement", { agreement_id: w.agreement.id, reason: "Replaced by the sponsor's" }));
   const appSla = ok(await w.lp.call("propose_workspace_agreement", { workspace_id: w.workspace, app_id: w.app.id, kind: "sla", terms_summary: "Service levels for the Pay app" }));
   assert.equal(appSla.proposed_by_side, "counterparty");
   const { sla } = ok(await w.dev.call("add_agreement_sla", uptime(appSla.id)));

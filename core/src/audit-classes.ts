@@ -178,6 +178,11 @@ const OBLIGATIONS = [
   // the risk registers of apps and financial products: risks added and reviewed (risk-register.ts)
   "add_risk",
   "update_risk",
+  // Mynt's own risk models: added, edited (each edit a new version), validated and retired (risk-models.ts)
+  "add_risk_model",
+  "update_risk_model",
+  "validate_risk_model",
+  "retire_risk_model",
   // program agreements signed by e-signature: licence providers' templates, the documents, the signed copies read
   // (agreement-esign.ts)
   "upload_agreement_template",

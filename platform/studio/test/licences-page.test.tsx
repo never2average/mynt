@@ -31,8 +31,8 @@ const agreement = (over: Record<string, unknown>) => ({
 const FIRM_REPLY = {
   agreements: [
     agreement({ id: A_PROGRAM, proposed_by_side: "counterparty" }),
-    agreement({ id: A_MSA, kind: "msa", app: null, products: [], status: "accepted", signatures: { app_side: true, counterparty_side: false } }),
-    agreement({ id: A_SLA, kind: "sla", app: null, products: [], status: "signed", signatures: { app_side: true, counterparty_side: true } }),
+    agreement({ id: A_MSA, kind: "msa", products: [], status: "accepted", signatures: { app_side: true, counterparty_side: false } }),
+    agreement({ id: A_SLA, kind: "sla", products: [], status: "signed", signatures: { app_side: true, counterparty_side: true } }),
   ],
   proposable_workspaces: [{ workspace: { id: "w1", name: "Acme Labs" }, apps: [{ id: "a1", name: "Cards", product_ids: ["p1"] }] }],
 };
@@ -49,7 +49,7 @@ const SLA_REPLY = {
       measurement_source: "Status page",
       remedy: "Service credit",
       status: "active",
-      app: null,
+      app: { id: "a1", name: "Cards" },
       counterparty: { name: "Lead Bank" },
       open_breaches: 1,
       breaches: [{ id: BREACH, sla_id: SLA, period_start: "2026-10-01", period_end: "2026-10-31", measured_value: "99.1", recorded_side: "app", recorded_by: { id: "u1", name: "Dana" }, created_at: "2026-11-02T00:00:00Z", resolved_at: null, open: true, actions: ["resolve"] }],
@@ -125,6 +125,7 @@ const { LicencesPage } = await import("@/app/(studio)/licences/licences-page");
 const { LpAgreementsView } = await import("@/components/lp-agreements-view");
 const { lpAgreementsFrom, appAgreementsFrom, proposeTargetsFrom } = await import("@/lib/lp-agreements");
 const { ProposeView } = await import("@/components/propose-agreement-sheet");
+const { fromAgreements } = await import("@/lib/app-panel");
 const { slaRequest, SlaSheet } = await import("@/components/agreement-slas-view");
 const { fromSlaList } = await import("@/lib/agreement-slas");
 const { fromAgreementAudit } = await import("@/lib/agreement-audits");
@@ -204,8 +205,8 @@ describe("either side proposes; the other answers", () => {
     expect(appAgreementsFrom({ can_manage: false, agreements: [FIRM_REPLY.agreements[0]] })!.rows[0].actions).toEqual([]);
     // Mynt's own list of actions wins where it gives one.
     expect(lpAgreementsFrom({ agreements: [agreement({ id: A_PROGRAM, actions: ["sign", "bogus"] })] })![0].actions).toEqual(["sign"]);
-    // An MSA binds the whole workspace.
-    expect(lp[1].appName).toBe("Whole workspace");
+    // MSAs and SLAs are for one app, like every agreement.
+    expect([lp[1].appName, lp[2].appName]).toEqual(["Cards", "Cards"]);
   });
 
   it("the developer's table shows Accept and Decline on the firm's proposal, posting to the agreement's route", async () => {
@@ -221,6 +222,23 @@ describe("either side proposes; the other answers", () => {
     await click(document.querySelector(`[data-agreement-actions="${A_PROGRAM}"] [data-agreement-action="accept"]`));
     await click(document.querySelector('[data-agreement-action-submit="accept"]'));
     expect(requests).toEqual([{ url: `/api/agreements/${A_PROGRAM}`, body: { action: "accept" } }]);
+  });
+
+  it("Propose MSA: the app is required, as for every agreement", async () => {
+    const sent: unknown[] = [];
+    render(<ProposeView targets={proposeTargetsFrom(FIRM_REPLY, "counterparty")} kinds={["msa"]} onSubmit={(b) => sent.push(b)} />);
+    fireEvent.change(document.querySelector("[data-propose-app]")!, { target: { value: "" } });
+    fireEvent.change(document.querySelector("[data-propose-terms]")!, { target: { value: "Master services terms for both" } });
+    expect((document.querySelector("[data-propose-submit]") as HTMLButtonElement).disabled).toBe(true);
+    expect(document.querySelector("[data-propose-app]")?.textContent).not.toContain("whole workspace");
+    fireEvent.change(document.querySelector("[data-propose-app]")!, { target: { value: "a1" } });
+    await click(document.querySelector("[data-propose-submit]"));
+    expect(sent).toEqual([{ side: "counterparty", target_id: "w1", app_id: "a1", kind: "msa", products: [], terms_summary: "Master services terms for both" }]);
+  });
+
+  it("the app's own Agreements tab lists its MSAs and SLAs too", () => {
+    const panel = fromAgreements({ can_manage: true, agreements: FIRM_REPLY.agreements })!;
+    expect(panel.agreements.map((a) => a.kind)).toEqual(["Program agreement", "Master services agreement", "Service level agreement"]);
   });
 
   it("Propose agreement: a licence provider picks the workspace, the app and its products, and a template as the starting document", async () => {
@@ -239,9 +257,17 @@ describe("either side proposes; the other answers", () => {
   it("the route: a licence provider's proposal is propose_workspace_agreement; a developer's is propose_app_agreement; nobody proposes from a side they don't hold", async () => {
     const post = (body: unknown) => agreementsRoute.POST(new Request("http://localhost:3000/api/agreements", { method: "POST", body: JSON.stringify(body) }));
     const base = { kind: "msa", products: [], terms_summary: "Master services terms for both" };
-    expect((await post({ ...base, side: "counterparty", target_id: "w1", template_id: "88888888-8888-4888-8888-888888888888" })).status).toBe(200);
-    expect(fake.calls.at(-1)).toEqual({ name: "propose_workspace_agreement", args: { workspace_id: "w1", kind: "msa", terms_summary: "Master services terms for both", template_id: "88888888-8888-4888-8888-888888888888" } });
+    // An MSA or SLA names its app, as every agreement does.
+    expect((await post({ ...base, side: "counterparty", target_id: "w1", template_id: "88888888-8888-4888-8888-888888888888" })).status).toBe(400);
+    expect((await post({ ...base, kind: "sla", side: "counterparty", target_id: "w1" })).status).toBe(400);
+    expect(fake.calls.filter((c) => c.name.startsWith("propose"))).toEqual([]);
+    expect((await post({ ...base, side: "counterparty", target_id: "w1", app_id: "a1", template_id: "88888888-8888-4888-8888-888888888888" })).status).toBe(200);
+    expect(fake.calls.at(-1)).toEqual({ name: "propose_workspace_agreement", args: { workspace_id: "w1", app_id: "a1", kind: "msa", terms_summary: "Master services terms for both", template_id: "88888888-8888-4888-8888-888888888888" } });
     expect((await post({ ...base, side: "app", target_id: FIRM, app_id: "a1" })).status).toBe(403);
+    fake.session = session(["developer"]);
+    expect((await post({ ...base, kind: "sla", side: "app", target_id: FIRM })).status).toBe(400);
+    expect((await post({ ...base, kind: "sla", side: "app", target_id: FIRM, app_id: "a1" })).status).toBe(200);
+    expect(fake.calls.at(-1)).toEqual({ name: "propose_app_agreement", args: { app_id: "a1", counterparty_entity_id: FIRM, kind: "sla", products: [], terms_summary: "Master services terms for both" } });
     fake.session = session(["developer"]);
     expect((await post({ ...base, side: "app", target_id: FIRM, app_id: "a1", kind: "program", products: ["p1"] })).status).toBe(200);
     expect(fake.calls.at(-1)).toEqual({ name: "propose_app_agreement", args: { app_id: "a1", counterparty_entity_id: FIRM, kind: "program", products: ["p1"], terms_summary: "Master services terms for both" } });

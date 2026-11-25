@@ -54,6 +54,7 @@ export const AREA_OF_REGISTRAR: Record<string, ToolAreaId> = {
   registerAppRemovalTools: "apps",
   registerAppAgreementTools: "apps",
   registerRiskRegisterTools: "apps",
+  registerRiskModelTools: "admin",
   registerAgreementEsignTools: "apps",
   registerEsignAdminTools: "admin",
   registerAgreementAuditTools: "apps",

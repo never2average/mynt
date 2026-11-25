@@ -137,11 +137,11 @@ describe("who gets in", () => {
   it("an admin gets each section at its own address, and each detail at /platform/<section>/<id>", async () => {
     type El = { props: { tab: string; id: string | null } };
     expect(((await overviewPage.default()) as El).props).toMatchObject({ tab: "overview", id: null });
-    for (const section of ["workspaces", "firms", "licences", "vendors", "audit", "risks", "settings"]) {
+    for (const section of ["workspaces", "firms", "licences", "vendors", "audit", "risk-models", "risk-register", "settings"]) {
       const el = (await sectionPage.default({ params: Promise.resolve({ section }) })) as El;
       expect(el.props).toMatchObject({ tab: section, id: null });
     }
-    for (const section of ["workspaces", "firms", "audit"]) {
+    for (const section of ["workspaces", "firms", "audit", "risk-models"]) {
       const el = (await detailPage.default({ params: Promise.resolve({ section, id: FIRM }) })) as El;
       expect(el.props).toMatchObject({ tab: section, id: FIRM });
     }
@@ -151,10 +151,12 @@ describe("who gets in", () => {
     expect(platformLayout.metadata.title).toEqual({ default: "Mynt platform admin", template: "%s · Mynt platform admin" });
     // Anything else is a 404: an unknown section, Overview by name, an id where a section has no details, an id that isn't one.
     expect(await sectionPage.generateMetadata({ params: Promise.resolve({ section: "audit" }) })).toEqual({ title: "Audit trails" });
-    expect(await sectionPage.generateMetadata({ params: Promise.resolve({ section: "risks" }) })).toEqual({ title: "Security & risk" });
+    expect(await sectionPage.generateMetadata({ params: Promise.resolve({ section: "risk-models" }) })).toEqual({ title: "Risk models" });
+    expect(await sectionPage.generateMetadata({ params: Promise.resolve({ section: "risk-register" }) })).toEqual({ title: "Risk register" });
+    expect(await detailPage.generateMetadata({ params: Promise.resolve({ section: "risk-models", id: FIRM }) })).toEqual({ title: "Risk models" });
     // Apps, People and Products are no longer sections: their pages and details are 404s.
-    for (const section of ["nope", "overview", "admin", "apps", "people", "products"]) await expect(sectionPage.default({ params: Promise.resolve({ section }) })).rejects.toThrow("NEXT_NOT_FOUND");
-    const bad: [string, string][] = [["products", FIRM], ["licences", LIC], ["vendors", OFF], ["settings", "x"], ["overview", FIRM], ["firms", "../x"], ["apps", FIRM], ["people", FIRM], ["products", FIRM], ["risks", FIRM], ["firms", "x".repeat(101)]];
+    for (const section of ["nope", "overview", "admin", "apps", "people", "products", "risks"]) await expect(sectionPage.default({ params: Promise.resolve({ section }) })).rejects.toThrow("NEXT_NOT_FOUND");
+    const bad: [string, string][] = [["products", FIRM], ["licences", LIC], ["vendors", OFF], ["settings", "x"], ["overview", FIRM], ["firms", "../x"], ["apps", FIRM], ["people", FIRM], ["products", FIRM], ["risks", FIRM], ["risk-register", FIRM], ["risk-models", "../x"], ["firms", "x".repeat(101)]];
     for (const [section, id] of bad) await expect(detailPage.default({ params: Promise.resolve({ section, id }) })).rejects.toThrow("NEXT_NOT_FOUND");
     // The layout is the platform admin's own, not the studio's shell.
     const layout = (await platformLayout.default({ children: "page" })) as { type: { name: string }; props: { children: unknown } };
