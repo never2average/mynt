@@ -12,8 +12,10 @@ type Params = { params: Promise<{ firmId: string }> };
 
 // Admin → Firms → one firm → Members: its three labelled actions, each from its own sheet.
 // - invite: lets the email sign in to Mynt with the roles picked (invite_user, keeping every role they already have),
-//   then makes them a member of the firm (add_entity_member). Someone who hasn't signed in yet can't be added: they're
-//   allowed in, and the admin adds them once they have (the same action again). The firm's members are told by Mynt.
+//   then makes them a member of the firm (add_entity_member). Someone who hasn't signed in yet has no account to add:
+//   Mynt keeps the membership (status pending_sign_in) and applies it when they first sign in. A Mynt from before that
+//   refuses instead, and the admin adds them once they have signed in (the same action again). The firm's members are
+//   told by Mynt.
 // - change_role: their roles for this firm are exactly the ones picked; every other role they hold (Mynt admin, user)
 //   stays (invite_user with the merged list).
 // - remove: takes them out of the firm (remove_entity_member); they keep their sign-in and roles.
@@ -38,7 +40,8 @@ export async function POST(req: Request, { params }: Params) {
   return asAdmin("changing a firm's members", async (mynt, session) => {
     if (body.action === "remove") {
       if (!(await hasTools(mynt, "remove_entity_member"))) return json(UNSUPPORTED);
-      await callAdminTool(mynt, session, "remove_entity_member", { entity_id: firmId, email: body.email });
+      const removed = (await callAdminTool(mynt, session, "remove_entity_member", { entity_id: firmId, email: body.email })) as { was?: string } | null;
+      if (removed?.was === "pending_sign_in") return json({ ok: true, message: `${body.email} won't join the firm when they sign in. They can still sign in with their roles.` });
       return json({ ok: true, message: `${body.email} is no longer a member of the firm. They can still sign in with their roles; its members were told.` });
     }
     const list = (await callAdminTool(mynt, session, "list_whitelist", {})) as Whitelist;
@@ -56,6 +59,9 @@ export async function POST(req: Request, { params }: Params) {
     try {
       const r = (await callAdminTool(mynt, session, "add_entity_member", { email: body.email, entity_id: firmId })) as { status?: string; note?: string } | null;
       const pending = r?.status === "pending_acceptance";
+      // No account yet (accounts are made at sign-in): Mynt keeps the membership and applies it at their first sign-in.
+      if (r?.status === "pending_sign_in")
+        return json({ ok: true, added: false, pending_sign_in: true, message: `${body.email} can now sign in with those roles, and joins the firm when they first do. Nothing more to do here.` });
       return json({
         ok: true,
         added: true,

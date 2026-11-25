@@ -334,6 +334,8 @@ export const FIRM_TYPES = ["license_provider", "vendor", "liquidity_provider", "
 export type FirmType = (typeof FIRM_TYPES)[number]
 export const FIRM_TYPE_LABELS: Record<FirmType, string> = { license_provider: "Licence provider", vendor: "Vendor", liquidity_provider: "Liquidity provider", builder: "Innovator" }
 export type FirmMember = { id: string; name: string | null; email: string | null; roles: string[] }
+/** Someone Mynt added to the firm before they signed in (list_entities' pending_members): they join at their first sign-in. */
+export type InvitedFirmMember = { email: string; roles: string[]; addedAt: string | null }
 export type AdminLicence = {
   id: string
   entityId: string
@@ -351,7 +353,7 @@ export type AdminLicence = {
 }
 // onboarding: a regulated firm's progress towards sponsoring (get_regulated_firm_onboarding { all_firms }); null for a
 // firm that isn't a licence provider's; left out when this Mynt doesn't say (the list shows "Not available").
-export type Firm = { id: string; name: string; status: string; legalForm: string | null; country: string | null; regions: string[]; members: FirmMember[]; licences: AdminLicence[]; awaitingReview: number | null; types: FirmType[]; createdAt: string | null; onboarding?: RegulatedFirmRow | null }
+export type Firm = { id: string; name: string; status: string; legalForm: string | null; country: string | null; regions: string[]; members: FirmMember[]; invited?: InvitedFirmMember[]; licences: AdminLicence[]; awaitingReview: number | null; types: FirmType[]; createdAt: string | null; onboarding?: RegulatedFirmRow | null }
 
 // What a firm is, from its members' roles (a firm with nobody in it yet is none of them).
 export function firmTypes(members: FirmMember[]): FirmType[] {
@@ -386,6 +388,7 @@ export function firmsFrom(reply: unknown): Firm[] | null {
   if (!Array.isArray(reply)) return null
   return reply.filter(isObj).map((e) => {
     const members = arr(e.members).filter(isObj).map((m) => ({ id: String(m.id), name: str(m.name), email: str(m.email), roles: strs(m.roles) }))
+    const invited = arr(e.pending_members).filter(isObj).flatMap((m) => (str(m.email) ? [{ email: String(m.email), roles: strs(m.roles), addedAt: str(m.added_at) }] : []))
     const inc = isObj(e.incorporation) ? e.incorporation : null
     return {
       id: String(e.id),
@@ -395,9 +398,11 @@ export function firmsFrom(reply: unknown): Firm[] | null {
       country: inc ? str(inc.country) : null,
       regions: strs(e.regions),
       members,
+      invited,
       licences: arr(e.licenses).filter(isObj).map((l) => licenceOf(l, String(e.name ?? ""))),
       awaitingReview: awaitingReviewOf(e.licenses),
-      types: firmTypes(members),
+      // What the firm is counts the people invited to it too, so a firm just registered with its first person invited is typed.
+      types: firmTypes([...members, ...invited.map((m) => ({ id: `invited:${m.email}`, name: null, email: m.email, roles: m.roles }))]),
       createdAt: str(e.created_at),
     }
   })

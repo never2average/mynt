@@ -99,7 +99,7 @@ Its card shows the real-company check: the latest result in words (Passed, Not p
 **Members** lists the firm's people (name, email, roles, status) with Change role and Remove on each.
 
 - The roles offered are the firm's own: what its members are. Mynt's admin role is never one.
-- Invite member runs `invite_user` with the role picked added to any roles the person already has (read with `list_whitelist`), then `add_entity_member`. Someone who hasn't signed in yet is allowed in, and the admin adds them to the firm once they have.
+- Invite member runs `invite_user` with the role picked added to any roles the person already has (read with `list_whitelist`), then `add_entity_member`. Someone who hasn't signed in yet has no account to add: they are allowed in, shown in the tab as "Invited, not yet signed in", and join the firm when they first sign in. Remove on that row cancels it.
 - Change role sets their roles for the firm to exactly the ones picked and keeps every other role they hold (Mynt admin, user). It says what it adds and removes.
 - Remove (`remove_entity_member`, confirmed by typing their email) takes them out of the firm. A licence provider loses its standing there, the firm's members are told, and their sign-in and roles stay.
 
@@ -225,7 +225,7 @@ The firms of licence providers, vendors and liquidity providers are added by han
 | Tool | Does |
 | --- | --- |
 | `register_firm` | Adds a legal entity, with no members yet |
-| `add_entity_member`, `remove_entity_member` | Attach a person to a firm, or take them out |
+| `add_entity_member`, `remove_entity_member` | Attach a person to a firm, or take them out. Someone whitelisted who hasn't signed in yet is kept as pending (`status: "pending_sign_in"`, `list_entities`' `pending_members`) and joins at their first sign-in; `remove_entity_member` or `revoke_user` cancels it. An email that isn't whitelisted is refused |
 | `set_entity_status` | Records the firm's status from its company registry: `active`, `suspended`, `under_liquidation`, `dissolved` or `struck_off`. Every published product resting on it is re-checked, and drifted ones pause new sales |
 | `list_entities` | Lists every firm with its members, licences, roster and Mynt's public checks on it |
 | `run_firm_checks` | Runs Mynt's public checks that a firm is a real company |

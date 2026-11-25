@@ -402,6 +402,8 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
           (await store.listEntities()).map(async (e) => ({
             ...e,
             members: (await store.entityMembers(e.id)).map((m) => ({ id: m.id, name: m.name, email: m.email, roles: m.roles })),
+            // Added before they signed in: they join when they first do (add_entity_member).
+            pending_members: (await store.pendingFirmMembers(e.id)).map((p) => ({ email: p.email, roles: p.roles, added_at: p.created_at })),
             licenses: await store.licensesOf(e.id),
             parties: await store.partiesOf(e.id),
             reconciliation: await reconcileEntity(store, e.id, ref),
@@ -434,14 +436,29 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
     "add_entity_member",
     {
       title: "Add someone to a firm",
-      description: "Admin: make a signed-in user a member of a firm (they then act for it as a builder, a vendor or a licence provider, by their roles). The firm's existing members are told, on its webhooks (firm.member_added) and as a notice each. A licence-provider account added to a licence provider that already has one waits for an existing member to accept it (decide_firm_member).",
+      description: "Admin: make someone a member of a firm (they then act for it as a builder, a vendor or a licence provider, by their roles). Someone whitelisted (invite_user) who hasn't signed in yet is recorded as pending (status pending_sign_in; list_entities' pending_members) and joins the firm when they first sign in; remove_entity_member cancels it. The firm's existing members are told when they join, on its webhooks (firm.member_added) and as a notice each. A licence-provider account added to a licence provider that already has one waits for an existing member to accept it (decide_firm_member).",
       inputSchema: { email: z.string().email(), entity_id: z.string() },
     },
     async ({ email, entity_id }) => {
-      const member = await store.userByEmail(email);
-      if (!member) return fail(`${email} hasn't signed in to Mynt yet`);
       const entity = await store.getEntity(entity_id);
       if (!entity) return fail(`No firm '${entity_id}'`);
+      const member = await store.userByEmail(email);
+      if (!member) {
+        // No account yet: accounts are made at sign-in. A whitelisted email joins the firm when it first signs in
+        // (firm-notices.ts, joinPendingFirm); anyone else is whitelisted first.
+        const lower = email.toLowerCase();
+        if (!(await store.getInvite(lower))) return fail(`${lower} hasn't signed in to Mynt yet and isn't whitelisted: whitelist them with their roles first (invite_user), then add them to the firm`);
+        const pending = await store.setPendingFirmMember(lower, entity.id, user.id);
+        await audit("add_entity_member", entity.id, { email: lower, pending: "sign_in" });
+        return json({
+          entity_id: entity.id,
+          entity: entity.name,
+          member: lower,
+          status: "pending_sign_in",
+          added_at: pending.created_at,
+          note: `${lower} hasn't signed in to Mynt yet: they join ${entity.name} when they first sign in. remove_entity_member cancels it`,
+        });
+      }
       if (member.entity_id === entity.id) return json({ entity_id: entity.id, entity: entity.name, member: member.email, note: "Already a member" });
       // The firm's existing members are told, on its webhooks and as a notice each: an admin adding someone to a firm
       // is never silent. A licence provider joins with standing only as the firm's first ever one; otherwise it's a
@@ -477,6 +494,13 @@ export function registerAdminTools(server: McpServer, store: Store, user: User, 
       const entity = await store.getEntity(entity_id);
       if (!entity) return fail(`No firm '${entity_id}'`);
       const member = await store.userByEmail(email);
+      // Someone added before they signed in, who hasn't yet: the pending membership is cancelled. Nobody was told of it.
+      const pending = await store.pendingFirmMember(email);
+      if ((!member || member.entity_id !== entity.id) && pending?.entity_id === entity.id) {
+        await store.clearPendingFirmMember(email);
+        await audit("remove_entity_member", entity.id, { email: pending.email, pending: "sign_in" });
+        return json({ entity_id: entity.id, entity: entity.name, removed: pending.email, was: "pending_sign_in" });
+      }
       if (!member || member.entity_id !== entity.id) return fail(`${email.toLowerCase()} isn't a member of ${entity.name}`);
       // Out first (ending any licence-provider standing, recorded and told by setUserEntity), then the firm is told.
       await store.setUserEntity(member.id, null, "removed_by_admin");

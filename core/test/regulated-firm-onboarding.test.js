@@ -9,6 +9,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
 import { setFirmCheckSourcesForTests } from "../dist/firm-checks.js";
+import { joinPendingFirm } from "../dist/firm-notices.js";
 import { applyRegulatoryModel } from "../scripts/regulatory-model.mjs";
 import { CATALOG } from "./helpers.js";
 
@@ -159,7 +160,7 @@ test("each step's states, from a firm with nobody to one that sponsors", async (
 
   // ---- invited with the role, added to the firm, not signed in yet ----
   await ok(admin, "invite_user", { email: "lena@partner.example", roles: ["license_provider"] });
-  await store.setPendingFirmMember("lena@partner.example", firm.id, w.adminUser.id);
+  assert.equal((await ok(admin, "add_entity_member", { email: "lena@partner.example", entity_id: firm.id })).status, "pending_sign_in");
   o = await onboarding(admin, { entity_id: firm.id });
   assert.equal(stepOf(o, "licence_provider_members").status, "blocked");
   assert.equal(stepOf(o, "licence_provider_members").detail, `Mynt invited 1 person with the licence-provider role. Waiting for them to sign in: they join ${FIRM} when they do.`);
@@ -168,9 +169,12 @@ test("each step's states, from a firm with nobody to one that sponsors", async (
   assert.deepEqual((await onboarding(admin, { all_firms: true })).firms.map((f) => [f.entity_id, f.licence_provider_members, f.progress.done]), [[firm.id, 0, 1]], "invited people make it a regulated firm");
 
   // ---- signed in and a member: the firm's own steps start, the first one next ----
-  await store.clearPendingFirmMember("lena@partner.example");
-  const lena = await w.person("lena@partner.example", "Lena", ["license_provider"], firm.id);
+  // Their first sign-in makes the account, and it joins the firm it was added to (as Mynt's sign-in does).
+  const lenaUser = await joinPendingFirm(store, await store.upsertClerkUser("clerk_Lena", "lena@partner.example", "Lena", (await store.getInvite("lena@partner.example")).roles));
+  assert.equal(lenaUser.entity_id, firm.id);
+  const lena = { user: lenaUser, client: await w.connect(lenaUser) };
   o = await onboarding(lena.client);
+  assert.equal(stepOf(o, "licence_provider_members").facts.invited_not_signed_in, 0, "no longer waiting to sign in");
   assert.equal(o.entity.id, firm.id, "a licence provider reads its own firm without naming it");
   assert.equal(stepOf(o, "licence_provider_members").detail, `1 person has the licence-provider role at ${FIRM}.`);
   assert.deepEqual(stepOf(o, "licence_provider_members").facts.licence_providers.map((p) => [p.name, p.email]), [["Lena", "lena@partner.example"]]);

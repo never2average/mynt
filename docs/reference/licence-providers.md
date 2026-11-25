@@ -81,7 +81,7 @@ A builder needn't hold licences. A licence provider is a firm that does.
 
 ### Setting up a licence provider
 
-1. A Mynt admin adds the firm by hand: `register_firm`, `invite_user` with the `license_provider` role, and `add_entity_member`.
+1. A Mynt admin adds the firm by hand: `register_firm`, `invite_user` with the `license_provider` role, and `add_entity_member`. Someone who hasn't signed in yet joins the firm when they first do.
 2. The firm registers its licences with `register_license`.
 3. A Mynt admin verifies them with `review_license`, as for any firm.
 
@@ -144,7 +144,7 @@ The stored `regime_summary` shows `provided_by: "sponsor"`, the licence provider
 `test_product` doesn't warn a builder that holds no licence when it needn't hold one:
 
 - If the builder provides no component itself and every component is covered by a sponsoring licence provider (or a partner), `licence_held` passes and names who covers what ("Example Money Transmitter (placeholder) sponsors 'transmission' in us-ny, us-ca").
-- While a sponsorship is still pending, it warns only that the composition isn't covered yet.
+- While a sponsorship is still pending, it warns only that the composition isn't covered yet. The reason says the request is waiting for the licence provider's decision, not to ask again.
 - A builder providing a component itself is still warned when it holds no licence.
 
 ## Firm checks

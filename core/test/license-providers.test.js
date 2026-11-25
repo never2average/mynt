@@ -174,11 +174,16 @@ test("a sponsored product is covered only where the licence provider approved it
   const waiting = ok(await neo.call("check_product_definition", { product_id: "money-transmission", definition: definition(neo, "money-transmission", sponsor) }));
   assert.deepEqual(waiting.publish_blockers.map((b) => b.jurisdiction), ["us-ny", "us-ca"]);
   for (const b of waiting.publish_blockers) assert.match(b.reason, /Ramp Partner Inc \(licence provider\) hasn't approved a sponsorship of 'transmission'/);
+  // Nothing asked yet: the builder is told to ask.
+  for (const b of waiting.publish_blockers) assert.match(b.reason, /ask with request_sponsorship$/);
   assert.equal((await neo.call("publish_product", { id: "money-transmission" })).isError, true);
 
   // The request, as each side sees it.
   const requested = ok(await neo.call("request_sponsorship", { product_id: "money-transmission", component_key: "transmission", provider_entity_id: partner.entity.id, note: "New York and California" }));
   assert.equal(requested.status, "pending");
+  // Asked and waiting: still blocked, but no longer told to ask again.
+  const asked = ok(await neo.call("check_product_definition", { product_id: "money-transmission", definition: definition(neo, "money-transmission", sponsor) }));
+  for (const b of asked.publish_blockers) assert.match(b.reason, /hasn't approved a sponsorship of 'transmission' in this product yet: your request is waiting for its decision \(approve_sponsorship\)$/);
   assert.deepEqual(requested.requested_jurisdictions, ["us-ny", "us-ca"]);
   assert.match((await neo.call("request_sponsorship", { product_id: "money-transmission", component_key: "transmission", provider_entity_id: partner.entity.id })).data.error, /already a pending request/);
   const [inbox] = ok(await partner.call("list_sponsorship_requests"));

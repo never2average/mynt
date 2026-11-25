@@ -30,6 +30,29 @@ export async function noticeFirm(store: Store, entityId: string, type: FirmWebho
   return { webhooks, members: rows.length };
 }
 
+// Someone an admin added to a firm before they had an account (add_entity_member on a whitelisted email) joins it when
+// they first sign in: the same steps as an admin adding a signed-in person (the firm is told, licence-provider standing
+// is granted or requested by the same rules), audited as that admin's action, completed at sign-in. Returns the user as
+// they now are. Someone who already acts for a firm keeps it.
+export async function joinPendingFirm(store: Store, user: User): Promise<User> {
+  if (!user.email || user.entity_id) return user;
+  const pending = await store.pendingFirmMember(user.email);
+  if (!pending) return user;
+  await store.clearPendingFirmMember(user.email);
+  const entity = await store.getEntity(pending.entity_id);
+  if (!entity) return user;
+  await noticeFirm(store, entity.id, "firm.member_added", { member_email: user.email, member_roles: user.held_roles ?? user.roles, added_at: new Date().toISOString(), by: "admin" });
+  const joined = await store.setUserEntity(user.id, entity.id, "moved_by_admin");
+  await store.audit(pending.added_by, "add_entity_member", entity.id, {
+    email: user.email,
+    standing: joined.standing,
+    ...(joined.request_id ? { request_id: joined.request_id } : {}),
+    at_first_sign_in: true,
+    added_at: pending.created_at,
+  });
+  return (await store.getUser(user.id)) ?? user;
+}
+
 export async function firmNotices(store: Store, userId: string, limit = 50) {
   const { rows } = await store.db.query(`SELECT id, type, data, created_at, read_at FROM ${T}.firm_notices WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2`, [userId, limit]);
   await store.db.query(`UPDATE ${T}.firm_notices SET read_at = now() WHERE user_id = $1 AND read_at IS NULL`, [userId]);

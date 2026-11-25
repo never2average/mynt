@@ -183,6 +183,17 @@ describe("each tab", () => {
     for (const s of ["Fixed deposit", "Owns it", "Deposits", "US", "Archived", "Beta Bank (pending)", 'data-product="p1"']) expect(tab).toContain(s)
   })
 
+  it("Firms: someone added before they signed in is listed as invited, with Remove, and types the firm", () => {
+    const [firm] = admin.firmsFrom([{ id: FIRM, name: "New Vendor Co", status: "active", members: [], pending_members: [{ email: "vera@example.com", roles: ["vendor"], added_at: "2026-01-01T00:00:00.000Z" }], licenses: [] }])!
+    expect(firm.members).toEqual([])
+    expect(firm.invited).toEqual([{ email: "vera@example.com", roles: ["vendor"], addedAt: "2026-01-01T00:00:00.000Z" }])
+    expect(firm.types).toEqual(["vendor"])
+    const html = renderToStaticMarkup(<FirmDetailView detail={{ firm, offerings: null, products: [] }} onBack={() => undefined} />)
+    for (const s of ["vera@example.com", "Invited, not yet signed in", 'data-member-status="invited"', 'data-remove-member="invited:vera@example.com"']) expect(html).toContain(s)
+    // A Mynt from before pending members has none: the firm reads as before.
+    expect(admin.firmsFrom([{ id: FIRM, name: "Old", members: [], licenses: [] }])![0].invited).toEqual([])
+  })
+
   it("Regulated firms: each row counts its licences awaiting review; a count Mynt didn't give is Not available, never 0", () => {
     const from = (licenses: unknown) => admin.firmsFrom([{ id: FIRM, name: "Acme Trust", members: [], ...(licenses === undefined ? {} : { licenses }) }])![0].awaitingReview
     expect(from([{ id: LIC, status: "pending" }, { id: "b", status: "verified" }, { id: "c", status: "pending" }])).toBe(2)

@@ -9,7 +9,7 @@ Vendors are firms that offer standard services builders plug into their products
 A vendor's firm is a legal entity a Mynt admin adds by hand with `register_firm`. There is no self-serve discovery. To set one up:
 
 1. A Mynt admin registers the firm (`register_firm`).
-2. The admin invites the vendor's people with the `vendor` role (`invite_user`) and attaches them to the firm (`add_entity_member`).
+2. The admin invites the vendor's people with the `vendor` role (`invite_user`) and attaches them to the firm (`add_entity_member`). Both can be done before the person has signed in: they join the firm when they first do.
 3. The vendor registers its licences (`register_license`), and an admin verifies them as for any firm.
 
 ## Service types
@@ -220,7 +220,7 @@ In Mynt Studio, the Marketplace page (`/marketplace`, for builders) lists those 
 | Caller | Reads |
 | --- | --- |
 | A vendor's own member | Their firm's: no arguments, or their own `entity_id` |
-| A Mynt admin | Any firm's (`entity_id`, or `offering_id` alone), and every vendor firm's progress (`all_firms: true`: firms with a member holding the vendor role or an offering) |
+| A Mynt admin | Any firm's (`entity_id`, or `offering_id` alone), and every vendor firm's progress (`all_firms: true`: firms with a member holding the vendor role, someone invited with it who hasn't signed in yet, or an offering) |
 
 ### Steps and statuses
 
@@ -238,8 +238,8 @@ Each step has a `key`, a `title`, a `status`, a `detail` in plain words, the `to
 | Step | Done when | Otherwise |
 | --- | --- | --- |
 | `firm_registered` (firm) | The firm is on Mynt and `active` | Blocked on an admin (`register_firm`, `set_entity_status`). Every step after it waits too |
-| `vendor_members` (firm) | Someone at the firm has the vendor role (`facts.members`) | Blocked on an admin (`invite_user`, `add_entity_member`) |
-| `first_service` (firm) | The firm has an offering | Next: `create_vendor_offering` |
+| `vendor_members` (firm) | Someone at the firm has the vendor role (`facts.members`) | Blocked on an admin (`invite_user`, `add_entity_member`). Once people are invited, it waits for them to sign in (`facts.invited`) |
+| `first_service` (firm) | The firm has an offering | Next: `create_vendor_offering`. Blocked while nobody at the firm has the vendor role |
 | `service_created` (offering) | Always, with its service type and region | |
 | `licence` (offering, only when the service type needs a vendor licence) | A verified, in-force licence of one of the types is named on the offering | Register one (`register_license`). Blocked while Mynt verifies it (`review_license`) or has suspended it. Register again if rejected or lapsed. Name it on the offering (`update_vendor_offering { licence_ids }`) |
 | `conformance` (offering) | The latest `run_conformance` passed and the offering is `conformance_passed` or `listed` (`facts.last_run`: when, who, failures) | Run it, or run it again after a failure (named in the detail) or a change of endpoint or licences. Blocked while the licence waits on Mynt |

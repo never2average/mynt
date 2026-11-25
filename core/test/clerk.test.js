@@ -451,3 +451,93 @@ test("a first-party app registered without openid is repaired in place: scopes o
     globalThis.fetch = realFetch;
   }
 });
+
+// Onboarding a firm's people: an admin registers the firm, whitelists a person and adds them to it in one sitting. The
+// person has no account until they sign in, so the membership waits for that and is applied then.
+test("someone added to a firm before they signed in joins it at their first sign-in", async () => {
+  const { store, clerk, callTool, close } = await setup();
+  try {
+    await store.upsertInvite("ada@example.com", ["admin"]);
+    const admin = clerk.addUser("u_admin", "ada@example.com");
+    const ok = async (name, args, token = admin) => {
+      const r = await callTool(name, args, token);
+      assert.equal(r.isError, false, JSON.stringify(r.data));
+      return r.data;
+    };
+    const firm = await ok("register_firm", { name: "Verify Co", regions: ["US"] });
+
+    // Not whitelisted: refused, saying what to do first. Nothing is recorded.
+    const stranger = await callTool("add_entity_member", { email: "nobody@example.com", entity_id: firm.id }, admin);
+    assert.equal(stranger.isError, true);
+    assert.match(stranger.data.error, /hasn't signed in to Mynt yet and isn't whitelisted.*invite_user/);
+    assert.match((await callTool("add_entity_member", { email: "vera@example.com", entity_id: "00000000-0000-0000-0000-000000000000" }, admin)).data.error, /No firm/);
+
+    // Whitelisted, not signed in: pending, and visible to the admin on the firm and in the vendor firms' progress.
+    await ok("invite_user", { email: "Vera@Example.com", roles: ["vendor"] });
+    const added = await ok("add_entity_member", { email: "Vera@Example.com", entity_id: firm.id });
+    assert.equal(added.status, "pending_sign_in");
+    assert.equal(added.member, "vera@example.com");
+    assert.match(added.note, /join Verify Co when they first sign in/);
+    assert.equal(await store.userByEmail("vera@example.com"), undefined, "no account is made for them");
+    const listed = (await ok("list_entities", {})).find((e) => e.id === firm.id);
+    assert.deepEqual(listed.members, []);
+    assert.deepEqual(listed.pending_members.map((p) => [p.email, p.roles]), [["vera@example.com", ["vendor"]]]);
+    const progress = await ok("get_vendor_onboarding", { all_firms: true });
+    assert.deepEqual(progress.firms.map((f) => [f.name, f.vendor_members]), [["Verify Co", 0]]);
+    const before = await ok("get_vendor_onboarding", { entity_id: firm.id });
+    const step = (o, key) => o.firm_steps.find((s) => s.key === key);
+    assert.equal(step(before, "vendor_members").status, "blocked");
+    assert.match(step(before, "vendor_members").detail, /invited 1 person with the vendor role\. Waiting for them to sign in/);
+    assert.equal(step(before, "vendor_members").facts.invited, 1);
+    // Nobody at the firm can create a service yet, so it isn't offered as the next thing to do.
+    assert.equal(step(before, "first_service").status, "blocked");
+    assert.equal(before.progress.next.key, "vendor_members");
+
+    // Their first sign-in: the account is made and joins the firm, audited as the admin's action.
+    const vera = clerk.addUser("u_vera", "vera@example.com");
+    const me = await ok("whoami", {}, vera);
+    assert.equal(me.entity_id, firm.id);
+    assert.equal((await ok("get_my_entity", {}, vera)).name, "Verify Co");
+    const after = await ok("get_vendor_onboarding", {}, vera);
+    assert.equal(step(after, "vendor_members").status, "done");
+    assert.equal(step(after, "first_service").status, "next");
+    const now = (await ok("list_entities", {})).find((e) => e.id === firm.id);
+    assert.deepEqual(now.members.map((m) => m.email), ["vera@example.com"]);
+    assert.deepEqual(now.pending_members, []);
+    const trail = (await ok("audit_log", { limit: 50 })).filter((e) => e.action === "add_entity_member" && e.target === firm.id);
+    const entries = trail.map((e) => `${e.details.email} ${e.details.pending ? "pending" : e.details.at_first_sign_in ? "joined at first sign-in" : "joined"}`);
+    assert.deepEqual(entries.sort(), ["vera@example.com joined at first sign-in", "vera@example.com pending"]);
+    assert.ok(trail.every((e) => e.actor_email === "ada@example.com"));
+    // Signing in again changes nothing.
+    assert.equal((await ok("whoami", {}, vera)).entity_id, firm.id);
+
+    // A pending membership can be cancelled, and revoking the person drops it too: neither then joins.
+    await ok("invite_user", { email: "carl@example.com", roles: ["vendor"] });
+    await ok("add_entity_member", { email: "carl@example.com", entity_id: firm.id });
+    const cancelled = await ok("remove_entity_member", { email: "carl@example.com", entity_id: firm.id });
+    assert.equal(cancelled.was, "pending_sign_in");
+    assert.equal((await ok("whoami", {}, clerk.addUser("u_carl", "carl@example.com"))).entity_id, null);
+    await ok("invite_user", { email: "rae@example.com", roles: ["vendor"] });
+    await ok("add_entity_member", { email: "rae@example.com", entity_id: firm.id });
+    await ok("revoke_user", { email: "rae@example.com" });
+    assert.equal(await store.pendingFirmMember("rae@example.com"), undefined);
+
+    // A licence provider's firm: its first licence provider has standing at once; a second one added before signing in
+    // still waits for the first to accept it once they sign in (the same rule as for someone added after signing in).
+    const bank = await ok("register_firm", { name: "Sponsor Co", regions: ["US"] });
+    for (const email of ["lena@example.com", "lou@example.com"]) {
+      await ok("invite_user", { email, roles: ["license_provider"] });
+      assert.equal((await ok("add_entity_member", { email, entity_id: bank.id })).status, "pending_sign_in");
+    }
+    const lena = await ok("whoami", {}, clerk.addUser("u_lena", "lena@example.com"));
+    assert.equal(lena.entity_id, bank.id);
+    assert.ok(lena.effective_roles.includes("license_provider"));
+    const lou = await ok("whoami", {}, clerk.addUser("u_lou", "lou@example.com"));
+    assert.equal(lou.entity_id, bank.id);
+    assert.ok(!lou.effective_roles.includes("license_provider"), "waits for the firm's licence provider to accept it");
+    const { rows } = await store.db.query("SELECT status FROM financial_products.firm_member_requests WHERE entity_id = $1", [bank.id]);
+    assert.deepEqual(rows.map((r) => r.status), ["pending"]);
+  } finally {
+    close();
+  }
+});
