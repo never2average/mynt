@@ -472,7 +472,7 @@ export function InvitePersonSheet({ open, onClose, onDone = () => undefined, pla
             That isn&apos;t an email address.
           </p>
         )}
-        <Field label="Joins" hint="A firm or a workspace: type part of its name.">
+        <Field label="Joins" hint="A regulated firm or a workspace: type part of its name.">
           <Input
             value={query}
             onChange={(e) => {
@@ -487,7 +487,7 @@ export function InvitePersonSheet({ open, onClose, onDone = () => undefined, pla
           />
         </Field>
         {!target && (
-          <ul id="joins-choices" role="listbox" aria-label="Firms and workspaces" className="flex max-h-56 flex-col overflow-y-auto rounded-md border" data-joins-choices>
+          <ul id="joins-choices" role="listbox" aria-label="Regulated firms and workspaces" className="flex max-h-56 flex-col overflow-y-auto rounded-md border" data-joins-choices>
             {choices.length ? (
               choices.map((t) => (
                 <li key={`${t.kind}:${t.id}`} role="option" aria-selected={false}>
@@ -498,7 +498,7 @@ export function InvitePersonSheet({ open, onClose, onDone = () => undefined, pla
                 </li>
               ))
             ) : (
-              <li className="px-3 py-2 text-sm text-muted-foreground">No firm or workspace matches.</li>
+              <li className="px-3 py-2 text-sm text-muted-foreground">No regulated firm or workspace matches.</li>
             )}
           </ul>
         )}

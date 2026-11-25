@@ -31,7 +31,11 @@ export async function proxy(req: NextRequest) {
   // Old addresses that moved (lib/redirects.ts: /admin?tab=…&id=… is /platform/…), before sign-in, so signing in
   // comes back to the new one.
   const moved = legacyRedirect(req.nextUrl.pathname, req.nextUrl.searchParams);
-  if (moved) return NextResponse.redirect(appUrlFor(moved, ""), 307);
+  if (moved) {
+    // The new address may name a tab (/platform/firms?tab=licences); the old address's own query is left behind.
+    const [path, query] = moved.split("?");
+    return NextResponse.redirect(appUrlFor(path, query ? `?${query}` : ""), 307);
+  }
 
   if (req.nextUrl.pathname === "/api/auth/login" && !(await loginAllowed(sessionStore(), clientAddress(req.headers)))) {
     return new NextResponse("Too many sign-in attempts. Please wait a few minutes and try again.", {

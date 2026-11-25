@@ -2,29 +2,33 @@
 // answers. Every list is platform-wide (all workspaces, all firms), never scoped to a workspace picked in the studio. Pure, for
 // the routes, the views and the tests. A figure Mynt didn't measure is null here and "Not measured" on screen, never 0.
 
-export const ADMIN_TABS = ["overview", "workspaces", "firms", "licences", "vendors", "audit", "risk-models", "risk-register", "settings"] as const
+export const ADMIN_TABS = ["overview", "workspaces", "firms", "vendors", "audit", "risk-models", "risk-register", "settings"] as const
 export type AdminTab = (typeof ADMIN_TABS)[number]
 export const ADMIN_TAB_LABELS: Record<AdminTab, string> = {
   overview: "Overview",
   workspaces: "Workspaces",
-  firms: "Firms",
-  licences: "Licences",
+  firms: "Regulated firms",
   vendors: "Vendors",
   audit: "Audit trails",
   "risk-models": "Risk models",
   "risk-register": "Risk register",
   settings: "Platform settings",
 }
-// Sections that moved: Security & risk (risks) is the Risk register now.
-export const MOVED_TABS: Record<string, AdminTab> = { risks: "risk-register" }
+// Sections that moved: Security & risk (risks) is the Risk register now, and Licences is the Regulated firms section's Licences
+// tab (/platform/firms?tab=licences). `under`: addresses below the old one (/platform/licences/<anything>) go there too.
+export const MOVED_TABS: Record<string, { tab: AdminTab; query?: string; under?: boolean }> = {
+  risks: { tab: "risk-register" },
+  licences: { tab: "firms", query: "tab=licences", under: true },
+}
+const movedOf = (v: unknown) => (typeof v === "string" && Object.hasOwn(MOVED_TABS, v) ? MOVED_TABS[v] : null)
 // A section that isn't one (an old address's apps, people or products, which the platform admin no longer has) is the
 // Overview; one that moved is where it went.
-export const adminTabOf = (v: unknown): AdminTab =>
-  ADMIN_TABS.includes(v as AdminTab) ? (v as AdminTab) : typeof v === "string" && Object.hasOwn(MOVED_TABS, v) ? MOVED_TABS[v] : "overview"
+export const adminTabOf = (v: unknown): AdminTab => (ADMIN_TABS.includes(v as AdminTab) ? (v as AdminTab) : (movedOf(v)?.tab ?? "overview"))
 
 // Where it lives: its own base path and layout (app/(platform)), never inside the studio's shell. Overview is
 // /platform, each other section /platform/<section>, and a row opened in Workspaces, Firms, Audit trails or Risk models
-// /platform/<section>/<id>. People are each firm's and each workspace's Members, not a section of their own.
+// /platform/<section>/<id>. People are each firm's and each workspace's Members, not a section of their own; licences
+// are the Regulated firms section's Licences tab, and each firm's.
 export const PLATFORM_BASE = "/platform"
 export const PLATFORM_NAME = "Mynt platform admin"
 // The sections whose rows open a detail page.
@@ -35,6 +39,18 @@ export const ADMIN_ID = /^[A-Za-z0-9-]{1,100}$/
 export const adminIdOk = (tab: AdminTab, id: string) => ADMIN_DETAIL_TABS.includes(tab) && ADMIN_ID.test(id)
 export const adminHref = (tab: AdminTab, id?: string) =>
   tab === "overview" ? PLATFORM_BASE : `${PLATFORM_BASE}/${tab}${id ? `/${encodeURIComponent(id)}` : ""}`
+/** Where a section that moved went (its new address, with the tab it became), or null for one that didn't move. */
+export function movedHref(section: unknown): string | null {
+  const m = movedOf(section)
+  return m ? `${adminHref(m.tab)}${m.query ? `?${m.query}` : ""}` : null
+}
+// The firms section (shown as "Regulated firms"; its address stays /platform/firms) has its own tabs, in the page's body: the firms list, and every firm's licences for review (what was
+// the Licences section). The tab is in the address: /platform/firms?tab=firms or ?tab=licences; Firms when it has none.
+export const FIRMS_TABS = ["firms", "licences"] as const
+export type FirmsTab = (typeof FIRMS_TABS)[number]
+export const FIRMS_TAB_LABELS: Record<FirmsTab, string> = { firms: "Regulated firms", licences: "Licences" }
+export const firmsTabOf = (v: unknown): FirmsTab => (v === "licences" ? "licences" : "firms")
+export const firmsHref = (tab: FirmsTab) => `${adminHref("firms")}?tab=${tab}`
 export const isPlatformPath = (pathname: string) => pathname === PLATFORM_BASE || pathname.startsWith(`${PLATFORM_BASE}/`)
 
 /** The section and item a /platform address shows; null when it isn't one (the page answers 404). */
@@ -55,6 +71,7 @@ export function platformTitle(pathname: string): string {
 }
 
 export const NOT_MEASURED = "Not measured"
+export const NOT_AVAILABLE = "Not available"
 
 type Obj = Record<string, unknown>
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v)
@@ -334,7 +351,7 @@ export type AdminLicence = {
   reviewNote: string | null
   createdAt: string | null
 }
-export type Firm = { id: string; name: string; status: string; legalForm: string | null; country: string | null; regions: string[]; members: FirmMember[]; invited?: InvitedFirmMember[]; licences: AdminLicence[]; types: FirmType[]; createdAt: string | null }
+export type Firm = { id: string; name: string; status: string; legalForm: string | null; country: string | null; regions: string[]; members: FirmMember[]; invited?: InvitedFirmMember[]; licences: AdminLicence[]; awaitingReview: number | null; types: FirmType[]; createdAt: string | null }
 
 // What a firm is, from its members' roles (a firm with nobody in it yet is none of them).
 export function firmTypes(members: FirmMember[]): FirmType[] {
@@ -358,6 +375,13 @@ const licenceOf = (l: Obj, firm: string | null = null): AdminLicence => ({
   createdAt: str(l.created_at),
 })
 
+// How many of a firm's licences wait for review: null when Mynt's answer doesn't say (no licences listed for the firm,
+// or one without a review status), which the list shows as "Not available", never 0.
+function awaitingReviewOf(licenses: unknown): number | null {
+  if (!Array.isArray(licenses) || !licenses.every((l) => isObj(l) && str(l.status))) return null
+  return licenses.filter((l) => (l as Obj).status === "pending").length
+}
+
 export function firmsFrom(reply: unknown): Firm[] | null {
   if (!Array.isArray(reply)) return null
   return reply.filter(isObj).map((e) => {
@@ -374,6 +398,7 @@ export function firmsFrom(reply: unknown): Firm[] | null {
       members,
       invited,
       licences: arr(e.licenses).filter(isObj).map((l) => licenceOf(l, String(e.name ?? ""))),
+      awaitingReview: awaitingReviewOf(e.licenses),
       // What the firm is counts the people invited to it too, so a firm just registered with its first person invited is typed.
       types: firmTypes([...members, ...invited.map((m) => ({ id: `invited:${m.email}`, name: null, email: m.email, roles: m.roles }))]),
       createdAt: str(e.created_at),

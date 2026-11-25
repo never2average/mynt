@@ -100,6 +100,7 @@ Old addresses and where they go are in `lib/redirects.ts` (applied by `proxy.ts`
 |---|---|
 | `/admin?tab=<section>&id=<id>` | `/platform/<section>/<id>`; a section the platform admin no longer has (apps, people, products) goes to `/platform` |
 | `/platform/risks`, `/admin?tab=risks` | `/platform/risk-register` |
+| `/platform/licences` and anything under it, `/admin?tab=licences` | `/platform/firms?tab=licences` |
 | `/settings?tab=esign` | `/platform/settings` |
 | `/docs/connect` | `/connect` |
 | `/workspace`, `/members` | `/settings` |
@@ -111,14 +112,13 @@ Old addresses and where they go are in `lib/redirects.ts` (applied by `proxy.ts`
 
 ### The platform admin
 
-The platform admin is for Mynt admins, across all workspaces and firms. What its nine sections show and do is described once, in [docs/reference/platform-admin.md](../../docs/reference/platform-admin.md#the-platform-admin-in-studio). For the code:
+The platform admin is for Mynt admins, across all workspaces and firms. What its eight sections show and do is described once, in [docs/reference/platform-admin.md](../../docs/reference/platform-admin.md#the-platform-admin-in-studio). For the code:
 
 | Section | Address | Component | API routes |
 |---|---|---|---|
 | Overview | `/platform` | `components/admin-overview.tsx`, `components/admin-members.tsx` (Invite person) | `GET /api/admin/overview` |
 | Workspaces | `/platform/workspaces` | `components/admin-workspaces.tsx` | `/api/admin/workspaces`, `/api/admin/workspaces/<id>`, `POST /api/admin/workspaces/<id>/members` |
-| Firms | `/platform/firms` | `components/admin-firms.tsx` | `/api/admin/firms`, `/api/admin/firms/<id>`, `/api/admin/firms/<id>/status`, `POST /api/admin/firms/<id>/members` |
-| Licences | `/platform/licences` | `components/admin-licences.tsx` | `/api/admin/licences`, `/api/admin/licences/<id>` |
+| Regulated firms | `/platform/firms` (tabs `?tab=firms`, `?tab=licences`) | `components/admin-firms.tsx`, `components/admin-licences.tsx` (the Licences tab, and each firm's licence review) | `/api/admin/firms`, `/api/admin/firms/<id>`, `/api/admin/firms/<id>/status`, `POST /api/admin/firms/<id>/members`, `/api/admin/licences`, `/api/admin/licences/<id>` |
 | Vendors | `/platform/vendors` | `components/admin-vendors.tsx` | `/api/admin/vendors`, `/api/admin/vendors/service-types`, `/api/admin/vendors/offerings/<id>` |
 | Audit trails | `/platform/audit` | `components/admin-audit.tsx`, `lib/admin-audit.ts` | `GET /api/admin/audit?limit=` (1 to 500) |
 | Risk models | `/platform/risk-models` | `components/admin-risk-models.tsx`, `lib/risk-models.ts` | `GET` and `POST /api/admin/risk-models`, `GET` and `POST /api/admin/risk-models/<id>` |

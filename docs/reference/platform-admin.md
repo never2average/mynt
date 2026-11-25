@@ -19,7 +19,7 @@ Mynt Studio has a platform admin at `/platform` for Mynt's own staff. It covers 
 
 The platform admin has its own layout, not Studio's.
 
-- Its sidebar is titled "Mynt platform admin" and lists nine sections, each at its own address. There is no workspace switcher and there are no app folders.
+- Its sidebar is titled "Mynt platform admin" and lists eight sections, each at its own address. There is no workspace switcher and there are no app folders.
 - The labelled Back to Studio at the foot of the sidebar returns to Studio.
 - The header has the section's name, a search field (Cmd+K) that searches the platform admin, a Docs button and the theme switcher. On the Overview it also has Invite person. There is no scope tag.
 
@@ -27,8 +27,7 @@ The platform admin has its own layout, not Studio's.
 | --- | --- |
 | Overview | `/platform` |
 | Workspaces | `/platform/workspaces` |
-| Firms | `/platform/firms` |
-| Licences | `/platform/licences` |
+| Regulated firms | `/platform/firms` |
 | Vendors | `/platform/vendors` |
 | Audit trails | `/platform/audit` |
 | Risk models | `/platform/risk-models` |
@@ -37,7 +36,7 @@ The platform admin has its own layout, not Studio's.
 
 An opened workspace, firm, audit entry or risk model is `/platform/<section>/<id>`.
 
-There are no Apps, People or Products sections. People are managed on each firm's and each workspace's Members tab, and a firm's products are its page's Products tab. `/platform/apps`, `/platform/people` and `/platform/products`, and anything under them, are 404s.
+There are no Apps, People, Products or Licences sections. People are managed on each firm's and each workspace's Members tab, and a firm's products are its page's Products tab. `/platform/apps`, `/platform/people` and `/platform/products`, and anything under them, are 404s. Licences are reviewed on the Regulated firms section's Licences tab and on each firm's page.
 
 ### How it changes things
 
@@ -50,6 +49,7 @@ Each section only shows. Every change is a labelled button that opens a sheet, a
 | `/admin?tab=<section>&id=<id>` | `/platform/<section>/<id>` |
 | `/admin` with a section it no longer has (apps, people, products) | `/platform` |
 | `/platform/risks` and `/admin?tab=risks` (the old Security & risk) | `/platform/risk-register` |
+| `/platform/licences`, anything under it, and `/admin?tab=licences` (the old Licences section) | `/platform/firms?tab=licences` |
 | `/settings?tab=esign` | `/platform/settings` |
 
 ### Overview
@@ -61,7 +61,7 @@ Overview shows `ops_status`:
 - failures and stuck runs;
 - the hosting, vendors, Solana, product health, covenants, workspaces, agreements and backups readings.
 
-Its header has Invite person: an email, then what they join (a firm or a team workspace, found by typing its name), then their role there. It does exactly what that firm's or workspace's Invite member does.
+Its header has Invite person: an email, then what they join (a regulated firm or a team workspace, found by typing its name), then their role there. It does exactly what that firm's or workspace's Invite member does.
 
 ### Workspaces section
 
@@ -79,9 +79,18 @@ These run `admin_invite_workspace_member`, `admin_change_workspace_member_role`,
 
 Renaming, archiving and relinking stay with the workspace's owners. See [Mynt admins on any workspace](workspaces-and-sign-in.md#mynt-admins-on-any-workspace).
 
-### Firms section
+### Regulated firms section
 
-Firms lists every firm (`list_entities`), each typed by its members' roles: licence provider, vendor, liquidity provider, innovator. Register firm runs `register_firm`. Firms are only ever added by hand.
+Regulated firms (`/platform/firms`) has two tabs in the page:
+
+| Tab | Address | Shows |
+| --- | --- | --- |
+| **Regulated firms** | `/platform/firms` or `/platform/firms?tab=firms` | Every firm, with Register regulated firm |
+| **Licences** | `/platform/firms?tab=licences` | Every licence firms registered, for review |
+
+**Regulated firms** lists every firm (`list_entities`), each typed in words by its members' roles: licence provider, vendor, liquidity provider, innovator. A firm that is only a vendor is listed here too, as Vendor; its onboarding is under Vendors, on the Vendor firms tab. The Awaiting review column counts the firm's licences waiting for review, and says "Not available" when Mynt's answer doesn't say, never 0. Register regulated firm runs `register_firm`. Firms are only ever added by hand.
+
+**Licences** lists every licence firms registered, opening on the ones waiting for review (`list_license_reviews`), with the count in each review status, filters and Export CSV. The Firm column links to the firm's page. Its actions are Verify licence, Reject licence and Suspend licence (`review_license`). A rejection or suspension needs a reason.
 
 A firm's page has Invite member and Set firm status (`set_entity_status`), then the tabs Members, Licences, Offerings and Products.
 
@@ -92,13 +101,11 @@ A firm's page has Invite member and Set firm status (`set_entity_status`), then 
 - Change role sets their roles for the firm to exactly the ones picked and keeps every other role they hold (Mynt admin, user). It says what it adds and removes.
 - Remove (`remove_entity_member`, confirmed by typing their email) takes them out of the firm. A licence provider loses its standing there, the firm's members are told, and their sign-in and roles stay.
 
+**Licences** lists the firm's licences with the same Verify licence, Reject licence and Suspend licence, so a licence can be reviewed beside the firm's members and products. `/platform/firms/<id>?tab=licences` opens on it.
+
 **Products** lists the products the firm owns or sponsors (`list_all_products`): line, region, stage, status, whether it is archived, and its sponsors. It is read-only. `/platform/firms/<id>?tab=products` opens on it.
 
 What a firm keeps to itself, such as its encrypted health books and its signatures, isn't shown. Mynt admins can't read or co-sign them.
-
-### Licences section
-
-Licences lists every licence firms registered, opening on the ones waiting for review (`list_license_reviews`). Its actions are Verify licence, Reject licence and Suspend licence (`review_license`). A rejection or suspension needs a reason.
 
 ### Vendors section
 

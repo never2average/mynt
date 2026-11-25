@@ -20,7 +20,7 @@ const { PlatformSidebarView, PLATFORM_SECTIONS } = await import("@/components/pl
 const { OverviewView } = await import("@/components/admin-overview");
 const { OperationalSettingsView } = await import("@/components/admin-settings");
 const { WorkspacesListView, WorkspaceDetailView } = await import("@/components/admin-workspaces");
-const { FirmsListView, FirmDetailView, RegisterFirmSheet, FirmStatusSheet } = await import("@/components/admin-firms");
+const { FirmsListView, FirmDetailView, FirmsTabs, RegisterFirmSheet, FirmStatusSheet } = await import("@/components/admin-firms");
 const { InviteFirmMemberSheet } = await import("@/components/admin-members");
 const { LicencesAdminView, ReviewLicenceSheet, decisionsFor } = await import("@/components/admin-licences");
 const { VendorsView, AddServiceTypeSheet, SuspendOfferingSheet, schemaOf } = await import("@/components/admin-vendors");
@@ -83,6 +83,7 @@ const FIRM_ROW: import("@/lib/admin").Firm = {
   regions: ["US"],
   members: [{ id: "u1", name: "Lee", email: "lee@example.com", roles: ["license_provider"] }],
   licences: [],
+  awaitingReview: 0,
   types: ["license_provider"],
   createdAt: "2026-10-01T00:00:00.000Z",
 }
@@ -113,10 +114,16 @@ describe("the sidebar and header", () => {
 
 describe("each tab", () => {
   it("the platform sidebar names every section; an unknown section opens Overview", () => {
-    const html = renderToStaticMarkup(<TooltipProvider><SidebarProvider><PlatformSidebarView pathname="/platform/licences" account={{ name: null, email: null }} /></SidebarProvider></TooltipProvider>)
+    const html = renderToStaticMarkup(<TooltipProvider><SidebarProvider><PlatformSidebarView pathname="/platform/firms" account={{ name: null, email: null }} /></SidebarProvider></TooltipProvider>)
     for (const t of admin.ADMIN_TABS) expect(html).toContain(admin.ADMIN_TAB_LABELS[t].replace("&", "&amp;"))
     expect(PLATFORM_SECTIONS.map((x) => x.tab)).toEqual([...admin.ADMIN_TABS])
     expect(admin.adminTabOf("nope")).toBe("overview")
+    // Licences is no longer a section: the sidebar doesn't list it, and its old tab name is the firms section.
+    expect(html).not.toContain(">Licences<")
+    expect(html).toContain(">Regulated firms<")
+    expect(html).not.toContain(">Firms<")
+    expect(admin.ADMIN_TABS as readonly string[]).not.toContain("licences")
+    expect(admin.adminTabOf("licences")).toBe("firms")
     expect(admin.adminHref("firms", FIRM)).toBe(`/platform/firms/${FIRM}`)
   })
 
@@ -155,10 +162,19 @@ describe("each tab", () => {
     expect(html).not.toContain("data-open-app")
   })
 
-  it("Firms: type from members' roles, Register firm; detail with Invite member and Set firm status, and its tables", () => {
+  it("Regulated firms: type from members' roles, Register regulated firm; detail with Invite member and Set firm status, and its tables", () => {
     expect(admin.firmTypes([{ id: "a", name: null, email: null, roles: ["developer", "vendor"] }])).toEqual(["vendor", "builder"])
     const list = renderToStaticMarkup(<FirmsListView firms={[FIRM_ROW]} onOpen={() => undefined} />)
-    for (const s of ["Acme Trust", "Licence provider", "Register firm"]) expect(list).toContain(s)
+    for (const s of ["Acme Trust", "Licence provider", "Register regulated firm", "Search regulated firms by name, member email or id"]) expect(list).toContain(s)
+    expect(list).not.toContain(">Register firm<")
+    expect(renderToStaticMarkup(<FirmsListView firms={[]} onOpen={() => undefined} />)).toContain("No regulated firms yet. Register the first one.")
+    // A vendor-only firm stays listed, its type in words.
+    expect(renderToStaticMarkup(<FirmsListView firms={[{ ...FIRM_ROW, members: [{ id: "v", name: null, email: "v@example.com", roles: ["vendor"] }], types: ["vendor"] }]} onOpen={() => undefined} />)).toContain(">Vendor<")
+    // The section's own tabs, in the page: Regulated firms and Licences, on the shared line tabs.
+    const tabs = renderToStaticMarkup(<FirmsTabs tab="licences" onTab={() => undefined} />)
+    expect([...tabs.matchAll(/data-firms-tab="([a-z]+)"[^>]*>([^<]+)</g)].map((m) => [m[1], m[2]])).toEqual([["firms", "Regulated firms"], ["licences", "Licences"]])
+    expect(tabs).toContain('data-slot="tabs-row"')
+    expect(tabs.match(/<button[^>]*data-firms-tab="licences"[^>]*>/)![0]).toContain('aria-selected="true"')
     const html = renderToStaticMarkup(<FirmDetailView detail={{ firm: FIRM_ROW, offerings: null, products: [] }} onBack={() => undefined} />)
     for (const s of ["data-metadata-card", "Invite member", "Set firm status", "Members", "Licences", "Offerings", "Products", "lee@example.com", "Change role", "Remove", "Signed in"]) expect(html).toContain(s)
     // Products: the firm's own, read-only (the platform admin has no products section).
@@ -178,11 +194,54 @@ describe("each tab", () => {
     expect(admin.firmsFrom([{ id: FIRM, name: "Old", members: [], licenses: [] }])![0].invited).toEqual([])
   })
 
-  it("Licences: opens on the ones waiting for review, with Verify licence and Reject licence", () => {
+  it("Regulated firms: each row counts its licences awaiting review; a count Mynt didn't give is Not available, never 0", () => {
+    const from = (licenses: unknown) => admin.firmsFrom([{ id: FIRM, name: "Acme Trust", members: [], ...(licenses === undefined ? {} : { licenses }) }])![0].awaitingReview
+    expect(from([{ id: LIC, status: "pending" }, { id: "b", status: "verified" }, { id: "c", status: "pending" }])).toBe(2)
+    expect(from([{ id: LIC, status: "verified" }])).toBe(0)
+    expect(from([])).toBe(0) // measured: the firm has registered none
+    expect(from(undefined)).toBeNull()
+    expect(from([{ id: LIC }])).toBeNull() // a licence without a review status: not known
+    const cells = (html: string) => [...html.matchAll(/data-awaiting-review="[^"]*"[^>]*>([^<]*)</g)].map((m) => m[1])
+    const html = renderToStaticMarkup(<FirmsListView firms={[{ ...FIRM_ROW, awaitingReview: 2 }, { ...FIRM_ROW, id: "z", awaitingReview: 0 }, { ...FIRM_ROW, id: "y", awaitingReview: null }]} onOpen={() => undefined} />)
+    expect(html).toContain(">Awaiting review<")
+    expect(cells(html)).toEqual(["2", "0", "Not available"])
+  })
+
+  it("a firm's Licences tab: each licence's review in words, with Verify licence, Reject licence and Suspend licence opening the sheet that posts to the licences route", async () => {
+    const firm = { ...FIRM_ROW, awaitingReview: 1, licences: [LICENCE, { ...LICENCE, id: OFF, status: "verified" }, { ...LICENCE, id: WS, status: "rejected" }] }
+    const { f, calls } = fetcher()
+    let changed = 0
+    render(<FirmDetailView detail={{ firm, offerings: null, products: null }} onBack={() => undefined} onChanged={() => void changed++} initialTab="licences" fetcher={f} />)
+    const table = document.querySelector("[data-detail-table]")!
+    expect([...table.querySelectorAll("th")].map((h) => h.textContent)).toEqual(["Licence", "Regulator", "Region", "Jurisdiction", "Number", "Valid to", "Review", ""])
+    expect([...table.querySelectorAll("[data-licence-status]")].map((x) => x.textContent)).toEqual(["Waiting for review", "Verified", "Rejected"])
+    const actions = (id: string) => [...table.querySelectorAll(`[data-licence-actions="${id}"] button`)].map((b) => b.textContent)
+    expect(actions(LIC)).toEqual(["Verify licence", "Reject licence"])
+    expect(actions(OFF)).toEqual(["Suspend licence"])
+    expect(actions(WS)).toEqual([])
+    // Every action is a labelled button, never an icon alone.
+    for (const b of table.querySelectorAll("button")) expect(b.textContent!.trim().length).toBeGreaterThan(3)
+    await click(`[data-licence-actions="${OFF}"] [data-review="suspended"]`)
+    expect(document.querySelector('[data-admin-sheet="review-licence"]')!.textContent).toContain("Suspend licence")
+    expect(document.querySelector('[data-admin-sheet="review-licence"]')!.textContent).toContain("Acme Trust")
+    type("[data-review-note]", "Charter withdrawn")
+    await act(async () => void fireEvent.submit(document.querySelector("[data-review-licence-form]")!))
+    expect(calls).toEqual([{ url: `/api/admin/licences/${OFF}`, body: { decision: "suspended", note: "Charter withdrawn" } }])
+    expect(changed).toBe(0) // the firm is read again once the sheet closes
+    expect(document.querySelector("[data-metadata-card]")!.textContent).toContain("Awaiting review1")
+  })
+
+  it("Licences (the firms section's tab): opens on the ones waiting for review, with its figures, Export CSV, the firm linked, and Verify licence, Reject licence and Suspend licence", () => {
     const html = renderToStaticMarkup(<LicencesAdminView licences={[LICENCE, { ...LICENCE, id: "x", status: "verified" }]} />)
     expect(html).toContain("Verify licence")
     expect(html).toContain("Reject licence")
     expect(html).toContain("Waiting for review")
+    expect(html).not.toContain("Suspend licence") // the verified one is filtered out until the filter is cleared
+    for (const s of ['data-row="admin-licence-figures"', "Check against the register", "Export CSV", "Filters", "Search licences by firm, type, regulator, number or jurisdiction"]) expect(html).toContain(s)
+    expect(html.match(/<a[^>]*data-licence-firm="[^"]+"[^>]*>[^<]+<\/a>/)![0]).toContain(`href="/platform/firms/${FIRM}?tab=licences"`)
+    expect(renderToStaticMarkup(<LicencesAdminView licences={[{ ...LICENCE, status: "verified" }]} />)).toContain("Suspend licence")
+    // A licence whose firm Mynt didn't identify shows the name alone, no link.
+    expect(renderToStaticMarkup(<LicencesAdminView licences={[{ ...LICENCE, entityId: "" }]} />)).not.toContain("data-licence-firm")
     expect(decisionsFor("verified")).toEqual(["suspended"])
     expect(decisionsFor("rejected")).toEqual([])
   })
@@ -227,16 +286,18 @@ describe("each tab", () => {
 
   it("a tab this Mynt can't answer yet says so; an error is shown as Mynt said it", () => {
     expect(renderToStaticMarkup(<AdminNotReady state={{ kind: "unsupported" }} what="Workspaces" />)).toContain("Workspaces isn&#x27;t available yet")
-    expect(renderToStaticMarkup(<AdminNotReady state={{ kind: "error", message: "Couldn't reach Mynt." }} what="Firms" />)).toContain("Couldn&#x27;t reach Mynt.")
+    expect(renderToStaticMarkup(<AdminNotReady state={{ kind: "error", message: "Couldn't reach Mynt." }} what="Regulated firms" />)).toContain("Couldn&#x27;t reach Mynt.")
   })
 })
 
 describe("each action sheet posts to its route", () => {
-  it("Register firm", async () => {
+  it("Register regulated firm", async () => {
     const { f, calls } = fetcher()
     render(<RegisterFirmSheet open onClose={() => undefined} onDone={() => undefined} fetcher={f} />)
     type("[data-firm-name]", "Acme Trust")
     type("[data-firm-lei]", "5493001KJTIIGC8Y1R12")
+    expect(document.querySelector('[data-admin-sheet="register-firm"]')!.textContent).toContain("Register regulated firm")
+    expect(document.querySelector("[data-register-firm-submit]")!.textContent).toBe("Register regulated firm")
     await act(async () => void fireEvent.submit(document.querySelector("[data-register-firm-form]")!))
     expect(calls).toEqual([{ url: "/api/admin/firms", body: { name: "Acme Trust", incorporation: { country: "us" }, regions: ["US"], identifiers: [{ scheme: "lei", value: "5493001KJTIIGC8Y1R12" }] } }])
     expect(document.querySelector("[data-sheet-result]")?.textContent).toBe("Done by Mynt.")
