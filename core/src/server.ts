@@ -46,6 +46,8 @@ import { registerLicenseProviderTools, registerSponsorshipBuilderTools } from ".
 import { registerAppAgreementTools } from "./app-agreements.js";
 import { registerRiskRegisterTools } from "./risk-register.js";
 import { registerRiskModelTools } from "./risk-models.js";
+import { registerRiskDetailTools } from "./risk-detail.js";
+import { registerRiskGradingTools } from "./risk-grading.js";
 import { registerAgreementEsignTools } from "./agreement-esign.js";
 import { registerEsignAdminTools, type EsignSettings } from "./esign-settings.js";
 import { registerAgreementAuditTools } from "./agreement-audits.js";
@@ -231,6 +233,10 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
   // A risk register for apps and financial products: kept by the app's workspace or the product's firm, read by its sponsors (risk-register.ts).
   // Mynt admins keep the platform's own register and read every register's open risks (admin_list_risks).
   if (user && (has("developer") || has("license_provider") || has("admin"))) registerRiskRegisterTools(server, store, user, { builder: has("developer"), sponsor: has("license_provider"), admin: has("admin") });
+  // One risk in full, and what its keeper adds under it: scoring factors, treatment tasks, controls and links (risk-detail.ts).
+  if (user && (has("developer") || has("license_provider") || has("admin"))) registerRiskDetailTools(server, store, user, { builder: has("developer"), sponsor: has("license_provider"), admin: has("admin") });
+  // How every risk is graded: levels, score bands and the residual method, versioned; Mynt admins only (risk-grading.ts).
+  if (user && has("admin")) registerRiskGradingTools(server, store, user);
   // Mynt admins keep the platform's own risk models, per risk area, versioned and validated (risk-models.ts).
   if (user && has("admin")) registerRiskModelTools(server, store, user);
   if (ctx.covenants && user && has("license_provider")) registerCovenantTools(server, store, user, ctx.covenants);

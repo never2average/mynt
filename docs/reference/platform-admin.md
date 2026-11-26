@@ -34,7 +34,7 @@ The platform admin has its own layout, not Studio's.
 | Risk register | `/platform/risk-register` |
 | Platform settings | `/platform/settings` |
 
-An opened workspace, firm, audit entry or risk model is `/platform/<section>/<id>`.
+An opened workspace, firm, audit entry, risk model or risk is `/platform/<section>/<id>`.
 
 There are no Apps, People, Products or Licences sections. People are managed on each firm's and each workspace's Members tab, and a firm's products are its page's Products tab. `/platform/apps`, `/platform/people` and `/platform/products`, and anything under them, are 404s. Licences are reviewed on the Regulated firms section's Licences tab and on each firm's page.
 
@@ -154,14 +154,17 @@ Risk models (`/platform/risk-models`) and Risk register (`/platform/risk-registe
 
 See [Risk areas](risk.md#risk-areas) for the areas and how the older categories map to them.
 
-**Risk models** is one table on each tab, filling the page under the list toolbar: search, Filters, Import (off until Mynt's next update), Export CSV and Add risk model. It lists Mynt's own risk models in the tab's area (`list_risk_models`): name, status in words, owner, version, last validated and next validation due ("overdue" when it has passed).
+**Risk models** is one table on each tab, filling the page under the list toolbar: search, Filters, Import (off until Mynt's next update), Export CSV and Add risk model. It lists Mynt's own risk models in the tab's area (`list_risk_models`): name, status in words, health in words, owner, version, last validated, next validation due ("overdue" when it has passed) and how many risks link to it.
 
+- Health is "Healthy", "Validation overdue", "Last validation failed" or "No validation yet", and "Retired" for a retired model (see [Risk models](risk.md#risk-models)).
 - Add risk model runs `add_risk_model`. Inputs, outputs and thresholds are typed as JSON lists.
-- A row opens `/platform/risk-models/<id>`: its metadata card, then the tabs Definition (four tables: the purpose and method, the inputs, the outputs and the thresholds), Validations and Versions, each a table.
+- A row opens `/platform/risk-models/<id>`. Its metadata card holds the facts Status, Health, Risk area, Owner, Version, Last validated, Next validation due and Linked risks, in that order.
+- Under the card are four tabs, each a table: Definition (four tables: the purpose and method, the inputs, the outputs and the thresholds), Validations, Linked risks and Versions.
+- Linked risks lists the risks on registers that link to the model: Risk (opening the risk's page), Source, Residual, Status and Review by. Its labelled Link risk links one of Mynt's own risks to the model (`link_risk`). An app's or a product's risk is linked by its keeper.
 - The card's actions are Edit model (`update_risk_model`: a change to what the model is makes a new version, and the old one is kept), Record validation (`validate_risk_model`) and Retire model (`retire_risk_model`, with a reason).
 - On the Regulated product risk tab the same table also holds, read-only, the risk models financial products declare in their definitions (`admin_list_product_risk_models`). That tab's table has two more columns: Source ("Mynt model", or "Product: <name> (<firm>)" linked to the firm's Products tab) and Type. Filters can narrow it to Mynt models or Product models. A product's row has no status, owner or validation on Mynt, and says so in words.
 - What Mynt can't answer is one row in the table: "Not available." with why.
-- Models overdue for validation count in `ops_status`.
+- Models overdue for validation count in `ops_status`, and so do models that aren't healthy.
 
 **Risk register** is one table on each tab, filling the page under the list toolbar: search, Filters, Import (off until Mynt's next update), Export CSV and Add risk. There are no sections: every risk item of the area is a row, 25 to a page, and the Source column says where it comes from.
 
@@ -178,16 +181,19 @@ Its columns:
 | Risk | The risk's title. For a signal, what needs attention |
 | Source | As above |
 | Category | The risk's category, or the signal's kind |
-| Score | Likelihood × impact with its level in words. "Not scored" for a signal |
+| Inherent | Likelihood × impact with its level in words. "Not scored" for a signal |
+| Control | How well the risk's controls work, in words, or "Not assessed". "Not scored" for a signal |
+| Residual | The residual score with its level in words; "overridden" when the keeper set it, "same as inherent" while the control isn't assessed. "Not scored" for a signal |
 | Owner | The risk's owner, or "Not assigned". "Mynt" for a signal |
 | Status | In words: the register's status for a risk. "Needs attention", "Clear" or "Not available" for a signal |
 | Review by / When | A risk's review date ("overdue" when it has passed). For a signal, when it was observed, or "Not recorded" |
 | Detail | The mitigation, or the signal's detail. It is cut short in the table and shown in full in the review sheet and the CSV |
-| Action | Review risk on Mynt's rows, Open on an app's or a product's row. None on a signal |
+| Action | Open on every risk's row, and Review risk too on Mynt's rows. None on a signal |
 
-- The rows come in this order: Mynt's risks by score, then apps' and products' by score, then the signals, with what needs attention first.
-- Search covers the risk, its source and its detail. Filters narrow the table by source (Mynt, Apps and products, Signals), by status and by level. Unassigned shows Mynt's own risks with no area yet instead of the tab's rows.
-- Review risk, or a click on one of Mynt's rows, opens the review sheet, which can change the risk's area. Add risk starts on the tab's area; a platform risk always has one.
+- The rows come in this order: Mynt's risks by residual score, highest first, then apps' and products' the same way, then the signals, with what needs attention first.
+- Search covers the risk, its source and its detail. Filters narrow the table by source (Mynt, Apps and products, Signals), by status and by residual level. Unassigned shows Mynt's own risks with no area yet instead of the tab's rows.
+- A click on a risk's row, or its Open, goes to the risk's page, `/platform/risk-register/<id>`: [the risk's detail](risk.md#a-risks-detail). Mynt's own risks are kept there. An app's or a product's risk is read-only there.
+- Review risk stays a labelled button on Mynt's rows. It opens the review sheet, which can change the risk's area. Add risk starts on the tab's area; a platform risk always has one.
 - A signal that is measured and clear is one row with the status "Clear". A signal Mynt doesn't measure is one row with the status "Not available" and the reason in Detail. Neither is ever left out or shown as 0. The same holds for Mynt's register and for the apps' and products' risks when Mynt can't read them.
 - Overdue reviews of platform risks count in `ops_status` with the apps' and products'.
 
@@ -212,7 +218,7 @@ The signals come from `ops_status`, so they show what it reports and no more:
 
 Drifted products are not available until `ops_status` counts them across firms.
 
-The register's routes are `GET /api/admin/risks?area=<area>` and `POST /api/admin/risks`.
+The register's routes are `GET /api/admin/risks?area=<area>` and `POST /api/admin/risks`. One risk's are `GET` and `POST /api/admin/risks/<riskId>`.
 
 ### Search and Ask AI
 
@@ -239,8 +245,8 @@ It calls Mynt as the signed-in admin through these reads only (`ADMIN_ASK_TOOLS`
 | Regulated firms | `list_entities`, `list_license_reviews`, `get_regulated_firm_onboarding` |
 | Vendors | `list_service_types`, `list_vendor_offerings`, `get_vendor_onboarding` |
 | Audit trail | `audit_log` |
-| Risks | `admin_list_risks`, `list_risks` (Mynt's own register), `list_risk_models`, `admin_list_product_risk_models` |
-| Settings | `get_platform_settings`, `get_esign_settings`, `list_enclave_releases` |
+| Risks | `admin_list_risks`, `list_risks` (Mynt's own register), `get_risk`, `list_risk_models`, `admin_list_product_risk_models` |
+| Settings | `get_platform_settings`, `get_risk_grading`, `get_esign_settings`, `list_enclave_releases` |
 
 ### What the platform admin reads
 
@@ -583,7 +589,7 @@ Sending providers for email, WhatsApp and voice plug into `ChannelSender`. Until
 
 ## Platform settings
 
-The Platform settings section of the platform admin holds two things.
+The Platform settings section of the platform admin holds three things.
 
 **E-signature.** A Mynt admin sets up the e-signature service here: its key, its webhook and test mode. See [E-signature](agreements.md#e-signature).
 
@@ -600,6 +606,21 @@ The Platform settings section of the platform admin holds two things.
 - `FREESTYLE_USD_PER_HOUR`
 
 Each shows its value, its default, and whether the server's environment sets it. Only these keys are ever read. They are changed on the server by the operator, never from Studio. See [Settings by name](operations.md#settings-by-name).
+
+**Risk grading.** How every risk on every register is graded (see [Risk grading](risk.md#risk-grading)). The section is four tables:
+
+| Table | What it shows |
+| --- | --- |
+| Likelihood × impact | The heat map: a 5×5 table, likelihood down the side and impact across. Each cell shows its score and its level in words, and is coloured by level. The level is always written in the cell, so colour is never the only signal |
+| Levels and bands | Each level's name, and its inherent and residual score bands |
+| Residual method | For reduce, each control step's share and a worked example. For matrix, the residual level for each inherent level and control step. The method is also stated in words |
+| Version history | Every version kept, newest first: when, who, why, how many residual scores it moved, and a labelled Restore this version |
+
+- **Edit grading** opens a sheet with the level names, the end of each band, the residual method and its numbers, and why the grading changes. The editor takes where each band ends, so the bands always stay contiguous and cover 1 to 25.
+- **Restore this version** opens a sheet that asks why, then brings that version's content back.
+- Either one makes a new version (`set_risk_grading`). Mynt then derives again every residual score that isn't overridden, and the sheet says how many moved.
+
+Its routes are `GET` and `POST /api/admin/risk-grading`.
 
 ## Set up a region's regulatory model
 

@@ -198,8 +198,12 @@ describe("addresses", () => {
     // Security & risk moved: its old address isn't a section any more (the proxy sends it on to the Risk register).
     expect(admin.platformRouteOf("/platform/risks")).toBeNull()
     // Apps, People and Products are no longer sections: their pages and details aren't platform admin pages (404).
-    for (const p of ["/platform/apps", `/platform/apps/${FIRM}`, "/platform/people", `/platform/people/${FIRM}`, "/platform/products", `/platform/products/${FIRM}`, `/platform/risks/${FIRM}`, `/platform/risk-register/${FIRM}`])
+    for (const p of ["/platform/apps", `/platform/apps/${FIRM}`, "/platform/people", `/platform/people/${FIRM}`, "/platform/products", `/platform/products/${FIRM}`, `/platform/risks/${FIRM}`])
       expect(admin.platformRouteOf(p), p).toBeNull()
+    // A risk on the Risk register has its own page.
+    expect(admin.platformRouteOf(`/platform/risk-register/${FIRM}`)).toEqual({ tab: "risk-register", id: FIRM })
+    expect(admin.adminHref("risk-register", FIRM)).toBe(`/platform/risk-register/${FIRM}`)
+    expect(admin.platformRouteOf("/platform/risk-register/..%2Fx")).toBeNull()
     for (const p of ["/platform/nope", "/platform/overview", "/platform/firms/a%2Fb", `/platform/firms/${FIRM}/more`, "/platforms", "/admin"]) expect(admin.platformRouteOf(p), p).toBeNull()
     expect(admin.platformTitle("/platform")).toBe("Mynt platform admin")
     expect(admin.platformTitle(`/platform/firms/${FIRM}`)).toBe("Regulated firms")

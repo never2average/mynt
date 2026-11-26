@@ -2,10 +2,13 @@
 
 // Admin → Risk models (/platform/risk-models; lib/risk-models.ts, /api/admin/risk-models), one tab per risk area
 // (components/risk-area-tabs.tsx). Each tab is ONE table filling the page, under the list toolbar: Mynt's own risk
-// models in that area (name, status in words, owner, version, last validated, next validation due with "overdue" in
-// words) with a labelled Add risk model; a row opens /platform/risk-models/<id>: its metadata card with Edit model (a
-// change to what it is is a new version), Record validation and Retire model, each a labelled button opening its
-// sheet, then the tabs Definition (method, inputs, outputs and thresholds, each a table), Validations and Versions.
+// models in that area (name, status in words, health in words: Healthy, Validation overdue, Last validation failed or
+// No validation yet; owner, version, last validated, next validation due with "overdue" in words, and how many risks
+// link to it) with a labelled Add risk model; a row opens /platform/risk-models/<id>: its metadata card (the facts
+// Status · Health · Risk area · Owner · Version · Last validated · Next validation due · Linked risks) with Edit model
+// (a change to what it is is a new version), Record validation and Retire model, each a labelled button opening its
+// sheet, then the tabs Definition (method, inputs, outputs and thresholds, each a table), Validations, Linked risks
+// (the risks on registers that link to it, each opening its page, with a labelled Link risk) and Versions.
 // On the Regulated product risk tab the same table also holds, read-only, the risk models financial products declare
 // in their own definitions, with a Source column ("Mynt model" / "Product: <name> (<firm>)", linked to the firm's
 // Products tab) and a Type column. What Mynt can't answer is one table row, "Not available." with why.
@@ -13,7 +16,7 @@
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { Archive, ClipboardCheck, ExternalLink, Pencil, Plus } from "lucide-react"
+import { Archive, ClipboardCheck, ExternalLink, Link2, Pencil, Plus } from "lucide-react"
 
 import { AdminDetail, AdminList, AdminNotReady, AdminSheet, AdminTable, Field, fieldClass, useAdminAction, useAdminData } from "@/components/admin-kit"
 import { downloadCsv } from "@/components/licences-view"
@@ -25,7 +28,12 @@ import { adminHref, csvOf } from "@/lib/admin"
 import { RISK_AREA_LABELS, RISK_AREAS, type RiskArea } from "@/lib/risk-register"
 import {
   dueWords,
+  healthWords,
   lastValidatedWords,
+  LINKED_RISK_HEAD,
+  linkedRiskCells,
+  linkedWords,
+  modelFacts,
   listOf,
   listText,
   MODEL_OUTCOME_LABELS,
@@ -45,7 +53,8 @@ import {
 
 type Owner = { userId: string; name: string }
 export type RiskModelsData = { area: RiskArea; models: ModelList; owners: Owner[]; productModels: ProductRiskModels | null }
-export type RiskModelDetailData = { detail: ModelDetail; owners: Owner[] }
+// riskChoices: Mynt's own risks Link risk can pick (null: this Mynt can't list them).
+export type RiskModelDetailData = { detail: ModelDetail; owners: Owner[]; riskChoices?: { id: string; title: string }[] | null }
 const routeOf = (id?: string) => (id ? `/api/admin/risk-models/${encodeURIComponent(id)}` : "/api/admin/risk-models")
 
 // ---- the sheets ----
@@ -327,11 +336,49 @@ export function RetireRiskModelSheet({ model, open, onClose, onDone, fetcher }: 
   )
 }
 
+export function LinkRiskSheet({ model, choices, open, onClose, onDone, fetcher }: { model: RiskModel; choices: { id: string; title: string }[]; open: boolean; onClose: () => void; onDone: () => void; fetcher?: typeof fetch }) {
+  const [risk, setRisk] = useState("")
+  const [note, setNote] = useState("")
+  const action = useAdminAction(fetcher)
+  useEffect(() => {
+    if (open) action.reset()
+  }, [open])
+  return (
+    <AdminSheet open={open} title="Link risk" description="Link one of Mynt's own risks to this model: the risk it measures, or one about the model itself. The link shows on both, and in the risk's history." onClose={onClose} error={action.error} result={action.result} id="link-risk">
+      {action.result === null && (
+        <form
+          className="flex flex-col gap-3"
+          data-link-risk-form={model.id}
+          onSubmit={(e) => {
+            e.preventDefault()
+            void action.run(routeOf(model.id), { action: "link_risk", risk_id: risk, note: note.trim() }).then((res) => res?.ok === true && onDone())
+          }}
+        >
+          <Field label="Risk" hint={choices.length ? "Mynt's own register. An app's or a product's risk is linked by its keeper." : "Every risk on Mynt's own register is already linked, or it has none yet."}>
+            <select className={fieldClass} value={risk} onChange={(e) => setRisk(e.target.value)} required data-model-field="risk">
+              <option value="">Pick a risk</option>
+              {choices.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.title}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Note (optional)">
+            <textarea className={`${fieldClass} min-h-16`} value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} data-model-field="link-note" />
+          </Field>
+          <Submit busy={action.busy} disabled={!risk} label="Link risk" name="link-risk" />
+        </form>
+      )}
+    </AdminSheet>
+  )
+}
+
 // ---- the list (one area's tab): ONE table ----
 
-export const MODEL_HEAD = ["Model", "Status", "Owner", "Version", "Last validated", "Next validation due", "Action"] as const
+export const MODEL_HEAD = ["Model", "Status", "Health", "Owner", "Version", "Last validated", "Next validation due", "Linked risks", "Action"] as const
 // The Regulated product risk tab's table also holds the models financial products declare: it says each row's source and type.
-export const MODEL_HEAD_WITH_PRODUCTS = ["Model", "Source", "Type", "Status", "Owner", "Version", "Last validated", "Next validation due", "Action"] as const
+export const MODEL_HEAD_WITH_PRODUCTS = ["Model", "Source", "Type", "Status", "Health", "Owner", "Version", "Last validated", "Next validation due", "Linked risks", "Action"] as const
 export const MODEL_SOURCE_LABELS = { mynt: "Mynt models", product: "Product models" } as const
 const NOT_AVAILABLE = "Not available"
 const NOT_RECORDED = "Not recorded"
@@ -344,6 +391,8 @@ type ModelRow = {
   type: string
   status: string // a Mynt model's status; "" for a product's model, which has none on Mynt
   statusWords: string
+  health: string // in words; "Not assessed" for a product's own model, which Mynt doesn't validate
+  linked: string // how many risks link to it, in words
   owner: string
   version: string
   lastValidated: string
@@ -358,9 +407,9 @@ type ModelRow = {
 /** A tab's rows: Mynt's own models, then (Regulated product risk) the models products declare, read-only. A part Mynt
  * can't answer is one row, "Not available." with why: never left out, never a 0. */
 function modelRows(data: RiskModelsData): ModelRow[] {
-  const none = (key: string, source: ModelRow["source"], sourceWords: string, reason: string): ModelRow => ({ key, source, sourceWords, name: `Not available. ${reason}`, type: NOT_AVAILABLE, status: "", statusWords: NOT_AVAILABLE, owner: NOT_AVAILABLE, version: NOT_AVAILABLE, lastValidated: NOT_AVAILABLE, due: NOT_AVAILABLE, overdue: false, model: null, href: null, search: reason, missing: true })
+  const none = (key: string, source: ModelRow["source"], sourceWords: string, reason: string): ModelRow => ({ key, source, sourceWords, name: `Not available. ${reason}`, type: NOT_AVAILABLE, status: "", statusWords: NOT_AVAILABLE, health: NOT_AVAILABLE, linked: NOT_AVAILABLE, owner: NOT_AVAILABLE, version: NOT_AVAILABLE, lastValidated: NOT_AVAILABLE, due: NOT_AVAILABLE, overdue: false, model: null, href: null, search: reason, missing: true })
   const mynt: ModelRow[] = data.models.available
-    ? data.models.models.map((m) => ({ key: m.id, source: "mynt", sourceWords: "Mynt model", name: m.name, type: "Not stated", status: m.status, statusWords: statusWords(m), owner: ownerWords(m.owner), version: `Version ${m.version}`, lastValidated: lastValidatedWords(m), due: dueWords(m), overdue: m.overdue, model: m, href: null, search: m.purpose }))
+    ? data.models.models.map((m) => ({ key: m.id, source: "mynt", sourceWords: "Mynt model", name: m.name, type: "Not stated", status: m.status, statusWords: statusWords(m), health: healthWords(m), linked: linkedWords(m.linkedRisks), owner: ownerWords(m.owner), version: `Version ${m.version}`, lastValidated: lastValidatedWords(m), due: dueWords(m), overdue: m.overdue, model: m, href: null, search: m.purpose }))
     : [none("mynt:none", "mynt", "Mynt model", data.models.reason)]
   const products: ModelRow[] = !data.productModels
     ? []
@@ -373,6 +422,8 @@ function modelRows(data: RiskModelsData): ModelRow[] {
           type: r.type,
           status: "",
           statusWords: "Declared in the product's definition",
+          health: "Not assessed: the product's firm validates it",
+          linked: "Not counted",
           owner: r.firmName ?? "Mynt's reference product",
           version: r.version ?? "Not stated",
           lastValidated: NOT_RECORDED,
@@ -399,6 +450,7 @@ export function RiskModelsAreaView({ data, onOpen = () => undefined, onChanged =
   const paged = usePaged(rows)
   const label = RISK_AREA_LABELS[data.area].toLowerCase()
   const overdue = data.models.available ? data.models.counts.overdue : 0
+  const unhealthy = data.models.available ? data.models.models.filter((m) => m.health !== "healthy" && m.health !== "retired").length : 0
   const close = () => {
     setAdding(false)
     if (dirty) onChanged()
@@ -429,6 +481,11 @@ export function RiskModelsAreaView({ data, onOpen = () => undefined, onChanged =
     due: (
       <span key="d" data-overdue={r.overdue ? "true" : undefined}>
         {r.due}
+      </span>
+    ),
+    health: (
+      <span key="h" className="block min-w-28 whitespace-normal" data-model-health={r.model?.health}>
+        {r.health}
       </span>
     ),
     action: r.model ? (
@@ -467,13 +524,13 @@ export function RiskModelsAreaView({ data, onOpen = () => undefined, onChanged =
           downloadCsv(
             `risk-models-${data.area}.csv`,
             csvOf(
-              ["Model", ...(withProducts ? ["Source", "Type"] : []), "Area", "Status", "Owner", "Version", "Last validated", "Next validation due"],
-              rows.map((r) => [r.name, ...(withProducts ? [r.sourceWords, r.type] : []), data.area, r.model ? r.model.status : r.statusWords, r.owner, r.model ? r.model.version : r.version, r.lastValidated, r.due]),
+              ["Model", ...(withProducts ? ["Source", "Type"] : []), "Area", "Status", "Health", "Owner", "Version", "Last validated", "Next validation due", "Linked risks"],
+              rows.map((r) => [r.name, ...(withProducts ? [r.sourceWords, r.type] : []), data.area, r.model ? r.model.status : r.statusWords, r.health, r.owner, r.model ? r.model.version : r.version, r.lastValidated, r.due, r.model ? (r.model.linkedRisks ?? r.linked) : r.linked]),
             ),
           )
         }
         exportDisabled={!rows.some((r) => !r.missing)}
-        note={[overdue ? `${overdue === 1 ? "1 model is" : `${overdue} models are`} overdue for validation.` : null, withProducts ? "Product models are the ones financial products declare in their own definitions. Read-only: each product's firm keeps them." : null].filter(Boolean).join(" ") || null}
+        note={[overdue ? `${overdue === 1 ? "1 model is" : `${overdue} models are`} overdue for validation.` : null, unhealthy ? `${unhealthy === 1 ? "1 model isn't" : `${unhealthy} models aren't`} healthy.` : null, withProducts ? "Product models are the ones financial products declare in their own definitions. Read-only: each product's firm keeps them." : null].filter(Boolean).join(" ") || null}
         cta={
           data.models.available ? (
             <Button onClick={() => setAdding(true)} data-add-risk-model>
@@ -494,7 +551,7 @@ export function RiskModelsAreaView({ data, onOpen = () => undefined, onChanged =
           opens={paged.shown.map((r) => r.model !== null)}
           rows={paged.shown.map((r) => {
             const c = cell(r)
-            return [c.name, ...(withProducts ? [c.source, r.type] : []), c.status, r.owner, r.version, r.lastValidated, c.due, c.action]
+            return [c.name, ...(withProducts ? [c.source, r.type] : []), c.status, c.health, r.owner, r.version, r.lastValidated, c.due, r.linked, c.action]
           })}
           empty={all.length ? "No models match this search and these filters." : `No ${label} models yet. Add the first one.`}
         />
@@ -515,9 +572,9 @@ export function RiskModelsView({ area, onArea, body }: { area: RiskArea; onArea:
 
 // ---- one model's page ----
 
-export const MODEL_DETAIL_TABS = ["definition", "validations", "versions"] as const
+export const MODEL_DETAIL_TABS = ["definition", "validations", "linked", "versions"] as const
 export type ModelDetailTab = (typeof MODEL_DETAIL_TABS)[number]
-const DETAIL_TAB_LABELS: Record<ModelDetailTab, string> = { definition: "Definition", validations: "Validations", versions: "Versions" }
+const DETAIL_TAB_LABELS: Record<ModelDetailTab, string> = { definition: "Definition", validations: "Validations", linked: "Linked risks", versions: "Versions" }
 const dayOf = (iso: string | null) => (iso ? iso.slice(0, 10) : "—")
 
 export function RiskModelDetailView({
@@ -532,12 +589,12 @@ export function RiskModelDetailView({
   onBack?: () => void
   onChanged?: () => void
   initialTab?: ModelDetailTab
-  sheet?: "edit" | "validate" | "retire" | null
+  sheet?: "edit" | "validate" | "retire" | "link" | null
   fetcher?: typeof fetch
 }) {
-  const { model, versions, validations } = data.detail
+  const { model, versions, validations, linked } = data.detail
   const [tab, setTab] = useState<ModelDetailTab>(initialTab)
-  const [open, setOpen] = useState<"edit" | "validate" | "retire" | null>(sheet)
+  const [open, setOpen] = useState<"edit" | "validate" | "retire" | "link" | null>(sheet)
   const [dirty, setDirty] = useState(false)
   const close = () => {
     setOpen(null)
@@ -553,13 +610,12 @@ export function RiskModelDetailView({
         title={model.name}
         subtitle={model.purpose}
         fields={[
-          ["Risk area", RISK_AREA_LABELS[model.riskArea]],
-          ["Status", <span key="s" data-model-status={model.status}>{statusWords(model)}</span>],
-          ["Version", `Version ${model.version}`],
-          ["Owner", ownerWords(model.owner)],
-          ["Last validated", lastValidatedWords(model)],
-          ["Validated by", model.validatedBy ? ownerWords(model.validatedBy) : "Never validated"],
-          ["Next validation due", <span key="d" data-overdue={model.overdue ? "true" : undefined}>{dueWords(model)}</span>],
+          ...modelFacts(model, linked).map(([label, value]): [string, React.ReactNode] => [
+            label,
+            <span key={label} className="block whitespace-normal" title={value} data-model-fact={label} data-model-status={label === "Status" ? model.status : undefined} data-model-health={label === "Health" ? model.health : undefined} data-overdue={label === "Next validation due" && model.overdue ? "true" : undefined}>
+              {value}
+            </span>,
+          ]),
           ...(model.retiredReason ? [["Why it was retired", model.retiredReason] as [string, React.ReactNode]] : []),
         ]}
         actions={
@@ -625,6 +681,34 @@ export function RiskModelDetailView({
             rows={validations.map((v) => [dayOf(v.validatedAt), `Version ${v.version}`, MODEL_OUTCOME_LABELS[v.outcome], ownerWords(v.validatedBy), <span key="n" className="whitespace-normal">{v.notes}</span>, v.nextValidationDue ?? "—"])}
             empty="Never validated. Record the first validation."
           />
+        ) : tab === "linked" ? (
+          <div data-model-linked>
+            {live && data.riskChoices && (
+              <div className="flex justify-end border-b p-2">
+                <Button size="sm" onClick={() => setOpen("link")} data-link-risk>
+                  <Link2 />
+                  Link risk
+                </Button>
+              </div>
+            )}
+            <AdminTable
+              head={LINKED_RISK_HEAD}
+              rowKeys={(linked ?? []).map((l) => l.linkId)}
+              rows={(linked ?? []).map((l) => [
+                <Link key="r" href={adminHref("risk-register", l.risk.id)} className="block min-w-40 whitespace-normal underline underline-offset-2" data-linked-risk={l.risk.id}>
+                  {l.risk.title}
+                  {l.note && <span className="block text-xs font-normal text-muted-foreground no-underline">{l.note}</span>}
+                </Link>,
+                ...linkedRiskCells(l).map((c, i) => (
+                  <span key={i} className={i === 1 ? "block min-w-28 tabular-nums whitespace-normal" : undefined} data-overdue={i === 3 && l.risk.overdue ? "true" : undefined}>
+                    {c}
+                  </span>
+                )),
+              ])}
+              empty="No risks link to this model yet."
+              unavailable={linked === null ? "Linked risks come with Mynt's next update." : null}
+            />
+          </div>
         ) : (
           <AdminTable
             head={["Version", "Name", "Made", "By", "Why it changed"]}
@@ -639,6 +723,7 @@ export function RiskModelDetailView({
           <EditRiskModelSheet model={model} owners={data.owners} open={open === "edit"} onClose={close} onDone={() => setDirty(true)} fetcher={fetcher} />
           <RecordValidationSheet model={model} open={open === "validate"} onClose={close} onDone={() => setDirty(true)} fetcher={fetcher} />
           <RetireRiskModelSheet model={model} open={open === "retire"} onClose={close} onDone={() => setDirty(true)} fetcher={fetcher} />
+          <LinkRiskSheet model={model} choices={data.riskChoices ?? []} open={open === "link"} onClose={close} onDone={() => setDirty(true)} fetcher={fetcher} />
         </>
       )}
     </>
@@ -649,7 +734,7 @@ export function RiskModelDetailView({
 
 function ModelPage({ id, onBack }: { id: string; onBack: () => void }) {
   const router = useRouter()
-  const pick = useCallback((b: Record<string, unknown>) => (b.detail ? ({ detail: b.detail, owners: Array.isArray(b.owners) ? b.owners : [] } as RiskModelDetailData) : undefined), [])
+  const pick = useCallback((b: Record<string, unknown>) => (b.detail ? ({ detail: b.detail, owners: Array.isArray(b.owners) ? b.owners : [], riskChoices: Array.isArray(b.riskChoices) ? b.riskChoices : null } as RiskModelDetailData) : undefined), [])
   const { state, reload } = useAdminData(routeOf(id), pick)
   // Back goes to the model's own area's tab.
   return state.kind === "ready" ? (

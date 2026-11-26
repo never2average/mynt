@@ -284,3 +284,129 @@ describe("the routes", () => {
     expect(parseStudioCall("list_risks", { subject_type: "product", subject_id: PRODUCT, overdue_only: true })).toHaveProperty("tool");
   });
 });
+
+describe("three-step scoring in an app's and a product's register", () => {
+  const A = "66666666-6666-4666-8666-666666666666";
+  const B = "77777777-7777-4777-8777-777777777777";
+  const C = "88888888-8888-4888-8888-888888888888";
+  // As Mynt sends them now: each risk with its inherent, control and residual.
+  const SCORED = {
+    ...LIST,
+    risks: [
+      { id: A, title: "Card testing", category: "fraud", likelihood: 5, impact: 4, owner: null, mitigation: null, status: "open", review_by: null, overdue: false, inherent: { likelihood: 5, impact: 4, score: 20, level: "critical", level_name: "Critical" }, control: { effectiveness: "strong", words: "Strong", note: "Velocity limits" }, residual: { score: 5, level: "medium", level_name: "Medium", assessed: true, overridden: false, likelihood: null, impact: null, override: null } },
+      { id: B, title: "Vendor outage", category: "vendor", likelihood: 3, impact: 3, owner: null, mitigation: null, status: "open", review_by: null, overdue: false, inherent: { likelihood: 3, impact: 3, score: 9, level: "medium", level_name: "Medium" }, control: { effectiveness: null, words: "Not assessed", note: null }, residual: { score: 9, level: "medium", level_name: "Medium", assessed: false, overridden: false, likelihood: null, impact: null, override: null } },
+      { id: C, title: "Key leak", category: "security", likelihood: 2, impact: 5, owner: null, mitigation: null, status: "open", review_by: null, overdue: false, inherent: { likelihood: 2, impact: 5, score: 10, level: "high", level_name: "High" }, control: { effectiveness: "weak", words: "Weak", note: null }, residual: { score: 2, level: "low", level_name: "Low", assessed: true, overridden: true, likelihood: 1, impact: 2, override: { by: OWNER, at: "2026-11-01T00:00:00.000Z", why: "Keys are in the vault" } } },
+    ],
+  };
+  const scored = registerFrom(SCORED, [])!;
+  const table = () => ({
+    head: [...document.querySelectorAll("[data-risk-register] thead th")].map((th) => th.textContent),
+    rows: [...document.querySelectorAll("[data-risk-register] tbody tr")].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent!.trim())),
+  });
+
+  it("the app's table: Inherent, Control and Residual, each level in words with its number, highest residual first", () => {
+    render(<risk.RiskRegisterSection subject={{ type: "app", id: APP }} data={scored} />);
+    const t = table();
+    expect(t.head).toEqual(["Risk", "Category", "Inherent", "Control", "Residual", "Owner", "Status", "Review by", "Action"]);
+    expect(t.rows.map((r) => [r[0], r[2], r[3], r[4]])).toEqual([
+      // Not assessed: the residual is the inherent score, said in words; never a blank, never a 0.
+      ["Vendor outage", "3 × 3 = 9 (Medium)", "Not assessed", "9 (Medium), same as inherent: control not assessed"],
+      ["Card testing", "5 × 4 = 20 (Critical)", "Strong", "5 (Medium)"],
+      ["Key leak", "2 × 5 = 10 (High)", "Weak", "2 (Low), overridden"],
+    ]);
+    expect([...document.querySelectorAll("[data-risk-residual]")].map((c) => [c.getAttribute("data-risk-residual"), c.getAttribute("data-residual-level")])).toEqual([["9", "medium"], ["5", "medium"], ["2", "low"]]);
+    expect(t.rows.map((r) => r[8])).toEqual(["Open Review risk", "Open Review risk", "Open Review risk"]);
+  });
+
+  it("the product's table has the same three columns; a reader gets Open, not Review risk", () => {
+    render(<ProductTabBody productId={PRODUCT} data={{ available: true, sections: [], register: { ...scored, canManage: false } }} />);
+    const t = table();
+    expect(t.head).toEqual(["Risk", "Category", "Inherent", "Control", "Residual", "Owner", "Status", "Review by", "Action"]);
+    expect(t.rows.map((r) => [r[2], r[3], r[4], r[8]])).toEqual([
+      ["3 × 3 = 9 (Medium)", "Not assessed", "9 (Medium), same as inherent: control not assessed", "Open"],
+      ["5 × 4 = 20 (Critical)", "Strong", "5 (Medium)", "Open"],
+      ["2 × 5 = 10 (High)", "Weak", "2 (Low), overridden", "Open"],
+    ]);
+  });
+
+  it("an older Mynt's risk (likelihood and impact only) is graded here: control not assessed, residual the same as inherent", () => {
+    const old = registerFrom(LIST, [])!;
+    expect(old.risks.map((r) => [r.title, r.inherent.score, r.inherent.levelName, r.control.effectiveness, r.residual.score, r.residual.assessed])).toEqual([
+      ["Session tokens could leak in logs", 12, "High", null, 12, false],
+      ["Card testing on sign-up", 2, "Low", null, 2, false],
+    ]);
+  });
+
+  it("a row opens the risk's detail in a sheet, by a click or its labelled Open, from the risk's own route", async () => {
+    const fetched: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => (fetched.push(url), new Response(JSON.stringify({ error: "unsupported", message: "A risk's detail comes with Mynt's next update." }), { status: 501 }))));
+    render(<risk.RiskRegisterSection subject={{ type: "app", id: APP }} data={scored} />);
+    expect(document.querySelector("[data-risk-detail-sheet]")).toBeNull();
+    await act(async () => void fireEvent.click(document.querySelector(`[data-open-risk="${A}"]`)!));
+    expect(document.querySelector(`[data-risk-detail-sheet="${A}"]`)).not.toBeNull();
+    expect(fetched).toEqual([`/api/apps/${APP}/risks/${A}`]);
+    cleanup();
+    fetched.length = 0;
+    render(<risk.RiskRegisterSection subject={{ type: "product", id: PRODUCT }} data={scored} />);
+    await act(async () => void fireEvent.click(document.querySelector(`[data-risk="${B}"]`)!));
+    expect(document.querySelector(`[data-risk-detail-sheet="${B}"]`)).not.toBeNull();
+    expect(fetched).toEqual([`/api/products/${PRODUCT}/risks/${B}`]);
+    // Review risk is its own labelled action: it opens its sheet, not the detail.
+    cleanup();
+    fetched.length = 0;
+    render(<risk.RiskRegisterSection subject={{ type: "app", id: APP }} data={scored} />);
+    await act(async () => void fireEvent.click(document.querySelector(`[data-review-risk="${A}"]`)!));
+    expect(document.querySelector("[data-review-risk-sheet]")).not.toBeNull();
+    expect(fetched).toEqual([]);
+    vi.unstubAllGlobals();
+  });
+
+  it("Review risk sets the control's effectiveness, and overrides or re-derives the residual, sending only what changed", () => {
+    const sent: unknown[] = [];
+    const view = render(<risk.ReviewRiskView risk={scored.risks.find((r) => r.id === B)!} owners={[]} onSubmit={(c) => sent.push(c)} />);
+    const field = (name: string) => document.querySelector(`[data-risk-field="${name}"]`) as HTMLSelectElement | HTMLTextAreaElement;
+    expect([...field("control_effectiveness").querySelectorAll("option")].map((o) => o.textContent)).toEqual(["Not assessed", "None", "Weak", "Partial", "Strong"]);
+    expect((field("residual_mode") as HTMLSelectElement).value).toBe("derived");
+    fireEvent.change(field("control_effectiveness"), { target: { value: "partial" } });
+    fireEvent.change(field("control_note"), { target: { value: "A second vendor is on standby" } });
+    fireEvent.submit(document.querySelector(`[data-review-risk-form="${B}"]`)!);
+    expect(sent).toEqual([{ action: "review", risk_id: B, control_effectiveness: "partial", control_note: "A second vendor is on standby" }]);
+    // An override: the keeper's own residual likelihood and impact, with why (needed).
+    fireEvent.change(field("residual_mode"), { target: { value: "override" } });
+    fireEvent.change(field("residual_likelihood"), { target: { value: "1" } });
+    fireEvent.change(field("residual_impact"), { target: { value: "3" } });
+    expect((document.querySelector('[data-risk-submit="review"]') as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(field("residual_override_reason"), { target: { value: "Failover is tested monthly" } });
+    fireEvent.submit(document.querySelector(`[data-review-risk-form="${B}"]`)!);
+    expect(sent[1]).toEqual({ action: "review", risk_id: B, control_effectiveness: "partial", control_note: "A second vendor is on standby", residual_likelihood: 1, residual_impact: 3, residual_override_reason: "Failover is tested monthly" });
+    view.unmount();
+    // A risk already overridden: choosing the derived score again drops the override.
+    sent.length = 0;
+    render(<risk.ReviewRiskView risk={scored.risks.find((r) => r.id === C)!} owners={[]} onSubmit={(c) => sent.push(c)} />);
+    expect((field("residual_mode") as HTMLSelectElement).value).toBe("override");
+    expect((field("residual_override_reason") as HTMLTextAreaElement).value).toBe("Keys are in the vault");
+    fireEvent.change(field("residual_mode"), { target: { value: "derived" } });
+    fireEvent.submit(document.querySelector(`[data-review-risk-form="${C}"]`)!);
+    expect(sent).toEqual([{ action: "review", risk_id: C, clear_residual_override: true }]);
+  });
+
+  it("the routes take the new review fields strictly, and the allow-list the risk's own tools", async () => {
+    const post = (body: unknown) => appRisks.POST(new Request(`https://studio.example.test/api/apps/${APP}/risks`, { method: "POST", body: JSON.stringify(body) }), { params: Promise.resolve({ appId: APP }) });
+    expect((await post({ action: "review", risk_id: RISK, control_effectiveness: "strong", control_note: "" })).status).toBe(200);
+    expect(fake.calls.at(-1)).toEqual({ name: "update_risk", args: { risk_id: RISK, control_effectiveness: "strong" } });
+    expect((await post({ action: "review", risk_id: RISK, residual_likelihood: 1, residual_impact: 2, residual_override_reason: "Measured losses are small" })).status).toBe(200);
+    expect((await post({ action: "review", risk_id: RISK, control_effectiveness: "excellent" })).status).toBe(400);
+    expect((await post({ action: "review", risk_id: RISK, residual_likelihood: 6 })).status).toBe(400);
+    expect((await post({ action: "review", risk_id: RISK, clear_residual_override: false })).status).toBe(400);
+    expect(parseStudioCall("get_risk", { risk_id: RISK })).toHaveProperty("tool");
+    expect(parseStudioCall("get_risk", { risk_id: RISK, subject_type: "platform" })).toHaveProperty("error");
+    expect(parseStudioCall("add_risk_factor", { risk_id: RISK, kind: "impact", name: "Losses", score: 4, source: "https://example.test/x" })).toHaveProperty("tool");
+    expect(parseStudioCall("add_risk_factor", { risk_id: RISK, kind: "impact", name: "Losses", score: 6 })).toHaveProperty("error");
+    expect(parseStudioCall("add_risk_factor", { risk_id: RISK, kind: "impact", name: "Losses", score: 4, source: "javascript:alert(1)" })).toHaveProperty("error");
+    expect(parseStudioCall("link_risk", { risk_id: RISK, target_type: "app", target_id: APP })).toHaveProperty("tool");
+    expect(parseStudioCall("link_risk", { risk_id: RISK, target_type: "workspace", target_id: APP })).toHaveProperty("error");
+    expect(parseStudioCall("update_risk_treatment", { risk_id: RISK, treatment_id: RISK, status: "finished" })).toHaveProperty("error");
+    // The platform's grading isn't a studio tool: only Mynt's admins change it, from the platform admin.
+    for (const t of ["get_risk_grading", "set_risk_grading"]) expect(parseStudioCall(t, {})).toHaveProperty("error");
+  });
+});

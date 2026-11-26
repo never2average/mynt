@@ -15,8 +15,8 @@
     {
       "id": "apps",
       "title": "Apps & developers",
-      "summary": "Register apps, read a product's developer contract, make an app's agreements with the firms behind its products and run their oversight audits, keep apps' and products' risk registers, and start from app kinds and ideas.",
-      "tools": 56
+      "summary": "Register apps, read a product's developer contract, make an app's agreements with the firms behind its products and run their oversight audits, keep apps' and products' risk registers (each risk with its scoring factors, treatment tasks, controls and links), and start from app kinds and ideas.",
+      "tools": 67
     },
     {
       "id": "builds",
@@ -88,7 +88,7 @@
       "id": "admin",
       "title": "Admin & governance",
       "summary": "Regions and the regulatory model, categories, take rates, invitations, oversight and operations.",
-      "tools": 51
+      "tools": 53
     }
   ],
   "roles": [
@@ -122,7 +122,7 @@
     {
       "role": "developer",
       "summary": "the builder role, under its other name: builds apps (keys, webhooks, SDKs, journeys, GTM campaigns) with coding agents Mynt verifies and hosts, and composes and publishes products too. The same tools as innovator. Also a consumer.",
-      "tools": 250,
+      "tools": 261,
       "get_started": [
         {
           "tool": "list_buildable_products",
@@ -149,7 +149,7 @@
     {
       "role": "innovator",
       "summary": "the builder role: composes, tests, publishes and versions financial products from regulated primitives, decides who may build on them, and builds apps on them. Needn't be licensed: a licence provider can sponsor a product under its licences. The same tools as developer. Also a consumer.",
-      "tools": 250,
+      "tools": 261,
       "get_started": [
         {
           "tool": "create_entity",
@@ -203,7 +203,7 @@
     {
       "role": "license_provider",
       "summary": "a firm, added by an admin, holding licences (verified by admins) that sponsor builders' products: it approves, declines or revokes sponsorship of a product's component under a held licence, in the jurisdictions it covers. A peer of builders.",
-      "tools": 102,
+      "tools": 103,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Also holds the builder, vendor and licence-provider roles (except the licence-provider tools that act as a member of the firm itself), but not the liquidity-provider role.",
-      "tools": 413,
+      "tools": 426,
       "get_started": [
         {
           "tool": "define_region",
@@ -804,7 +804,7 @@
     {
       "name": "add_risk",
       "title": "Add a risk to a register",
-      "description": "Add a risk to an app's or a financial product's risk register (the app's workspace owners and admins, or the product's own firm), or, for Mynt's admins, to the platform's own (subject_type platform, subject_id mynt). Give a title, a category (security, fraud, vendor, conduct, operational, compliance, credit, liquidity, other), its risk area (financial, compliance, third_party, operations, business_process, technology, regulated_product: required on the platform's register; otherwise the category's by default: credit and liquidity financial, compliance and conduct compliance, vendor third_party, operational and fraud operations, security technology, other none), how likely it is and how bad it would be (1-5 each; the score is their product: 1-4 low, 5-9 medium, 10-14 high, 15-25 critical), and optionally a description, the mitigation, its owner (a member of the app's workspace or the product's firm, a Mynt admin for the platform's; you by default) and the date it's next reviewed by. It starts open. Audited.",
+      "description": "Add a risk to an app's or a financial product's risk register (the app's workspace owners and admins, or the product's own firm), or, for Mynt's admins, to the platform's own (subject_type platform, subject_id mynt). Give a title, a category (security, fraud, vendor, conduct, operational, compliance, credit, liquidity, other), its risk area (financial, compliance, third_party, operations, business_process, technology, regulated_product: required on the platform's register; otherwise the category's by default: credit and liquidity financial, compliance and conduct compliance, vendor third_party, operational and fraud operations, security technology, other none), how likely it is and how bad it would be (1-5 each; their product is the inherent score, graded by the platform's bands: by default 1-4 low, 5-9 medium, 10-14 high, 15-25 critical), and optionally how well its controls work (control_effectiveness: none, weak, partial, strong, with a control_note; the residual score is derived from it by the platform's grading, and a risk without it stands at its inherent score, control not assessed), a description, the mitigation, its owner (a member of the app's workspace or the product's firm, a Mynt admin for the platform's; you by default) and the date it's next reviewed by. It starts open. Audited.",
       "area": "apps",
       "roles": [
         "developer",
@@ -888,6 +888,20 @@
           "review_by": {
             "type": "string",
             "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "control_effectiveness": {
+            "description": "How well the risk's controls work; left out: not assessed",
+            "type": "string",
+            "enum": [
+              "none",
+              "weak",
+              "partial",
+              "strong"
+            ]
+          },
+          "control_note": {
+            "type": "string",
+            "maxLength": 2000
           }
         },
         "required": [
@@ -897,6 +911,126 @@
           "category",
           "likelihood",
           "impact"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "add_risk_control",
+      "title": "Add a control to a risk",
+      "description": "Add a control that keeps a risk down, on a register you keep: its name, kind (preventive: stops it happening; detective: notices it; corrective: puts it right), a description, and optionally when it was last tested (not in the future) and the result (passed, gaps_found, failed). With source_treatment_id, the control is made from one of the risk's treatment tasks that is done (its name is the task's title unless you give one). A control records what's in place; how well the controls work together is the risk's control effectiveness (update_risk). Audited.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "risk_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "name": {
+            "description": "Needed unless source_treatment_id gives it",
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 200
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "preventive",
+              "detective",
+              "corrective"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "last_tested_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "test_result": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "gaps_found",
+              "failed"
+            ]
+          },
+          "source_treatment_id": {
+            "description": "A done treatment task of this risk to make the control from",
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "risk_id",
+          "kind"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "add_risk_factor",
+      "title": "Add a scoring factor to a risk",
+      "description": "Add a factor that explains one of a risk's three scores, on a register you keep: kind impact (how bad it would be), likelihood (how likely it is) or control (how well a control works), a name, a score 1-5 (impact and likelihood as the risk's own; a control factor 1 not working to 5 working fully), a rationale, and optionally its source: an https link, or something on Mynt as type:id (app, product, vendor_offering, agreement, agreement_audit, audit_entry, risk_model, firm). Factors explain a score, they don't set it: change the risk's likelihood, impact or control effectiveness with update_risk. Audited.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "risk_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "impact",
+              "likelihood",
+              "control"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 200
+          },
+          "score": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "rationale": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "source": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "risk_id",
+          "kind",
+          "name",
+          "score"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -1057,6 +1191,52 @@
           "name",
           "purpose",
           "method"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "add_risk_treatment",
+      "title": "Add a treatment task to a risk",
+      "description": "Add a task that brings a risk down, on a register you keep: a title, its owner (someone on the register's side: a member of the app's workspace or the product's firm, a Mynt admin for Mynt's own; you by default), a due date and an optional progress note. It starts todo, its effectiveness not assessed. Audited.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "risk_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 200
+          },
+          "owner_user_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "due": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "progress_note": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "risk_id",
+          "title"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -1224,7 +1404,7 @@
     {
       "name": "admin_list_risks",
       "title": "Open risks across Mynt",
-      "description": "Admin: the risks not yet closed on every register (apps', products' and the platform's own), or one kind (subject_type), or one risk area (risk_area; unassigned: those with none): counts by level (critical, high, medium, low), how many are overdue for review, the total, and the highest-scored risks (score, then the earliest review date), each with its subject's name.",
+      "description": "Admin: the risks not yet closed on every register (apps', products' and the platform's own), or one kind (subject_type), or one risk area (risk_area; unassigned: those with none): counts by inherent level (critical, high, medium, low) and by residual level (residual_counts), how many are overdue for review, the total, and the risks with the highest residual score (then the inherent score, then the earliest review date), each with its three scores (inherent, control, residual; a risk whose control isn't assessed stands at its inherent score and says so) and its subject's name. Filter the list by residual_level.",
       "area": "apps",
       "roles": [
         "admin"
@@ -1259,6 +1439,15 @@
               "technology",
               "regulated_product",
               "unassigned"
+            ]
+          },
+          "residual_level": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
             ]
           }
         },
@@ -8818,6 +9007,50 @@
       }
     },
     {
+      "name": "get_risk",
+      "title": "One risk, in full",
+      "description": "A risk on a register you can read (see list_risks; Mynt's admins also read any app's or product's): the risk with its three scores, then scoring (the impact, likelihood and control factors that explain them, each list with its average, or null when it has none, and the formula in words), treatments (the tasks that bring it down: owner, due date and whether it's overdue, status, progress, and whether it worked), controls (what keeps it down: kind, when last tested and the result, the task it came from; retired ones stay), links (what it's about; a link's name only when you may read what it points at), treatment_due (the earliest due date among its open tasks) and history (every change from the audit trail, oldest first, each with what changed in words and the scores before and after). can_manage says whether you may change it.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "license_provider",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "risk_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "risk_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "get_risk_grading",
+      "title": "The platform's risk grading",
+      "description": "Admin: how Mynt grades every risk on every register. Each level's name (low, medium, high, critical), the score bands of the inherent score (likelihood × impact, 1-25) and of the residual score, the control steps (none, weak, partial, strong), and the residual method: reduce (residual = inherent × (1 − the step's reduction), rounded, never below 1) or matrix (inherent level × control step → residual level; the score is the top of that level's residual band, or the inherent score when lower). With it: the method in words, the 5×5 likelihood × impact grid with each cell's score and level, the version in force (0: Mynt's defaults, never changed), the defaults, and every version kept (newest first: who, when, why, which version it restored, how many residual scores it moved).",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "get_sdk_release",
       "title": "Download an SDK release",
       "description": "Developer: the files of one release of your SDK (latest if no version) as {path, content}[], with a staleness flag.",
@@ -9351,6 +9584,56 @@
         "required": [
           "link_reference",
           "partner_customer_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "link_risk",
+      "title": "Link a risk to what it's about",
+      "description": "Link a risk on a register you keep to something it's about: an app, a product, a vendor's offering (vendor_offering), an agreement, an oversight audit (agreement_audit), an audit-trail entry (audit_entry), one of Mynt's risk models (risk_model; Mynt's admins) or a firm, by its id, with an optional note. You can link what you can read: your own apps, products and firm, published products, listed vendor services, your agreements and their audits. One link per risk and item. Audited.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "risk_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "target_type": {
+            "type": "string",
+            "enum": [
+              "app",
+              "product",
+              "vendor_offering",
+              "agreement",
+              "agreement_audit",
+              "audit_entry",
+              "risk_model",
+              "firm"
+            ]
+          },
+          "target_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,200}$"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 1000
+          }
+        },
+        "required": [
+          "risk_id",
+          "target_type",
+          "target_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -11456,7 +11739,7 @@
     {
       "name": "list_risk_models",
       "title": "Mynt's risk models",
-      "description": "Admin: Mynt's own risk models, each with its risk area, status (draft, active, retired), current version and definition (name, purpose, method, inputs, outputs, thresholds), owner, and validation (the last one: when, by whom, outcome, notes; the next due date, and whether it's overdue), newest first, with counts by status and how many are overdue. Filter by risk_area or status. With model_id: that model with every version (oldest first) and every validation (newest first).",
+      "description": "Admin: Mynt's own risk models, each with its risk area, status (draft, active, retired), current version and definition (name, purpose, method, inputs, outputs, thresholds), owner, and validation (the last one: when, by whom, outcome, notes; the next due date, and whether it's overdue), its health in words (Healthy, Validation overdue, Last validation failed, No validation yet; Retired for a retired one) and how many risks link to it (linked_risks), newest first, with counts by status, how many are overdue and how many aren't healthy. Filter by risk_area or status. With model_id: that model with every version (oldest first), every validation (newest first) and the risks linked to it (linked: each risk with its source, residual score, status and review date; link one with link_risk, target_type risk_model).",
       "area": "admin",
       "roles": [
         "admin"
@@ -11498,7 +11781,7 @@
     {
       "name": "list_risks",
       "title": "A risk register",
-      "description": "An app's or a financial product's risk register: each risk with its category, likelihood × impact score and level, owner, mitigation, status, review-by date and whether that review is overdue, newest first, with counts by status. Any member of the app's workspace reads an app's; the product's own firm, and the licence providers sponsoring it (read-only), read a product's; Mynt's admins read and keep the platform's (subject_type platform, subject_id mynt). can_manage says whether you may add and review risks. Filter by status, category, risk_area (one area, or unassigned: none) or overdue_only. With risk_id: that one risk and its history (every change, from the audit trail). For an app, signals lists what Mynt measures around it, each a list or not available with why: fraud, vendors (failing conformance, erroring calls, ended subscriptions or contracts), conduct (open findings from marketing and complaints audits of its agreements) and products (sales paused by a covenant, or drifted).",
+      "description": "An app's or a financial product's risk register: each risk with its category, its three scores (inherent: likelihood × impact with its level; control: how well its controls work, or not assessed; residual: derived by the platform's grading or overridden, with its level; a risk whose control isn't assessed stands at its inherent score and says so), owner, mitigation, status, review-by date and whether that review is overdue, highest residual score first, with counts by status and by residual level. Any member of the app's workspace reads an app's; the product's own firm, and the licence providers sponsoring it (read-only), read a product's; Mynt's admins read and keep the platform's (subject_type platform, subject_id mynt). can_manage says whether you may add and review risks. Filter by status, category, risk_area (one area, or unassigned: none), residual_level (low, medium, high, critical) or overdue_only. With risk_id: that one risk and its history (every change, from the audit trail; get_risk adds its factors, treatment tasks, controls and links). For an app, signals lists what Mynt measures around it, each a list or not available with why: fraud, vendors (failing conformance, erroring calls, ended subscriptions or contracts), conduct (open findings from marketing and complaints audits of its agreements) and products (sales paused by a covenant, or drifted).",
       "area": "apps",
       "roles": [
         "developer",
@@ -11563,6 +11846,15 @@
           "overdue_only": {
             "default": false,
             "type": "boolean"
+          },
+          "residual_level": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
           },
           "risk_id": {
             "type": "string",
@@ -13751,6 +14043,39 @@
       }
     },
     {
+      "name": "remove_risk_factor",
+      "title": "Remove a risk's scoring factor",
+      "description": "Remove a factor from a risk on a register you keep (factor_id, from get_risk). The risk's scores stay as they are; the audit trail keeps what the factor was.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "risk_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "factor_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "risk_id",
+          "factor_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "remove_workspace_member",
       "title": "Remove someone from a workspace",
       "description": "Developer: owners and admins remove a member; they lose access to the workspace's apps and builds at once. Only owners remove owners, and never the last one. To go yourself, use leave_workspace.",
@@ -14814,6 +15139,45 @@
         },
         "required": [
           "id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "retire_risk_control",
+      "title": "Retire a risk's control",
+      "description": "Retire a control of a risk on a register you keep, saying why. It stays listed under the risk, marked retired, and can't be changed again. Audited.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "risk_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "control_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "risk_id",
+          "control_id",
+          "reason"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -16812,6 +17176,388 @@
       }
     },
     {
+      "name": "set_risk_grading",
+      "title": "Change the platform's risk grading",
+      "description": "Admin: change how Mynt grades risks, saying why (note). Pass what changes of: levels (each level's name), inherent_bands and residual_bands (the four levels in order, each { level, from, to }: together they must cover 1-25 with no gap or overlap), residual_method (reduce or matrix), reduce (each control step's reduction, 0-1, never smaller for a stronger step) and matrix (the residual level per inherent level and control step: a control never raises a level); the rest carries over. Or restore_version: bring back a kept version's content. Either way it becomes a new version (the old ones stay), every residual score that isn't overridden and whose control is assessed is derived again, and the audit trail records how many moved (each moved risk's history shows it too).",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "levels": {
+            "type": "object",
+            "properties": {
+              "low": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40
+              },
+              "medium": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40
+              },
+              "high": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40
+              },
+              "critical": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40
+              }
+            },
+            "required": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ],
+            "additionalProperties": false,
+            "description": "Each level's name, as registers show it"
+          },
+          "inherent_bands": {
+            "minItems": 4,
+            "maxItems": 4,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "level": {
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "critical"
+                  ]
+                },
+                "from": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 25
+                },
+                "to": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 25
+                }
+              },
+              "required": [
+                "level",
+                "from",
+                "to"
+              ],
+              "additionalProperties": false
+            },
+            "description": "The inherent score's bands, lowest level first: together they cover 1-25 with no gap or overlap"
+          },
+          "residual_bands": {
+            "minItems": 4,
+            "maxItems": 4,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "level": {
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "critical"
+                  ]
+                },
+                "from": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 25
+                },
+                "to": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 25
+                }
+              },
+              "required": [
+                "level",
+                "from",
+                "to"
+              ],
+              "additionalProperties": false
+            },
+            "description": "The residual score's bands, the same way"
+          },
+          "residual_method": {
+            "type": "string",
+            "enum": [
+              "reduce",
+              "matrix"
+            ]
+          },
+          "reduce": {
+            "type": "object",
+            "properties": {
+              "none": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "weak": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "partial": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "strong": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "required": [
+              "none",
+              "weak",
+              "partial",
+              "strong"
+            ],
+            "additionalProperties": false,
+            "description": "reduce: the share of the inherent score each control step takes away (0-1)"
+          },
+          "matrix": {
+            "type": "object",
+            "properties": {
+              "low": {
+                "type": "object",
+                "properties": {
+                  "none": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "weak": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "partial": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "strong": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  }
+                },
+                "required": [
+                  "none",
+                  "weak",
+                  "partial",
+                  "strong"
+                ],
+                "additionalProperties": false
+              },
+              "medium": {
+                "type": "object",
+                "properties": {
+                  "none": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "weak": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "partial": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "strong": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  }
+                },
+                "required": [
+                  "none",
+                  "weak",
+                  "partial",
+                  "strong"
+                ],
+                "additionalProperties": false
+              },
+              "high": {
+                "type": "object",
+                "properties": {
+                  "none": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "weak": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "partial": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "strong": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  }
+                },
+                "required": [
+                  "none",
+                  "weak",
+                  "partial",
+                  "strong"
+                ],
+                "additionalProperties": false
+              },
+              "critical": {
+                "type": "object",
+                "properties": {
+                  "none": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "weak": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "partial": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "strong": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  }
+                },
+                "required": [
+                  "none",
+                  "weak",
+                  "partial",
+                  "strong"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ],
+            "additionalProperties": false,
+            "description": "matrix: the residual level for each inherent level and control step"
+          },
+          "restore_version": {
+            "description": "A kept version to bring back, instead of the fields above",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "note": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000,
+            "description": "Why the grading changes"
+          }
+        },
+        "required": [
+          "note"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "set_subscription_live",
       "title": "Turn a vendor service live",
       "description": "Innovator: let live sessions call the vendor's live endpoint (live: true), or stop that (false). Sandbox sessions always use its test endpoint. Give the live credential here if the offering needs one and you haven't yet; it replaces any earlier one.",
@@ -17697,6 +18443,39 @@
       }
     },
     {
+      "name": "unlink_risk",
+      "title": "Remove a risk's link",
+      "description": "Remove a link from a risk on a register you keep (link_id, from get_risk). The risk and the thing it pointed at stay as they are. Audited.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "risk_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "link_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          }
+        },
+        "required": [
+          "risk_id",
+          "link_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "unpublish_product",
       "title": "Unpublish a financial product",
       "description": "Innovator: remove one of your products from the catalog (admins: also Mynt's reference products). Existing enrollments are kept; no new ones can be made.",
@@ -18421,7 +19200,7 @@
     {
       "name": "update_risk",
       "title": "Review a risk",
-      "description": "Review a risk on a register you keep (see add_risk): change its status (open, mitigating, accepted, closed), risk area, mitigation, likelihood and impact, owner, or the date it's next reviewed by. Accepting or closing a risk needs a note saying why. Only what you pass changes; every change is audited with what it was and what it became, and list_risks with risk_id shows that history.",
+      "description": "Review a risk on a register you keep (see add_risk): change its status (open, mitigating, accepted, closed), risk area, mitigation, likelihood and impact (the inherent score), how well its controls work (control_effectiveness: none, weak, partial, strong, with a control_note), owner, or the date it's next reviewed by. The residual score is derived from the inherent score and the control by the platform's grading; to set it yourself instead, pass residual_likelihood and residual_impact (1-5 each) with residual_override_reason (an override: who, when and why are kept, and the grading never re-derives it), and clear_residual_override to go back to the derived one. Accepting or closing a risk needs a note saying why. Only what you pass changes; every change is audited with what it was and what it became and the scores before and after, and get_risk shows that history.",
       "area": "apps",
       "roles": [
         "developer",
@@ -18482,6 +19261,40 @@
             "type": "string",
             "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
           },
+          "control_effectiveness": {
+            "type": "string",
+            "enum": [
+              "none",
+              "weak",
+              "partial",
+              "strong"
+            ]
+          },
+          "control_note": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "residual_likelihood": {
+            "description": "An override: your own residual likelihood (with residual_impact and residual_override_reason)",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "residual_impact": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "residual_override_reason": {
+            "description": "Why the derived residual score doesn't fit",
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000
+          },
+          "clear_residual_override": {
+            "description": "true: drop the override and derive the residual score again",
+            "type": "boolean"
+          },
           "note": {
             "description": "Why: needed to accept or close a risk",
             "type": "string",
@@ -18490,6 +19303,119 @@
         },
         "required": [
           "risk_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "update_risk_control",
+      "title": "Update a risk's control",
+      "description": "Update a control of a risk on a register you keep (control_id, from get_risk; not a retired one): its name, kind, description, or a test: when it was last tested (not in the future) and the result (passed, gaps_found, failed). Only what you pass changes. Audited, with what it was and what it became.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "risk_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "control_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 200
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "preventive",
+              "detective",
+              "corrective"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "last_tested_at": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "test_result": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "gaps_found",
+              "failed"
+            ]
+          }
+        },
+        "required": [
+          "risk_id",
+          "control_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "update_risk_factor",
+      "title": "Change a risk's scoring factor",
+      "description": "Change a factor of a risk on a register you keep (factor_id, from get_risk): its name, score (1-5), rationale or source. Its kind stays; only what you pass changes. Audited, with what it was and what it became.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "risk_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "factor_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 200
+          },
+          "score": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "rationale": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "source": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "risk_id",
+          "factor_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -18640,6 +19566,79 @@
         },
         "required": [
           "model_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "update_risk_treatment",
+      "title": "Update a risk's treatment task",
+      "description": "Update a treatment task of a risk on a register you keep (treatment_id, from get_risk): its title, owner, due date, status (todo, doing, done, dropped), progress note, and whether it worked (effectiveness: not_assessed, ineffective, partly_effective, effective, with an effectiveness_note; saying it worked or didn't needs the task done). Marking it done records when. Only what you pass changes. Audited, with what it was and what it became.",
+      "area": "apps",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "risk_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "treatment_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 200
+          },
+          "owner_user_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "due": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "todo",
+              "doing",
+              "done",
+              "dropped"
+            ]
+          },
+          "progress_note": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "effectiveness": {
+            "type": "string",
+            "enum": [
+              "not_assessed",
+              "ineffective",
+              "partly_effective",
+              "effective"
+            ]
+          },
+          "effectiveness_note": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "risk_id",
+          "treatment_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }

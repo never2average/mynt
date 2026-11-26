@@ -110,7 +110,11 @@ test("add, then edit: each edit of what it is adds a version, the old one kept a
   ok(await admin.call("add_risk_model", { ...MODEL, risk_area: "technology", name: "Key rotation age" }));
   const fin = ok(await admin.call("list_risk_models", { risk_area: "financial" }));
   assert.deepEqual(fin.models.map((m) => m.name), ["Pool liquidity coverage"]);
-  assert.deepEqual(fin.counts, { draft: 0, active: 1, retired: 0, overdue: 0 });
+  // Active and never validated: not healthy yet, and it says why.
+  assert.deepEqual(fin.counts, { draft: 0, active: 1, retired: 0, overdue: 0, not_healthy: 1 });
+  assert.equal(fin.models[0].health, "no_validation_yet");
+  assert.equal(fin.models[0].health_words, "No validation yet");
+  assert.equal(fin.models[0].linked_risks, 0);
   assert.equal(ok(await admin.call("list_risk_models", { status: "draft" })).models[0].name, "Key rotation age");
 });
 
@@ -180,4 +184,65 @@ test("a role taken away ends it at once; products' own risk models are read acro
   await store.db.query(`UPDATE ${T}.users SET roles = ARRAY['developer'] WHERE id = $1`, [admin.user.id]);
   refused(await admin.call("list_risk_models", {}), /Only Mynt's admins/);
   refused(await admin.call("add_risk_model", MODEL), /Only Mynt's admins/);
+});
+
+test("health: derived in words from the last validation and its due date; ops_status counts the models that aren't healthy", async () => {
+  const { store, as } = await setup();
+  const admin = await as("Ada", ["admin"]);
+  const { model } = ok(await admin.call("add_risk_model", MODEL));
+  const health = async () => {
+    const m = ok(await admin.call("list_risk_models", { model_id: model.id })).model;
+    return [m.health, m.health_words];
+  };
+  assert.deepEqual(await health(), ["no_validation_yet", "No validation yet"]);
+  let ops = await opsStatus(store.db);
+  assert.equal(ops.risk_models.not_healthy, 1);
+  assert.deepEqual(ops.risk_models.unhealthy.map((m) => [m.name, m.health_words]), [["Pool liquidity coverage", "No validation yet"]]);
+  assert.ok(ops.attention.some((l) => /^risk models: 1 of Mynt's risk model\(s\) not healthy \(Pool liquidity coverage: no validation yet\)/.test(l)), ops.attention.join("\n"));
+
+  ok(await admin.call("validate_risk_model", { model_id: model.id, outcome: "passed", notes: "Back-tested", next_validation_due: "2099-06-01" }));
+  assert.deepEqual(await health(), ["healthy", "Healthy"]);
+  ops = await opsStatus(store.db);
+  assert.equal(ops.risk_models.not_healthy, 0);
+  assert.ok(!ops.attention.some((l) => l.startsWith("risk models:")));
+
+  // Its due date passes: overdue. Both lines show, the existing overdue one and the health one.
+  await store.db.query(`UPDATE ${T}.risk_models SET next_validation_due = '2020-01-01' WHERE id = $1`, [model.id]);
+  assert.deepEqual(await health(), ["validation_overdue", "Validation overdue"]);
+  ops = await opsStatus(store.db);
+  assert.equal(ops.risk_models.overdue_validations, 1);
+  assert.equal(ops.risk_models.not_healthy, 1);
+  assert.equal(ops.attention.filter((l) => l.startsWith("risk models:")).length, 2);
+
+  // A failed validation comes first, whatever its due date.
+  ok(await admin.call("validate_risk_model", { model_id: model.id, outcome: "failed", notes: "Outflows understated", next_validation_due: "2099-06-01" }));
+  assert.deepEqual(await health(), ["last_validation_failed", "Last validation failed"]);
+  assert.equal(ok(await admin.call("list_risk_models", {})).counts.not_healthy, 1);
+
+  // Retired: said so, and never counted.
+  ok(await admin.call("retire_risk_model", { model_id: model.id, reason: "Replaced" }));
+  assert.deepEqual(await health(), ["retired", "Retired"]);
+  assert.equal(ok(await admin.call("list_risk_models", {})).counts.not_healthy, 0);
+  assert.equal((await opsStatus(store.db)).risk_models.not_healthy, 0);
+});
+
+test("linked risks: a model counts the risks that link to it, and its page lists them, highest residual first", async () => {
+  const { as } = await setup();
+  const admin = await as("Ada", ["admin"]);
+  const { model } = ok(await admin.call("add_risk_model", MODEL));
+  const add = async (title, likelihood, impact, more = {}) => ok(await admin.call("add_risk", { subject_type: "platform", subject_id: "mynt", title, category: "liquidity", risk_area: "financial", likelihood, impact, ...more })).risk;
+  const small = await add("Coverage misread", 2, 2);
+  const big = await add("Pool runs dry", 4, 5, { control_effectiveness: "weak", review_by: "2031-01-01" });
+  await add("Not linked", 5, 5);
+  ok(await admin.call("link_risk", { risk_id: small.id, target_type: "risk_model", target_id: model.id }));
+  ok(await admin.call("link_risk", { risk_id: big.id, target_type: "risk_model", target_id: model.id, note: "The model's main output" }));
+  const detail = ok(await admin.call("list_risk_models", { model_id: model.id }));
+  assert.equal(detail.model.linked_risks, 2);
+  assert.deepEqual(detail.linked.map((l) => [l.risk.title, l.source, l.risk.residual.score, l.risk.residual.level_name, l.risk.status, l.risk.review_by, l.note]), [
+    ["Pool runs dry", "Mynt", 15, "Critical", "open", "2031-01-01", "The model's main output"],
+    ["Coverage misread", "Mynt", 4, "Low", "open", null, null],
+  ]);
+  assert.equal(ok(await admin.call("list_risk_models", {})).models[0].linked_risks, 2);
+  ok(await admin.call("unlink_risk", { risk_id: small.id, link_id: detail.linked[1].link_id }));
+  assert.equal(ok(await admin.call("list_risk_models", { model_id: model.id })).model.linked_risks, 1);
 });

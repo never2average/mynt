@@ -1,5 +1,7 @@
 // The platform admin's Risk register (/platform/risk-register), one tab per risk area (lib/risk-register.ts
-// RISK_AREAS). A tab is ONE table of risk items (registerItemsFrom), each with its source in words:
+// RISK_AREAS). A tab is ONE table of risk items (registerItemsFrom), each with its three scores in words (Inherent:
+// likelihood × impact; Control: how well its controls work, or "Not assessed"; Residual: derived by the platform's
+// grading or overridden; a signal is "Not scored"), highest residual first, and its source in words:
 // - "Mynt": Mynt's own risk register filtered to that area (risk_register with subject "platform", kept and read by
 //   Mynt admins only; the risks with no area under the Unassigned filter),
 // - "App: <name>" / "Product: <name>": the open risks across every app and product in that area (admin_list_risks,
@@ -22,7 +24,7 @@ import { adminHref, words } from "./admin"
 import type { AuditEntry } from "./admin-audit"
 import { actionLabel, actorWords, whenWords } from "./admin-audit"
 import { peopleFrom } from "./people"
-import { areaOfRisk, isRiskArea, RISK_CATEGORY_LABELS, RISK_LEVEL_LABELS, RISK_STATUS_LABELS, RISK_STATUSES, riskLevel, scoreText, unavailable, type RiskArea, type RiskCategory, type RiskRegister, type RiskRow, type RiskStatus, type Signal, type Unavailable } from "./risk-register"
+import { areaOfRisk, controlWords, isRiskArea, residualWords, RISK_CATEGORY_LABELS, RISK_LEVEL_LABELS, RISK_STATUS_LABELS, RISK_STATUSES, scoresFrom, unavailable, type RiskArea, type RiskCategory, type RiskRegister, type RiskRow, type RiskScores, type RiskStatus, type Signal, type Unavailable } from "./risk-register"
 
 type Obj = Record<string, unknown>
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v)
@@ -50,6 +52,7 @@ export type CrossRisk = {
   impact: number | null
   score: number
   level: RiskLevel
+  scores: RiskScores // inherent, control and residual, as Mynt graded them
   owner: string | null // the owner's name, when the risk has one
   mitigation: string | null
   status: string
@@ -73,7 +76,8 @@ export function crossRisksFrom(reply: unknown, area: RiskArea): CrossRisks {
     const firm = str(r.firm_id)
     const href = type === "app" && ws ? adminHref("workspaces", ws) : type === "product" && firm ? `${adminHref("firms", firm)}?tab=products` : null
     const owner = isObj(r.owner) ? (str(r.owner.name) ?? (str(r.owner.user_id) ? "Unnamed member" : null)) : null
-    return [{ id, title, subjectType: type, subjectName: str(r.subject_name), href, riskArea, category: str(r.category), likelihood: num(r.likelihood), impact: num(r.impact), score, level: riskLevel(score) as RiskLevel, owner, mitigation: str(r.mitigation), status: str(r.status) ?? "open", reviewBy: str(r.review_by), overdue: r.overdue === true }]
+    const scores = scoresFrom({ ...r, inherent: isObj(r.inherent) ? r.inherent : { score } }, num(r.likelihood) ?? 0, num(r.impact) ?? 0)
+    return [{ id, title, subjectType: type, subjectName: str(r.subject_name), href, riskArea, category: str(r.category), likelihood: num(r.likelihood), impact: num(r.impact), score, level: scores.inherent.level, scores, owner, mitigation: str(r.mitigation), status: str(r.status) ?? "open", reviewBy: str(r.review_by), overdue: r.overdue === true }]
   })
   return { available: true, risks }
 }
@@ -287,9 +291,14 @@ export type RegisterItem = {
   category: string
   likelihood: number | null
   impact: number | null
-  score: number | null // null: not scored (a signal), or not available
+  score: number | null // the inherent score; null: not scored (a signal), or not available
   level: RiskLevel | null
-  scoreWords: string
+  scoreWords: string // Inherent: "4 × 3 = 12 (High)", "Not scored" or "Not available"
+  controlWords: string // "Strong", "Not assessed", "Not scored" or "Not available"
+  residual: number | null
+  residualLevel: RiskLevel | null // what the table sorts and filters by
+  residualWords: string // "6 (Medium)", with "overridden" or "same as inherent" in words
+  riskId: string | null // a risk on a register: its page (/platform/risk-register/<id>) opens
   owner: string
   status: ItemStatus
   when: string // a register risk's review date ("(overdue)" in words); when a signal was observed
@@ -345,12 +354,14 @@ function signalPart(spec: SignalSpec, cells: string[]): SignalPart {
   }
 }
 
-const blank = { subject: null, likelihood: null, impact: null, score: null, level: null, reviewBy: null, overdue: false, risk: null } as const
+const blank = { subject: null, likelihood: null, impact: null, score: null, level: null, residual: null, residualLevel: null, riskId: null, reviewBy: null, overdue: false, risk: null } as const
+const scored = (s: RiskScores) => ({ controlWords: controlWords(s), residual: s.residual.score, residualLevel: s.residual.level as RiskLevel, residualWords: residualWords(s) })
+const unscored = (words: string) => ({ scoreWords: words, controlWords: words, residualWords: words })
 
 /** A signal's rows as risk items: one per thing that needs attention; one "Clear" row when it is measured and nothing
  * does; one "Not available" row, with why, when Mynt doesn't measure it. Never no row, never a 0. */
 export function signalItems(spec: SignalSpec): RegisterItem[] {
-  const base = { ...blank, source: "signals" as const, sourceWords: `Signal: ${signalName(spec)}`, scoreWords: NOT_SCORED, owner: "Mynt" }
+  const base = { ...blank, source: "signals" as const, sourceWords: `Signal: ${signalName(spec)}`, ...unscored(NOT_SCORED), owner: "Mynt" }
   if (!spec.signal.available) return [{ ...base, key: `signal:${spec.id}:none`, title: spec.title, category: signalName(spec), status: "not_available", when: NOT_RECORDED, detail: spec.signal.reason }]
   if (!spec.signal.rows.length) return [{ ...base, key: `signal:${spec.id}:clear`, title: spec.empty, category: signalName(spec), status: "clear", when: NOT_RECORDED, detail: spec.description }]
   return spec.signal.rows.map((r) => {
@@ -359,7 +370,8 @@ export function signalItems(spec: SignalSpec): RegisterItem[] {
   })
 }
 
-const byScore = (a: RegisterItem, b: RegisterItem) => (b.score ?? -1) - (a.score ?? -1)
+// Highest residual score first, then the highest inherent score.
+const byScore = (a: RegisterItem, b: RegisterItem) => (b.residual ?? -1) - (a.residual ?? -1) || (b.score ?? -1) - (a.score ?? -1)
 const registerItems = (reg: RiskRegister | Unavailable, what: string): RegisterItem[] =>
   reg.available
     ? reg.risks
@@ -373,9 +385,11 @@ const registerItems = (reg: RiskRegister | Unavailable, what: string): RegisterI
             category: RISK_CATEGORY_LABELS[r.category],
             likelihood: r.likelihood,
             impact: r.impact,
-            score: r.score,
-            level: riskLevel(r.score) as RiskLevel,
-            scoreWords: scoreText(r.likelihood, r.impact),
+            score: r.inherent.score,
+            level: r.inherent.level,
+            scoreWords: `${r.likelihood} × ${r.impact} = ${r.inherent.score} (${r.inherent.levelName})`,
+            ...scored(r),
+            riskId: r.id,
             owner: r.owner ? (r.owner.name ?? "Unnamed member") : NOT_ASSIGNED,
             status: r.status,
             when: reviewWords(r),
@@ -386,7 +400,7 @@ const registerItems = (reg: RiskRegister | Unavailable, what: string): RegisterI
           }),
         )
         .sort(byScore)
-    : [{ ...blank, key: "mynt:none", source: "mynt", sourceWords: "Mynt", title: what, category: "Risk register", scoreWords: "Not available", owner: "Mynt", status: "not_available", when: NOT_RECORDED, detail: reg.reason }]
+    : [{ ...blank, key: "mynt:none", source: "mynt", sourceWords: "Mynt", title: what, category: "Risk register", ...unscored("Not available"), owner: "Mynt", status: "not_available", when: NOT_RECORDED, detail: reg.reason }]
 
 const crossItems = (cross: CrossRisks): RegisterItem[] =>
   cross.available
@@ -405,7 +419,9 @@ const crossItems = (cross: CrossRisks): RegisterItem[] =>
             impact: r.impact,
             score: r.score,
             level: r.level,
-            scoreWords: r.likelihood !== null && r.impact !== null && r.likelihood * r.impact === r.score ? scoreText(r.likelihood, r.impact) : `${r.score} (${levelWords(r.level)})`,
+            scoreWords: r.likelihood !== null && r.impact !== null && r.likelihood * r.impact === r.score ? `${r.likelihood} × ${r.impact} = ${r.score} (${r.scores.inherent.levelName})` : `${r.score} (${r.scores.inherent.levelName})`,
+            ...scored(r.scores),
+            riskId: r.id,
             owner: r.owner ?? NOT_ASSIGNED,
             status: (RISK_STATUSES as readonly string[]).includes(r.status) ? (r.status as RiskStatus) : "open",
             when: reviewWords(r),
@@ -416,10 +432,10 @@ const crossItems = (cross: CrossRisks): RegisterItem[] =>
           }
         })
         .sort(byScore)
-    : [{ ...blank, key: "subject:none", source: "subjects", sourceWords: REGISTER_SOURCE_LABELS.subjects, title: "Open risks across apps and products", category: "Risk register", scoreWords: "Not available", owner: "Their workspaces and firms", status: "not_available", when: NOT_RECORDED, detail: cross.reason }]
+    : [{ ...blank, key: "subject:none", source: "subjects", sourceWords: REGISTER_SOURCE_LABELS.subjects, title: "Open risks across apps and products", category: "Risk register", ...unscored("Not available"), owner: "Their workspaces and firms", status: "not_available", when: NOT_RECORDED, detail: cross.reason }]
 
-/** A tab's one table: Mynt's own risks in the area (highest score first), then the apps' and products' (highest score
- * first), then the signals (what needs attention first, then what is clear, then what isn't available). With
+/** A tab's one table: Mynt's own risks in the area (highest residual first), then the apps' and products' (highest
+ * residual first), then the signals (what needs attention first, then what is clear, then what isn't available). With
  * unassigned, Mynt's own risks that have no area yet instead: only Mynt's register has those. */
 export function registerItemsFrom(data: RegisterAreaData, unassigned = false): RegisterItem[] {
   if (unassigned) return registerItems(data.unassigned, "Mynt's own register: unassigned risks")

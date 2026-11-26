@@ -146,14 +146,16 @@ const PINNED = [
   "audit_log",
   "admin_list_risks",
   "list_risks",
+  "get_risk",
   "list_risk_models",
   "admin_list_product_risk_models",
   "get_platform_settings",
+  "get_risk_grading",
   "get_esign_settings",
   "list_enclave_releases",
 ];
 // What a tool that changes something is called.
-const WRITES = /(^|_)(set|add|update|remove|delete|register|invite|revoke|approve|decline|review|run|announce|withdraw|retire|validate|suspend|archive|define|create|change)_/;
+const WRITES = /(^|_)(set|add|update|remove|delete|register|invite|revoke|approve|decline|review|run|announce|withdraw|retire|validate|suspend|archive|define|create|change|link|unlink|restore)_/;
 
 describe("the platform admin's Ask AI tools", () => {
   it("are exactly the pinned reads, each on the Admin area's allow-list, and none of them writes", () => {

@@ -1,18 +1,28 @@
 "use client"
 
 // A risk register, as an app's Security & risk tab and a product's Risk tab show it: a table of risks (title,
-// category, likelihood × impact score, owner, status in words, review by), with a labelled Add risk button and a
-// Review risk button on each row, each opening its sheet, for whoever keeps the register (Mynt's can_manage: the
+// category, the three scores: Inherent (likelihood × impact), Control (how well its controls work, or "Not assessed")
+// and Residual, each level in words with its number; owner, status in words, review by), highest residual first.
+// A row opens the risk's detail in a sheet (components/risk-detail.tsx: its factors, treatment tasks, controls, links
+// and history), by a click or its labelled Open. A labelled Add risk button and a Review risk button on each row open
+// their sheets for whoever keeps the register (Mynt's can_manage: the
 // app's workspace owners and admins, the product's own firm). Anyone else, a product's sponsor included, reads it.
 // Whatever Mynt can't answer says "Not available." with why. Mynt checks every change again and may refuse; its
 // reason is shown in its own words. The views are server-renderable for the tests.
 import { useEffect, useState } from "react"
-import { ClipboardCheck, ShieldPlus } from "lucide-react"
+import { ClipboardCheck, ExternalLink, ShieldPlus } from "lucide-react"
 
+import { RiskDetailSheet } from "@/components/risk-detail"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import {
+  CONTROL_STEP_LABELS,
+  CONTROL_STEPS,
+  controlWords,
+  inherentWords,
+  NOT_ASSESSED,
+  residualWords,
   RISK_AREA_LABELS,
   RISK_AREA_OF_CATEGORY,
   RISK_AREAS,
@@ -21,6 +31,7 @@ import {
   RISK_STATUS_LABELS,
   RISK_STATUSES,
   scoreText,
+  type ControlStep,
   type RiskArea,
   type RiskCategory,
   type RiskChange,
@@ -59,6 +70,7 @@ function NotAvailable({ reason }: { reason: string }) {
   )
 }
 
+export const REGISTER_TABLE_HEAD = ["Risk", "Category", "Inherent", "Control", "Residual", "Owner", "Status", "Review by", "Action"] as const
 const statusText = (r: RiskRow) => RISK_STATUS_LABELS[r.status]
 const reviewText = (r: RiskRow) => (r.reviewBy ? `${r.reviewBy}${r.overdue ? " (overdue)" : ""}` : "Not set")
 
@@ -84,7 +96,13 @@ export function RiskRegisterSection({
 }) {
   const [adding, setAdding] = useState(false)
   const [reviewing, setReviewing] = useState<RiskRow | null>(null)
+  const [opened, setOpened] = useState<string | null>(null)
   const manage = data.available && data.canManage
+  // A copied link (?risk=<id>) opens that risk's detail.
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get("risk")
+    if (id && /^[0-9a-f-]{36}$/i.test(id)) setOpened(id)
+  }, [])
   return (
     <section className="flex min-w-0 flex-col gap-2" data-risk-register={subject.type} aria-labelledby={`risk-register-${subject.type}`}>
       <div className="flex items-center justify-between gap-2">
@@ -117,38 +135,49 @@ export function RiskRegisterSection({
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Risk</TableHead>
-                    <TableHead>Category</TableHead>
-                    <TableHead>Likelihood × impact</TableHead>
-                    <TableHead>Owner</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Review by</TableHead>
-                    {manage && <TableHead className="text-right">Action</TableHead>}
+                    {REGISTER_TABLE_HEAD.map((h) => (
+                      <TableHead key={h} className={h === "Action" ? "text-right" : undefined}>
+                        {h}
+                      </TableHead>
+                    ))}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {data.risks.map((r) => (
-                    <TableRow key={r.id} data-risk={r.id} data-status={r.status}>
+                    <TableRow key={r.id} data-risk={r.id} data-status={r.status} className={subject.type === "platform" ? undefined : "cursor-pointer"} onClick={subject.type === "platform" ? undefined : () => setOpened(r.id)}>
                       <TableCell className="font-medium whitespace-normal">
                         {r.title}
                         {r.mitigation && <div className="text-xs font-normal text-muted-foreground">Mitigation: {r.mitigation}</div>}
                       </TableCell>
                       <TableCell>{RISK_CATEGORY_LABELS[r.category]}</TableCell>
-                      <TableCell className="whitespace-nowrap tabular-nums" data-risk-score={r.score}>
-                        {scoreText(r.likelihood, r.impact)}
+                      <TableCell className="whitespace-nowrap tabular-nums" data-risk-score={r.inherent.score} data-risk-level={r.inherent.level}>
+                        {inherentWords(r)}
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap" data-risk-control={r.control.effectiveness ?? "not_assessed"}>
+                        {controlWords(r)}
+                      </TableCell>
+                      <TableCell className="whitespace-normal tabular-nums" data-risk-residual={r.residual.score} data-residual-level={r.residual.level}>
+                        {residualWords(r)}
                       </TableCell>
                       <TableCell className="whitespace-normal">{r.owner ? (r.owner.name ?? "Unnamed member") : <span className="text-muted-foreground">No owner</span>}</TableCell>
                       <TableCell className="whitespace-normal">{statusText(r)}</TableCell>
                       <TableCell className="text-xs whitespace-nowrap tabular-nums" data-overdue={r.overdue ? "true" : undefined}>
                         {reviewText(r)}
                       </TableCell>
-                      {manage && (
-                        <TableCell className="text-right">
-                          <Button size="sm" variant="outline" onClick={() => setReviewing(r)} data-review-risk={r.id}>
-                            <ClipboardCheck /> Review risk
-                          </Button>
-                        </TableCell>
-                      )}
+                      <TableCell className="text-right">
+                        <span className="flex justify-end gap-2">
+                          {subject.type !== "platform" && (
+                            <Button size="sm" variant="outline" onClick={(e) => (e.stopPropagation(), setOpened(r.id))} data-open-risk={r.id}>
+                              <ExternalLink /> Open
+                            </Button>
+                          )}
+                          {manage && (
+                            <Button size="sm" variant="outline" onClick={(e) => (e.stopPropagation(), setReviewing(r))} data-review-risk={r.id}>
+                              <ClipboardCheck /> Review risk
+                            </Button>
+                          )}
+                        </span>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -161,6 +190,7 @@ export function RiskRegisterSection({
           )}
         </>
       )}
+      {subject.type !== "platform" && <RiskDetailSheet subject={{ type: subject.type, id: subject.id }} riskId={opened} onClose={() => setOpened(null)} onChanged={onChanged} />}
       {manage && data.available && (
         <>
           <AddRiskSheet subject={subject} owners={data.owners} open={adding} onClose={() => setAdding(false)} onDone={() => onChanged?.()} fetcher={fetcher} area={area} />
@@ -403,8 +433,20 @@ export function ReviewRiskView({
   const [owner, setOwner] = useState("")
   const [reviewBy, setReviewBy] = useState(risk.reviewBy ?? "")
   const [note, setNote] = useState("")
+  // Three-step scoring: how well the controls work, and the residual (Mynt derives it, or the keeper sets it).
+  const [control, setControl] = useState<ControlStep | "">(risk.control.effectiveness ?? "")
+  const [controlNote, setControlNote] = useState(risk.control.note ?? "")
+  const [override, setOverride] = useState(risk.residual.overridden)
+  const [residualLikelihood, setResidualLikelihood] = useState(risk.residual.likelihood ?? risk.likelihood)
+  const [residualImpact, setResidualImpact] = useState(risk.residual.impact ?? risk.impact)
+  const [overrideWhy, setOverrideWhy] = useState(risk.residual.why ?? "")
+  const overrideChanged = override && (!risk.residual.overridden || residualLikelihood !== risk.residual.likelihood || residualImpact !== risk.residual.impact || overrideWhy.trim() !== (risk.residual.why ?? ""))
   // Only what changed is sent; accepting or closing a risk needs a note saying why.
   const change = {
+    ...(control && control !== risk.control.effectiveness ? { control_effectiveness: control } : {}),
+    ...(controlNote.trim() && controlNote.trim() !== (risk.control.note ?? "") ? { control_note: controlNote.trim() } : {}),
+    ...(overrideChanged ? { residual_likelihood: residualLikelihood, residual_impact: residualImpact, residual_override_reason: overrideWhy.trim() } : {}),
+    ...(!override && risk.residual.overridden ? { clear_residual_override: true as const } : {}),
     ...(status !== risk.status ? { status } : {}),
     ...(withArea && riskArea && riskArea !== risk.riskArea ? { risk_area: riskArea } : {}),
     ...(likelihood !== risk.likelihood ? { likelihood } : {}),
@@ -426,7 +468,7 @@ export function ReviewRiskView({
       <p className="text-sm">
         <span className="font-medium">{risk.title}</span>
         <span className="block text-xs text-muted-foreground">
-          {RISK_CATEGORY_LABELS[risk.category]} · now {scoreText(risk.likelihood, risk.impact)} · {RISK_STATUS_LABELS[risk.status]}
+          {RISK_CATEGORY_LABELS[risk.category]} · inherent {inherentWords(risk)} · control {controlWords(risk).toLowerCase()} · residual {residualWords(risk)} · {RISK_STATUS_LABELS[risk.status]}
         </span>
       </p>
       {withArea && <AreaSelect value={riskArea} onChange={setRiskArea} unassigned={!risk.riskArea} />}
@@ -445,8 +487,43 @@ export function ReviewRiskView({
         <ScoreSelect label="Impact" value={impact} onChange={setImpact} words={IMPACT_WORDS} name="impact" />
       </div>
       <p className="text-xs text-muted-foreground" data-risk-score-preview>
-        Score: {scoreText(likelihood, impact)}
+        Inherent score: {scoreText(likelihood, impact)}
       </p>
+      <label className="flex flex-col gap-1 text-sm">
+        Control effectiveness
+        <select className={field} value={control} onChange={(e) => setControl(e.target.value as ControlStep)} data-risk-field="control_effectiveness">
+          {!risk.control.effectiveness && <option value="">{NOT_ASSESSED}</option>}
+          {CONTROL_STEPS.map((s) => (
+            <option key={s} value={s}>
+              {CONTROL_STEP_LABELS[s]}
+            </option>
+          ))}
+        </select>
+        <span className="text-xs text-muted-foreground">How well the risk&apos;s controls work together. Mynt derives the residual score from it.</span>
+      </label>
+      <label className="flex flex-col gap-1 text-sm">
+        Why that effectiveness (optional)
+        <textarea className={`${field} min-h-16`} value={controlNote} onChange={(e) => setControlNote(e.target.value)} maxLength={2000} data-risk-field="control_note" />
+      </label>
+      <label className="flex flex-col gap-1 text-sm">
+        Residual score
+        <select className={field} value={override ? "override" : "derived"} onChange={(e) => setOverride(e.target.value === "override")} data-risk-field="residual_mode">
+          <option value="derived">Derived by Mynt&apos;s grading</option>
+          <option value="override">Set it myself (an override, with why)</option>
+        </select>
+      </label>
+      {override && (
+        <>
+          <div className="grid grid-cols-2 gap-3">
+            <ScoreSelect label="Residual likelihood" value={residualLikelihood} onChange={setResidualLikelihood} words={LIKELIHOOD_WORDS} name="residual_likelihood" />
+            <ScoreSelect label="Residual impact" value={residualImpact} onChange={setResidualImpact} words={IMPACT_WORDS} name="residual_impact" />
+          </div>
+          <label className="flex flex-col gap-1 text-sm">
+            Why the derived score doesn&apos;t fit
+            <textarea className={`${field} min-h-16`} value={overrideWhy} onChange={(e) => setOverrideWhy(e.target.value)} maxLength={2000} required data-risk-field="residual_override_reason" />
+          </label>
+        </>
+      )}
       <label className="flex flex-col gap-1 text-sm">
         Mitigation
         <textarea className={`${field} min-h-20`} value={mitigation} onChange={(e) => setMitigation(e.target.value)} maxLength={4000} data-risk-field="mitigation" />
@@ -460,7 +537,7 @@ export function ReviewRiskView({
         {needsNote ? "Why (needed to accept or close it)" : "Note (optional)"}
         <textarea className={`${field} min-h-16`} value={note} onChange={(e) => setNote(e.target.value)} maxLength={2000} required={needsNote} data-risk-field="note" />
       </label>
-      <Outcome busy={busy} error={error} result={result} submitLabel="Save review" busyLabel="Saving…" disabled={!Object.keys(change).length || (needsNote && !note.trim())} name="review" />
+      <Outcome busy={busy} error={error} result={result} submitLabel="Save review" busyLabel="Saving…" disabled={!Object.keys(change).length || (needsNote && !note.trim()) || (overrideChanged && overrideWhy.trim().length < 3)} name="review" />
     </form>
   )
 }
@@ -547,7 +624,7 @@ export function ReviewRiskSheet({
       <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-lg" data-review-risk-sheet>
         <SheetHeader>
           <SheetTitle>Review risk</SheetTitle>
-          <SheetDescription>Change where it stands, its scores, mitigation, owner or next review date. Every change is kept in its history.</SheetDescription>
+          <SheetDescription>Change where it stands, its likelihood and impact, how well its controls work, its residual score, mitigation, owner or next review date. Every change is kept in its history.</SheetDescription>
         </SheetHeader>
         <div className="px-4 pb-6">{risk && <ReviewRiskView key={`${risk.id}:${s.round}`} risk={risk} owners={owners} busy={s.busy} error={s.error} result={s.result} onSubmit={(c) => void s.submit(c)} withArea={withArea} />}</div>
       </SheetContent>

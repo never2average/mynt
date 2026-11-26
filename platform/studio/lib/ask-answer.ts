@@ -107,9 +107,14 @@ export const ADMIN_ASK_SOURCES: Record<string, SourceOf> = {
   audit_log: page("Audit trails", "/platform/audit"),
   admin_list_risks: page("Risk register", "/platform/risk-register", "Every register"),
   list_risks: page("Risk register", "/platform/risk-register", "Mynt's own risks"),
+  get_risk: (a) => {
+    const id = uuidOf(a.risk_id);
+    return { title: "Risk register", heading: "Risk", href: id ? `/platform/risk-register/${id}` : "/platform/risk-register" };
+  },
   list_risk_models: page("Risk models", "/platform/risk-models"),
   admin_list_product_risk_models: page("Risk models", "/platform/risk-models", "Products' models"),
   get_platform_settings: page("Platform settings", "/platform/settings"),
+  get_risk_grading: page("Platform settings", "/platform/settings", "Risk grading"),
   get_esign_settings: page("Platform settings", "/platform/settings", "E-signature"),
   list_enclave_releases: page("Platform settings", "/platform/settings", "Confidential service releases"),
 };

@@ -11,7 +11,7 @@ import { overdueAgreementAudits } from "./agreement-audits.js";
 import { openSlaBreaches } from "./agreement-slas.js";
 import { QUOTA_PATTERN } from "./transient.js";
 import { overdueRiskReviews } from "./risk-register.js";
-import { overdueRiskModelValidations } from "./risk-models.js";
+import { overdueRiskModelValidations, unhealthyRiskModels } from "./risk-models.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 
@@ -242,6 +242,8 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
   const risks = (await exists("risk_register")) ? await overdueRiskReviews(db) : { count: 0, risks: [] };
   // Mynt's own risk models (risk-models.ts): ones past their next validation date and not retired.
   const riskModels = (await exists("risk_models")) ? await overdueRiskModelValidations(db) : null;
+  // ...and the ones whose health isn't Healthy: a failed last validation, an overdue one, or none yet.
+  const unhealthyModels = (await exists("risk_models")) && (await exists("risk_links")) ? await unhealthyRiskModels(db) : null;
   // App agreements' oversight audits past their due date and not closed (agreement-audits.ts): each flags its app.
   const agreementAudits = await overdueAgreementAudits({ db });
   // Service levels under app agreements missed and not resolved yet (agreement-slas.ts).
@@ -271,6 +273,7 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...(appsMissingAgreements.length ? [`apps: ${appsMissingAgreements.length} production app(s) without a signed program agreement in force with a product's sponsor (ended or expired since they went live); they keep running and their workspaces are told (get_workspace_attention), but their production checks fail until one is signed: ${appsMissingAgreements.map((a) => a.app_name).join(", ")}`] : []),
     ...(risks.count ? [`risks: ${risks.count} risk review(s) overdue (review date passed, not closed) on apps' or products' risk registers; their keepers review them with update_risk`] : []),
     ...(riskModels?.count ? [`risk models: ${riskModels.count} of Mynt's risk model(s) overdue for validation (next validation date passed, not retired): ${riskModels.models.map((m) => m.name).join(", ")}; record one with validate_risk_model`] : []),
+    ...(unhealthyModels?.count ? [`risk models: ${unhealthyModels.count} of Mynt's risk model(s) not healthy (${unhealthyModels.models.map((m) => `${m.name}: ${m.health_words.toLowerCase()}`).join(", ")}); see list_risk_models`] : []),
     ...(offboards.length ? [`workspaces: ${offboards.length} offboarding(s) gave up after repeated failures (someone may keep access): retry_offboard once the provider is back`] : []),
     ...(orgMissing.length ? [`workspaces: ${orgMissing.length} workspace(s) frozen because their organization was deleted in the identity provider; their owners relink (relink_workspace_org) or archive (archive_workspace) them`] : []),
     ...(orgSync?.halted_at ? [`workspaces: the organization reconcile stopped itself (${orgSync.halted_reason}); nothing was changed. Check the identity provider; it resumes on its own once the numbers look normal`] : []),
@@ -304,7 +307,7 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...(covenants.blocked_webhooks ? [`covenants: ${covenants.blocked_webhooks} firm webhook(s) blocked: their creator can no longer receive covenant alerts, so a member with the licence-provider role must create them again (list_firm_webhooks)`] : []),
     ...(covenantTimerIdle ? [`covenants: ${covenants.active_rules} rule(s), but the covenant timer ${covenants.timer_last_ran ? `last ran ${covenants.timer_last_ran}` : "has never run"}`] : []),
   ];
-  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors: { ...vendors, money_name_mismatches: moneyNameMismatches }, solana, product_health: productHealth, covenants, agreement_audits: { overdue: agreementAudits.audits, apps_flagged: agreementAudits.apps }, sla_breaches: { open: slaBreaches.open, agreements: slaBreaches.agreements }, workspaces: { failed_offboards: offboards, webhook_secrets_rotated_on_offboard: rotatedOnOffboard, org_missing: orgMissing, org_backfill_pending: backfillPending, org_sync: orgSync }, apps: { production_without_program_agreements: appsMissingAgreements }, risks: { overdue_reviews: risks.count, overdue: risks.risks }, risk_models: riskModels ? { overdue_validations: riskModels.count, overdue: riskModels.models } : null, backups: backups.section };
+  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors: { ...vendors, money_name_mismatches: moneyNameMismatches }, solana, product_health: productHealth, covenants, agreement_audits: { overdue: agreementAudits.audits, apps_flagged: agreementAudits.apps }, sla_breaches: { open: slaBreaches.open, agreements: slaBreaches.agreements }, workspaces: { failed_offboards: offboards, webhook_secrets_rotated_on_offboard: rotatedOnOffboard, org_missing: orgMissing, org_backfill_pending: backfillPending, org_sync: orgSync }, apps: { production_without_program_agreements: appsMissingAgreements }, risks: { overdue_reviews: risks.count, overdue: risks.risks }, risk_models: riskModels ? { overdue_validations: riskModels.count, overdue: riskModels.models, not_healthy: unhealthyModels ? unhealthyModels.count : null, unhealthy: unhealthyModels ? unhealthyModels.models : null } : null, backups: backups.section };
 }
 
 export function registerOpsTools(server: McpServer, db: Db) {

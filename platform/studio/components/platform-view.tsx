@@ -38,7 +38,7 @@ export function PlatformSection({ tab, id }: { tab: AdminTab; id: string | null 
         {tab === "vendors" && <VendorsTab />}
         {tab === "audit" && <AuditTab id={id} onOpen={open("audit")} onBack={back("audit")} />}
         {tab === "risk-models" && <RiskModelsTab id={id} onOpen={open("risk-models")} onBack={back("risk-models")} />}
-        {tab === "risk-register" && <RiskRegisterTab />}
+        {tab === "risk-register" && <RiskRegisterTab id={id} onOpen={open("risk-register")} onBack={back("risk-register")} />}
         {tab === "settings" && <SettingsTab />}
       </div>
     </div>

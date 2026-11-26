@@ -20,9 +20,11 @@ export const ADMIN_ASK_TOOLS = [
   "audit_log",
   "admin_list_risks",
   "list_risks",
+  "get_risk",
   "list_risk_models",
   "admin_list_product_risk_models",
   "get_platform_settings",
+  "get_risk_grading",
   "get_esign_settings",
   "list_enclave_releases",
 ] as const satisfies readonly AdminTool[];
@@ -40,6 +42,6 @@ Rules:
 - If the results do not answer the question, say so plainly, starting with "Mynt's data doesn't cover this."
 - You can only read. You never change anything. When something needs doing, name where in the platform admin it is done, e.g. "Regulated firms → Licences → Verify licence", "Workspaces → the workspace → Invite member", "Vendors → Suspend offering", "Risk register → Add risk", "Platform settings".
 - Never reveal a secret: no keys, tokens or passwords, even if a result seems to hold one. Settings are their names and non-secret values.
-- Arguments: list_risks reads Mynt's own register only (subject_type "platform", subject_id "mynt"); admin_list_risks reads every register. get_vendor_onboarding takes all_firms: true. get_regulated_firm_onboarding takes all_firms: true, or one firm's entity_id. list_vendor_offerings takes include_unlisted: true.
+- Arguments: list_risks reads Mynt's own register only (subject_type "platform", subject_id "mynt"); admin_list_risks reads every register; get_risk reads one risk in full by its risk_id. get_vendor_onboarding takes all_firms: true. get_regulated_firm_onboarding takes all_firms: true, or one firm's entity_id. list_vendor_offerings takes include_unlisted: true.
 - At most 120 words. Plain markdown: one or two short paragraphs or a short list. No headings, no links, no tables.
 Reply with the answer only, in markdown, with its [n] citations.`;

@@ -2,7 +2,8 @@ import { z } from "zod";
 import { ChatKindSchema, SessionEvent, SessionId, SessionMetadata } from "./chat-sessions";
 import { isCalendarDate } from "./compliance";
 import { HORIZONS, LIQUIDITY, PRODUCT_ACTIONS, PRODUCT_LINES, ProductId, RETURN_TYPES, RISK_LEVELS } from "./products";
-import { RISK_AREAS, RISK_CATEGORIES, RISK_STATUSES } from "./risk-register";
+import { CONTROL_STEPS, RISK_AREAS, RISK_CATEGORIES, RISK_LEVELS_ASC, RISK_STATUSES } from "./risk-register";
+import { CONTROL_KINDS, CONTROL_TEST_RESULTS, FACTOR_KINDS, LINK_TARGETS, TREATMENT_EFFECTIVENESS, TREATMENT_STATUSES } from "./risk-detail";
 import { CLUSTER, SIGNATURE, SOLANA_ADDRESS } from "./wallets";
 import { AGREEMENT_FILE_MAX_BYTES } from "./agreement-esign";
 import { AGREEMENT_SCOPE_KEYS } from "./app-panel";
@@ -53,6 +54,19 @@ const riskCategory = z.enum(RISK_CATEGORIES);
 const riskStatus = z.enum(RISK_STATUSES);
 const riskScore = z.number().int().min(1).max(5);
 const riskArea = z.enum(RISK_AREAS);
+const controlStep = z.enum(CONTROL_STEPS);
+// A factor's source: an https link, or something on Mynt as type:id (core/src/risk-detail.ts).
+const riskSource = z
+  .string()
+  .trim()
+  .max(500)
+  .refine((v) => /^https:\/\/\S+$/.test(v) || new RegExp(`^(${LINK_TARGETS.join("|")}):[A-Za-z0-9_-]{1,200}$`).test(v), "An https link, or something on Mynt as type:id");
+const riskTargetId = z.string().trim().regex(/^[A-Za-z0-9_-]{1,200}$/);
+// The platform's risk grading (core/src/risk-grading.ts): four levels, their bands, and how the residual is derived.
+const gradingLevel = z.enum(RISK_LEVELS_ASC);
+const gradingBands = z.array(z.object({ level: gradingLevel, from: z.number().int().min(1).max(25), to: z.number().int().min(1).max(25) }).strict()).length(4);
+const perStep = <S extends z.ZodTypeAny>(s: S) => z.object({ none: s, weak: s, partial: s, strong: s }).strict();
+const perLevel = <S extends z.ZodTypeAny>(s: S) => z.object({ low: s, medium: s, high: s, critical: s }).strict();
 // An app kind's id, as Mynt's kind files name them (core/schemas/app-kind.schema.json).
 export const appKindId = z.string().regex(/^[a-z][a-z0-9-]{1,39}$/);
 // A service provider's service (My services): its endpoints (https only), price per call, notes, the firm's licences it
@@ -338,6 +352,8 @@ export const STUDIO_TOOLS = {
       mitigation: z.string().trim().max(4000).optional(),
       owner_user_id: uuid.optional(),
       review_by: auditDate.optional(),
+      control_effectiveness: controlStep.optional(),
+      control_note: z.string().trim().max(2000).optional(),
     })
     .strict(),
   update_risk: z
@@ -350,9 +366,64 @@ export const STUDIO_TOOLS = {
       impact: riskScore.optional(),
       owner_user_id: uuid.optional(),
       review_by: auditDate.optional(),
+      // Three-step scoring: how well the controls work, and the keeper's own residual in place of the derived one.
+      control_effectiveness: controlStep.optional(),
+      control_note: z.string().trim().max(2000).optional(),
+      residual_likelihood: riskScore.optional(),
+      residual_impact: riskScore.optional(),
+      residual_override_reason: z.string().trim().min(3).max(2000).optional(),
+      clear_residual_override: z.literal(true).optional(),
       note: z.string().trim().max(2000).optional(),
     })
     .strict(),
+  // One risk in full (its detail: the app's Security & risk tab, the product's Risk tab, the platform's Risk
+  // register), and what its keeper adds under it. Each takes the risk's id and its own fields, nothing else; Mynt
+  // decides who keeps which register and refuses the rest.
+  get_risk: z.object({ risk_id: uuid }).strict(),
+  add_risk_factor: z.object({ risk_id: uuid, kind: z.enum(FACTOR_KINDS), name: z.string().trim().min(2).max(200), score: riskScore, rationale: z.string().trim().max(2000).optional(), source: riskSource.optional() }).strict(),
+  update_risk_factor: z
+    .object({ risk_id: uuid, factor_id: uuid, name: z.string().trim().min(2).max(200).optional(), score: riskScore.optional(), rationale: z.string().trim().max(2000).optional(), source: riskSource.optional() })
+    .strict(),
+  remove_risk_factor: z.object({ risk_id: uuid, factor_id: uuid }).strict(),
+  add_risk_treatment: z.object({ risk_id: uuid, title: z.string().trim().min(3).max(200), owner_user_id: uuid.optional(), due: auditDate.optional(), progress_note: z.string().trim().max(2000).optional() }).strict(),
+  update_risk_treatment: z
+    .object({
+      risk_id: uuid,
+      treatment_id: uuid,
+      title: z.string().trim().min(3).max(200).optional(),
+      owner_user_id: uuid.optional(),
+      due: auditDate.optional(),
+      status: z.enum(TREATMENT_STATUSES).optional(),
+      progress_note: z.string().trim().max(2000).optional(),
+      effectiveness: z.enum(TREATMENT_EFFECTIVENESS).optional(),
+      effectiveness_note: z.string().trim().max(2000).optional(),
+    })
+    .strict(),
+  add_risk_control: z
+    .object({
+      risk_id: uuid,
+      name: z.string().trim().min(3).max(200).optional(),
+      kind: z.enum(CONTROL_KINDS),
+      description: z.string().trim().max(4000).optional(),
+      last_tested_at: auditDate.optional(),
+      test_result: z.enum(CONTROL_TEST_RESULTS).optional(),
+      source_treatment_id: uuid.optional(),
+    })
+    .strict(),
+  update_risk_control: z
+    .object({
+      risk_id: uuid,
+      control_id: uuid,
+      name: z.string().trim().min(3).max(200).optional(),
+      kind: z.enum(CONTROL_KINDS).optional(),
+      description: z.string().trim().max(4000).optional(),
+      last_tested_at: auditDate.optional(),
+      test_result: z.enum(CONTROL_TEST_RESULTS).optional(),
+    })
+    .strict(),
+  retire_risk_control: z.object({ risk_id: uuid, control_id: uuid, reason: z.string().trim().min(3).max(2000) }).strict(),
+  link_risk: z.object({ risk_id: uuid, target_type: z.enum(LINK_TARGETS), target_id: riskTargetId, note: z.string().trim().max(1000).optional() }).strict(),
+  unlink_risk: z.object({ risk_id: uuid, link_id: uuid }).strict(),
   // The Audits page's Agreement audits tab: oversight audits licence providers run on apps under program agreements.
   // Read by either party; the licence provider adds requirements, opens, records findings and closes; the app's side
   // submits evidence (https links with their SHA-256, never files) and answers findings. Mynt checks each side again.
@@ -711,8 +782,35 @@ export const ADMIN_TOOLS = {
     })
     .strict(),
   update_risk: STUDIO_TOOLS.update_risk,
+  // One risk's page (/platform/risk-register/<id>): Mynt's own, kept here; an app's or a product's, read-only.
+  get_risk: STUDIO_TOOLS.get_risk,
+  add_risk_factor: STUDIO_TOOLS.add_risk_factor,
+  update_risk_factor: STUDIO_TOOLS.update_risk_factor,
+  remove_risk_factor: STUDIO_TOOLS.remove_risk_factor,
+  add_risk_treatment: STUDIO_TOOLS.add_risk_treatment,
+  update_risk_treatment: STUDIO_TOOLS.update_risk_treatment,
+  add_risk_control: STUDIO_TOOLS.add_risk_control,
+  update_risk_control: STUDIO_TOOLS.update_risk_control,
+  retire_risk_control: STUDIO_TOOLS.retire_risk_control,
+  link_risk: STUDIO_TOOLS.link_risk,
+  unlink_risk: STUDIO_TOOLS.unlink_risk,
+  // Platform settings → Risk grading: the levels, bands and residual method every register is graded by; a change
+  // or a restored version is a new version, with why.
+  get_risk_grading: z.object({}).strict(),
+  set_risk_grading: z
+    .object({
+      levels: perLevel(z.string().trim().min(1).max(40)).optional(),
+      inherent_bands: gradingBands.optional(),
+      residual_bands: gradingBands.optional(),
+      residual_method: z.enum(["reduce", "matrix"]).optional(),
+      reduce: perStep(z.number().min(0).max(1)).optional(),
+      matrix: perLevel(perStep(gradingLevel)).optional(),
+      restore_version: z.number().int().min(1).optional(),
+      note: z.string().trim().min(3).max(2000),
+    })
+    .strict(),
   admin_list_risks: z
-    .object({ limit: z.number().int().min(1).max(100).optional(), subject_type: z.enum(["app", "product", "platform"]).optional(), risk_area: z.enum([...RISK_AREAS, "unassigned"]).optional() })
+    .object({ limit: z.number().int().min(1).max(100).optional(), subject_type: z.enum(["app", "product", "platform"]).optional(), risk_area: z.enum([...RISK_AREAS, "unassigned"]).optional(), residual_level: gradingLevel.optional() })
     .strict(),
   // Risk models (/platform/risk-models): Mynt's own, per risk area, each edit a new version; validations and retiring
   // are their own actions. And the risk models financial products declare in their definitions, read-only.

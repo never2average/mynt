@@ -62,9 +62,12 @@ const MYNT_MODEL = {
   owner: { user_id: USER, name: "Boss" },
   validation: { last_validated_at: "2026-06-01T10:00:00.000Z", validated_by: { user_id: USER, name: "Boss" }, outcome: "passed_with_findings", notes: "Back-tested", next_validation_due: "2026-09-01", overdue: true },
   retired: null,
+  health: "validation_overdue",
+  health_words: "Validation overdue",
+  linked_risks: 2,
 };
 const LIST = models.modelListFrom({
-  models: [MYNT_MODEL, { ...MYNT_MODEL, id: M2, name: "Treasury drawdown", status: "draft", version: 1, owner: null, validation: { last_validated_at: null, validated_by: null, outcome: null, notes: null, next_validation_due: null, overdue: false } }],
+  models: [MYNT_MODEL, { ...MYNT_MODEL, id: M2, name: "Treasury drawdown", status: "draft", version: 1, owner: null, health: "no_validation_yet", linked_risks: 0, validation: { last_validated_at: null, validated_by: null, outcome: null, notes: null, next_validation_due: null, overdue: false } }],
   counts: { draft: 1, active: 1, retired: 0, overdue: 1 },
 })!;
 const data = (area: Data["area"] = "financial", productModels: Data["productModels"] = null): Data => ({ area, models: LIST, owners: [{ userId: USER, name: "Boss" }], productModels });
@@ -148,7 +151,7 @@ describe("the list", () => {
       expect(document.querySelectorAll("[data-toolbar]"), area).toHaveLength(1);
       expect(document.querySelectorAll("[data-pager]"), area).toHaveLength(1);
       expect(document.querySelectorAll("h1, h2, h3, section"), area).toHaveLength(0);
-      expect(heads("[data-risk-models-area]"), area).toEqual(area === "regulated_product" ? ["Model", "Source", "Type", "Status", "Owner", "Version", "Last validated", "Next validation due", "Action"] : ["Model", "Status", "Owner", "Version", "Last validated", "Next validation due", "Action"]);
+      expect(heads("[data-risk-models-area]"), area).toEqual(area === "regulated_product" ? ["Model", "Source", "Type", "Status", "Health", "Owner", "Version", "Last validated", "Next validation due", "Linked risks", "Action"] : ["Model", "Status", "Health", "Owner", "Version", "Last validated", "Next validation due", "Linked risks", "Action"]);
       for (const sel of ["[data-platform-risk-models]", "[data-risk-models-area]", "[data-admin-list]"]) {
         expect(document.querySelector(sel)!.className, `${area} ${sel}`).toContain("min-h-0");
         expect(document.querySelector(sel)!.className, `${area} ${sel}`).toContain("flex-1");
@@ -171,17 +174,18 @@ describe("the list", () => {
     render(<RiskModelsAreaView data={data("regulated_product", rows)} onOpen={(id) => opened.push(id)} />);
     expect(document.querySelectorAll("table")).toHaveLength(1);
     expect(bodyRows("[data-risk-models-area]")).toEqual([
-      ["Pool liquidity coverage", "Mynt model", "Not stated", "Active: in use", "Boss", "Version 2", "2026-06-01: Passed with findings", "2026-09-01 (overdue)", "Open"],
-      ["Treasury drawdown", "Mynt model", "Not stated", "Draft: not yet in use", "No owner", "Version 1", "Never validated", "Not set", "Open"],
-      ["PD scorecard", "Product: Fixed deposit (Builder Inc)", "Fraud score", "Declared in the product's definition", "Builder Inc", "3", "Not recorded", "Not recorded", "Open"],
-      ["Loss model", "Product: Reference loan (Mynt's reference product)", "Loss given default", "Declared in the product's definition", "Mynt's reference product", "Not stated", "Not recorded", "Not recorded", ""],
+      ["Pool liquidity coverage", "Mynt model", "Not stated", "Active: in use", "Validation overdue", "Boss", "Version 2", "2026-06-01: Passed with findings", "2026-09-01 (overdue)", "2 risks", "Open"],
+      ["Treasury drawdown", "Mynt model", "Not stated", "Draft: not yet in use", "No validation yet", "No owner", "Version 1", "Never validated", "Not set", "0 risks", "Open"],
+      // A product's own model isn't validated by Mynt: its health says so, and its links aren't counted (never a 0).
+      ["PD scorecard", "Product: Fixed deposit (Builder Inc)", "Fraud score", "Declared in the product's definition", "Not assessed: the product's firm validates it", "Builder Inc", "3", "Not recorded", "Not recorded", "Not counted", "Open"],
+      ["Loss model", "Product: Reference loan (Mynt's reference product)", "Loss given default", "Declared in the product's definition", "Not assessed: the product's firm validates it", "Mynt's reference product", "Not stated", "Not recorded", "Not recorded", "Not counted", ""],
     ]);
     expect(document.querySelector("[data-pager]")!.textContent).toContain("4 rows · Page 1 of 1");
     expect([...document.querySelectorAll("[data-risk-models-area] table a")].map((a) => [a.textContent!.trim(), a.getAttribute("href")])).toEqual([
       ["Product: Fixed deposit (Builder Inc)", `/platform/firms/${FIRM}?tab=products`],
       ["Open", `/platform/firms/${FIRM}?tab=products`],
     ]);
-    expect(document.querySelector("[data-list-note]")!.textContent).toBe("1 model is overdue for validation. Product models are the ones financial products declare in their own definitions. Read-only: each product's firm keeps them.");
+    expect(document.querySelector("[data-list-note]")!.textContent).toBe("1 model is overdue for validation. 2 models aren't healthy. Product models are the ones financial products declare in their own definitions. Read-only: each product's firm keeps them.");
     // A product's row opens no model page: only Mynt's own do.
     await click('[data-row="product:fd:pd"]');
     expect(opened).toEqual([]);
@@ -210,17 +214,17 @@ describe("the list", () => {
   it("what Mynt can't answer is one row in the same table, Not available with why", () => {
     render(<RiskModelsAreaView data={{ ...data("regulated_product", { available: false, reason: "Reading financial products' own risk models comes with Mynt's next update." }), models: { available: false, reason: "Mynt didn't answer with its risk models." } }} />);
     expect(document.querySelectorAll("table")).toHaveLength(1);
-    expect(heads("[data-risk-models-area]")).toEqual(["Model", "Source", "Type", "Status", "Owner", "Version", "Last validated", "Next validation due", "Action"]);
+    expect(heads("[data-risk-models-area]")).toEqual(["Model", "Source", "Type", "Status", "Health", "Owner", "Version", "Last validated", "Next validation due", "Linked risks", "Action"]);
     expect(bodyRows("[data-risk-models-area]")).toEqual([
-      ["Not available. Mynt didn't answer with its risk models.", "Mynt model", "Not available", "Not available", "Not available", "Not available", "Not available", "Not available", ""],
-      ["Not available. Reading financial products' own risk models comes with Mynt's next update.", "Product models", "Not available", "Not available", "Not available", "Not available", "Not available", "Not available", ""],
+      ["Not available. Mynt didn't answer with its risk models.", "Mynt model", "Not available", "Not available", "Not available", "Not available", "Not available", "Not available", "Not available", "Not available", ""],
+      ["Not available. Reading financial products' own risk models comes with Mynt's next update.", "Product models", "Not available", "Not available", "Not available", "Not available", "Not available", "Not available", "Not available", "Not available", ""],
     ]);
     expect(document.querySelector("[data-add-risk-model]")).toBeNull();
     expect((document.querySelector("[data-export]") as HTMLButtonElement).disabled).toBe(true);
     cleanup();
     // Another tab has no Source column; Mynt's models it can't read are still one row with why, never an empty table.
     render(<RiskModelsAreaView data={{ ...data("financial"), models: { available: false, reason: "Mynt didn't answer with its risk models." } }} />);
-    expect(bodyRows("[data-risk-models-area]")).toEqual([["Not available. Mynt didn't answer with its risk models.", "Not available", "Not available", "Not available", "Not available", "Not available", ""]]);
+    expect(bodyRows("[data-risk-models-area]")).toEqual([["Not available. Mynt didn't answer with its risk models.", "Not available", "Not available", "Not available", "Not available", "Not available", "Not available", "Not available", ""]]);
   });
 
   it("what Mynt can't answer is Not available, with why; an empty area says so in words", () => {
@@ -278,8 +282,86 @@ describe("a model's page", () => {
     expect(document.querySelector("[data-model-definition] p")).toBeNull();
     await click('[data-detail-tab="validations"]');
     expect(tables()).toEqual([["Validated", "Version", "Outcome", "Validated by", "Notes", "Next due"]]);
+    await click('[data-detail-tab="linked"]');
+    expect(tables()).toEqual([["Risk", "Source", "Residual", "Status", "Review by"]]);
     await click('[data-detail-tab="versions"]');
     expect(tables()).toEqual([["Version", "Name", "Made", "By", "Why it changed"]]);
+    // The tabs, in their order.
+    expect([...document.querySelectorAll("[data-detail-tab]")].map((t) => t.textContent)).toEqual(["Definition", "Validations", "Linked risks", "Versions"]);
+  });
+
+  it("the facts grid, in its order, with the model's health in words", () => {
+    const facts = (detail: typeof DETAIL) => {
+      const view = render(<RiskModelDetailView data={{ detail, owners: [] }} />);
+      const out = [...document.querySelectorAll("[data-metadata-card] dl > div")].map((d) => [d.querySelector("dt")!.textContent, d.querySelector("dd")!.textContent]);
+      view.unmount();
+      return out;
+    };
+    expect(facts(DETAIL)).toEqual([
+      ["Status", "Active: in use"],
+      ["Health", "Validation overdue"],
+      ["Risk area", "Financial risk"],
+      ["Owner", "Boss"],
+      ["Version", "Version 2"],
+      ["Last validated", "2026-06-01: Passed with findings"],
+      ["Next validation due", "2026-09-01 (overdue)"],
+      ["Linked risks", "2 risks"],
+    ]);
+    expect([...models.MODEL_FACT_LABELS]).toEqual(facts(DETAIL).map((f) => f[0]));
+    // Health, derived: a failed last validation first, then an overdue one, then none at all; otherwise healthy.
+    const m = DETAIL.model;
+    expect(models.healthOf({ ...m, outcome: "failed" })).toBe("last_validation_failed");
+    expect(models.healthOf(m)).toBe("validation_overdue");
+    expect(models.healthOf({ ...m, overdue: false })).toBe("healthy");
+    expect(models.healthOf({ ...m, overdue: false, outcome: null, lastValidatedAt: null })).toBe("no_validation_yet");
+    expect(models.healthOf({ ...m, status: "retired" })).toBe("retired");
+    expect(Object.values(models.MODEL_HEALTH_LABELS)).toEqual(["Healthy", "Validation overdue", "Last validation failed", "No validation yet", "Retired"]);
+    const health = (h: (typeof models.MODEL_HEALTH)[number]) => facts({ ...DETAIL, model: { ...m, health: h } })[1][1];
+    expect([health("healthy"), health("last_validation_failed"), health("no_validation_yet")]).toEqual(["Healthy", "Last validation failed", "No validation yet"]);
+    // An older Mynt that sends neither: the health is derived here, and the links aren't counted (never a 0).
+    const old = models.modelFrom({ ...MYNT_MODEL, health: undefined, linked_risks: undefined })!;
+    expect([old.health, old.linkedRisks]).toEqual(["validation_overdue", null]);
+    expect(facts({ ...DETAIL, model: old, linked: null })[7]).toEqual(["Linked risks", "Not counted"]);
+  });
+
+  it("Linked risks: the risks that link to the model, each opening its page, with its source, residual, status and review date; Link risk posts link_risk", async () => {
+    const R = "77777777-7777-4777-8777-777777777777";
+    const R9 = "88888888-8888-4888-8888-888888888888";
+    const risk = (id: string, title: string, more: Record<string, unknown>) => ({ id, title, category: "liquidity", risk_area: "financial", likelihood: 4, impact: 5, status: "open", review_by: null, overdue: false, ...more });
+    const detail = models.modelDetailFrom({
+      model: MYNT_MODEL,
+      versions: [],
+      validations: [],
+      linked: [
+        { link_id: "l1", source: "Mynt", note: "The model's main output", risk: risk(R, "Pool runs dry", { control: { effectiveness: "weak" }, residual: { score: 15, level: "critical", level_name: "Critical", assessed: true, overridden: false }, review_by: "2026-01-01", overdue: true }) },
+        { link_id: "l2", source: "App: Saver", note: null, risk: risk(R9, "Coverage misread", { likelihood: 2, impact: 2, status: "mitigating" }) },
+      ],
+    })!;
+    const { f, calls } = fetcher();
+    render(<RiskModelDetailView data={{ detail, owners: [], riskChoices: [{ id: R9, title: "Stale inputs" }] }} initialTab="linked" fetcher={f} />);
+    expect(document.querySelectorAll("[data-detail-table] table")).toHaveLength(1);
+    expect(bodyRows("[data-detail-table]")).toEqual([
+      ["Pool runs dryThe model's main output", "Mynt", "15 (Critical)", "Open: not yet mitigated", "2026-01-01 (overdue)"],
+      ["Coverage misread", "App: Saver", "4 (Low), same as inherent: control not assessed", "Mitigating: work under way", "Not set"],
+    ]);
+    expect([...document.querySelectorAll("[data-linked-risk]")].map((a) => a.getAttribute("href"))).toEqual([`/platform/risk-register/${R}`, `/platform/risk-register/${R9}`]);
+    expect(document.querySelector("[data-metadata-card]")!.textContent).toContain("Linked risks2 risks");
+    // Link risk: a labelled button opening its sheet, which posts the model's own action.
+    expect(document.querySelector("[data-link-risk]")!.textContent!.trim()).toBe("Link risk");
+    await click("[data-link-risk]");
+    expect(document.querySelector('[data-admin-sheet="link-risk"]')).not.toBeNull();
+    change('[data-model-field="risk"]', R9);
+    change('[data-model-field="link-note"]', "Feeds the coverage ratio");
+    await submit(`[data-link-risk-form="${M1}"]`);
+    expect(calls).toEqual([{ url: `/api/admin/risk-models/${M1}`, body: { action: "link_risk", risk_id: R9, note: "Feeds the coverage ratio" } }]);
+    cleanup();
+    // None linked: said so. A Mynt that can't list them: Not available, with why. No risks to pick from: no Link risk.
+    render(<RiskModelDetailView data={{ detail: { ...detail, linked: [] }, owners: [] }} initialTab="linked" />);
+    expect(bodyRows("[data-detail-table]")).toEqual([["No risks link to this model yet."]]);
+    expect(document.querySelector("[data-link-risk]")).toBeNull();
+    cleanup();
+    render(<RiskModelDetailView data={{ detail: { ...detail, linked: null }, owners: [] }} initialTab="linked" />);
+    expect(bodyRows("[data-detail-table]")).toEqual([["Not available. Linked risks come with Mynt's next update."]]);
   });
 
   it("Validations and Versions: every one kept, newest version first", async () => {

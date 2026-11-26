@@ -49,6 +49,9 @@ const DEVELOPER_TOOLS = [
   "get_app_customers", "list_app_agreements", "propose_app_agreement", "respond_to_app_agreement", "set_app_target_segments", "sign_app_agreement", "terminate_app_agreement", "update_agreement_scopes",
   // the risk registers of its apps and products
   "add_risk", "list_risks", "update_risk",
+  // one risk in full, and what its keeper adds under it: scoring factors, treatment tasks, controls and links
+  "get_risk", "add_risk_factor", "update_risk_factor", "remove_risk_factor", "add_risk_treatment", "update_risk_treatment",
+  "add_risk_control", "update_risk_control", "retire_risk_control", "link_risk", "unlink_risk",
   // signing program agreements by e-signature, and the signed copies
   "download_agreement_document", "get_agreement_signing_link",
   // the app side of oversight audits under those agreements: read them, submit evidence, answer findings
@@ -168,7 +171,8 @@ test("roles nest: innovator and developer are one builder role, builders are con
 
 test("Mynt's own risk models are an admin's tools only", async () => {
   const { store, as, developer } = await setup();
-  const RISK_MODEL_TOOLS = ["add_risk_model", "admin_list_product_risk_models", "list_risk_models", "retire_risk_model", "update_risk_model", "validate_risk_model"];
+  // ...and so is the platform's risk grading.
+  const RISK_MODEL_TOOLS = ["add_risk_model", "admin_list_product_risk_models", "get_risk_grading", "list_risk_models", "retire_risk_model", "set_risk_grading", "update_risk_model", "validate_risk_model"];
   const admin = await toolNames(await connect(store, await as("Root", ["admin"])));
   assert.deepEqual(admin.filter((t) => RISK_MODEL_TOOLS.includes(t)), RISK_MODEL_TOOLS);
   for (const who of [developer, await as("Lena", ["license_provider"]), await as("Vera", ["vendor"])])
