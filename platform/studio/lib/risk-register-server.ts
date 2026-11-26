@@ -49,6 +49,8 @@ export const RiskChangeRequest = z.discriminatedUnion("action", [
       mitigation: opt(add.shape.mitigation),
       owner_user_id: opt(add.shape.owner_user_id),
       review_by: opt(add.shape.review_by),
+      control_effectiveness: opt(add.shape.control_effectiveness),
+      control_note: opt(add.shape.control_note),
     })
     .strict(),
   review
@@ -58,6 +60,9 @@ export const RiskChangeRequest = z.discriminatedUnion("action", [
       mitigation: opt(review.shape.mitigation),
       owner_user_id: opt(review.shape.owner_user_id),
       review_by: opt(review.shape.review_by),
+      control_effectiveness: opt(review.shape.control_effectiveness),
+      control_note: opt(review.shape.control_note),
+      residual_override_reason: opt(review.shape.residual_override_reason),
       note: opt(review.shape.note),
     })
     .strict(),

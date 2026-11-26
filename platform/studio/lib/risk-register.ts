@@ -1,7 +1,9 @@
 // The risk register an app and a financial product each keep on Mynt (add_risk, update_risk, list_risks), and the
 // signals Mynt measures around an app (fraud, vendors, conduct, its products). An app shows them on its
-// "Security & risk" tab, a product its register at the top of its Risk tab. Status is always in words, never a
-// colour alone; whatever Mynt doesn't measure says so with why, never 0 or an empty table. Pure: the routes read
+// "Security & risk" tab, a product its register at the top of its Risk tab. Every risk carries three scores: inherent
+// (likelihood × impact), control (how well its controls work: none, weak, partial, strong, or "Not assessed") and
+// residual (derived by the platform's grading, or the keeper's own; "same as inherent" until the control is
+// assessed), each with its level in words. Status is always in words, never a colour alone; whatever Mynt doesn't measure says so with why, never 0 or an empty table. Pure: the routes read
 // Mynt's replies into these shapes, and the views, sheets and tests share them.
 
 type Obj = Record<string, unknown>;
@@ -67,6 +69,51 @@ export const RISK_LEVEL_LABELS: Record<string, string> = { low: "Low", medium: "
 export const riskLevel = (score: number) => (score <= 4 ? "low" : score <= 9 ? "medium" : score <= 14 ? "high" : "critical");
 export const scoreText = (likelihood: number, impact: number) => `${likelihood} × ${impact} = ${likelihood * impact} (${RISK_LEVEL_LABELS[riskLevel(likelihood * impact)]})`;
 
+// Three-step scoring (core/src/risk-grading.ts). The levels, lowest first, and the control's four steps.
+export const RISK_LEVELS_ASC = ["low", "medium", "high", "critical"] as const;
+export type RiskLevelKey = (typeof RISK_LEVELS_ASC)[number];
+export const CONTROL_STEPS = ["none", "weak", "partial", "strong"] as const;
+export type ControlStep = (typeof CONTROL_STEPS)[number];
+export const CONTROL_STEP_LABELS: Record<ControlStep, string> = { none: "None", weak: "Weak", partial: "Partial", strong: "Strong" };
+export const NOT_ASSESSED = "Not assessed";
+export const isLevel = (v: unknown): v is RiskLevelKey => typeof v === "string" && (RISK_LEVELS_ASC as readonly string[]).includes(v);
+export const isControlStep = (v: unknown): v is ControlStep => typeof v === "string" && (CONTROL_STEPS as readonly string[]).includes(v);
+export type Graded = { score: number; level: RiskLevelKey; levelName: string };
+export type RiskScores = {
+  inherent: Graded;
+  control: { effectiveness: ControlStep | null; note: string | null };
+  // assessed false: the control isn't assessed and nothing overrides it, so this is the inherent score.
+  residual: Graded & { assessed: boolean; overridden: boolean; likelihood: number | null; impact: number | null; why: string | null };
+};
+/** "4 × 3 = 12 (High)": the inherent score, with its level in words. */
+export const inherentWords = (r: { likelihood: number; impact: number } & RiskScores) => `${r.likelihood} × ${r.impact} = ${r.inherent.score} (${r.inherent.levelName})`;
+/** "Strong", or "Not assessed": never a blank, never a 0. */
+export const controlWords = (r: RiskScores) => (r.control.effectiveness ? CONTROL_STEP_LABELS[r.control.effectiveness] : NOT_ASSESSED);
+/** "6 (Medium)"; "overridden" when the keeper set it; "same as inherent" while the control isn't assessed. */
+export const residualWords = (r: RiskScores) =>
+  `${r.residual.score} (${r.residual.levelName})${r.residual.overridden ? ", overridden" : r.residual.assessed ? "" : ", same as inherent: control not assessed"}`;
+
+/** A risk's three scores as Mynt sent them; from an older Mynt that sends only likelihood and impact, the inherent
+ * score by Mynt's default bands, the control not assessed and the residual the same as inherent. */
+export function scoresFrom(r: Record<string, unknown>, likelihood: number, impact: number): RiskScores {
+  const graded = (v: unknown, fallback: number): Graded => {
+    const o = isObj(v) ? v : {};
+    const score = int(o.score) ?? fallback;
+    const level = isLevel(o.level) ? o.level : (riskLevel(score) as RiskLevelKey);
+    return { score, level, levelName: str(o.level_name) ?? RISK_LEVEL_LABELS[level] };
+  };
+  const inherent = graded(r.inherent, likelihood * impact);
+  const c = isObj(r.control) ? r.control : {};
+  const res = isObj(r.residual) ? r.residual : {};
+  const override = isObj(res.override) ? res.override : null;
+  const overridden = res.overridden === true;
+  return {
+    inherent,
+    control: { effectiveness: isControlStep(c.effectiveness) ? c.effectiveness : null, note: str(c.note) },
+    residual: { ...graded(r.residual, inherent.score), assessed: res.assessed === true, overridden, likelihood: overridden ? int(res.likelihood) : null, impact: overridden ? int(res.impact) : null, why: override ? str(override.why) : null },
+  };
+}
+
 export type RiskRow = {
   id: string;
   title: string;
@@ -81,7 +128,7 @@ export type RiskRow = {
   status: RiskStatus;
   reviewBy: string | null;
   overdue: boolean;
-};
+} & RiskScores;
 // Who may own a risk: the app's workspace members (the product's firm isn't listed: its owner defaults to you).
 export type OwnerChoice = { userId: string; name: string };
 export type RiskRegister = { available: true; canManage: boolean; risks: RiskRow[]; overdue: number; owners: OwnerChoice[] };
@@ -102,9 +149,12 @@ export function riskRowsFrom(v: unknown): RiskRow[] {
       if (!id || !title || likelihood === null || impact === null || !isCategory(r.category) || !isStatus(r.status)) return [];
       const owner = isObj(r.owner) && str(r.owner.user_id) ? { userId: str(r.owner.user_id)!, name: str(r.owner.name) } : null;
       const riskArea = "risk_area" in r ? (isRiskArea(r.risk_area) ? r.risk_area : null) : undefined;
-      return [{ id, title, category: r.category, ...(riskArea !== undefined ? { riskArea } : {}), description: str(r.description), likelihood, impact, score: likelihood * impact, owner, mitigation: str(r.mitigation), status: r.status, reviewBy: str(r.review_by), overdue: r.overdue === true }];
-    });
+      return [{ id, title, category: r.category, ...(riskArea !== undefined ? { riskArea } : {}), description: str(r.description), likelihood, impact, score: likelihood * impact, owner, mitigation: str(r.mitigation), status: r.status, reviewBy: str(r.review_by), overdue: r.overdue === true, ...scoresFrom(r, likelihood, impact) }];
+    })
+    .sort(byResidual);
 }
+/** Highest residual score first, then the highest inherent score. */
+export const byResidual = (a: RiskScores, b: RiskScores) => b.residual.score - a.residual.score || b.inherent.score - a.inherent.score;
 
 /** list_risks' reply, or null when it isn't one. */
 export function registerFrom(reply: unknown, owners: OwnerChoice[] = []): RiskRegister | null {
@@ -169,5 +219,22 @@ export function signalsFrom(reply: unknown): AppSignals {
 
 /** What a register's sheets send: Add risk (add) or Review risk (review). The route adds the subject. */
 export type RiskChange =
-  | { action: "add"; title: string; category: RiskCategory; risk_area?: RiskArea; likelihood: number; impact: number; description?: string; mitigation?: string; owner_user_id?: string; review_by?: string }
-  | { action: "review"; risk_id: string; status?: RiskStatus; risk_area?: RiskArea; mitigation?: string; likelihood?: number; impact?: number; owner_user_id?: string; review_by?: string; note?: string };
+  | { action: "add"; title: string; category: RiskCategory; risk_area?: RiskArea; likelihood: number; impact: number; description?: string; mitigation?: string; owner_user_id?: string; review_by?: string; control_effectiveness?: ControlStep; control_note?: string }
+  | {
+      action: "review";
+      risk_id: string;
+      status?: RiskStatus;
+      risk_area?: RiskArea;
+      mitigation?: string;
+      likelihood?: number;
+      impact?: number;
+      owner_user_id?: string;
+      review_by?: string;
+      control_effectiveness?: ControlStep;
+      control_note?: string;
+      residual_likelihood?: number;
+      residual_impact?: number;
+      residual_override_reason?: string;
+      clear_residual_override?: true;
+      note?: string;
+    };
