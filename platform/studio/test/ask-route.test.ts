@@ -5,12 +5,12 @@ import { STUDIO_TOOLS } from "@/lib/studio-tools";
 import { readTimed, sleep } from "./stream-timing";
 
 // A fake Mynt, a fake model and a fake sign-in.
-type Step = { thinking?: string[]; text?: string; pieces?: string[]; gapMs?: number; tool?: { name: string; input: Record<string, unknown> }; stop?: string };
+type Step = { thinking?: string[]; text?: string; pieces?: string[]; gapMs?: number; tool?: { name: string; input: Record<string, unknown> }; stop?: string; fail?: boolean };
 const fake = {
   session: undefined as Session | undefined,
   configured: true,
   steps: [] as Step[],
-  requests: [] as { tools: { name: string }[]; messages: unknown[]; system: unknown; max_tokens?: number; thinking?: unknown }[],
+  requests: [] as { model?: string; tools: { name: string }[]; messages: unknown[]; system: unknown; max_tokens?: number; thinking?: unknown }[],
   calls: [] as { name: string; args: Record<string, unknown> }[],
   logged: [] as string[],
   producedAt: [] as number[],
@@ -68,8 +68,8 @@ vi.mock("@/lib/mynt-client", () => {
 
 function fakeLlm() {
   return {
-    stream: (params: { tools: { name: string }[]; messages: unknown[]; system: unknown; max_tokens?: number; thinking?: unknown }) => {
-      fake.requests.push({ tools: params.tools, messages: structuredClone(params.messages), system: params.system, max_tokens: params.max_tokens, thinking: params.thinking });
+    stream: (params: { model?: string; tools: { name: string }[]; messages: unknown[]; system: unknown; max_tokens?: number; thinking?: unknown }) => {
+      fake.requests.push({ model: params.model, tools: params.tools, messages: structuredClone(params.messages), system: params.system, max_tokens: params.max_tokens, thinking: params.thinking });
       const step = fake.steps.shift() ?? { text: "Done." };
       // The SDK's stream events by name: "text" deltas, "thinking" deltas, and "contentBlock" as each block ends.
       const on = new Map<string, ((v: never) => void)[]>();
@@ -90,6 +90,8 @@ function fakeLlm() {
               emit("text", p);
             }
           else if (step.text) emit("text", step.text);
+          // A model that fails part-way: what it wrote is out, then the request errors.
+          if (step.fail) throw new Error("model failed");
           const content: unknown[] = [];
           if (step.thinking) content.push({ type: "thinking", thinking: step.thinking.join(""), signature: "sig-1" });
           if (step.text) content.push({ type: "text", text: step.text });
@@ -104,12 +106,15 @@ function fakeLlm() {
 vi.mock("@/lib/llm", () => ({
   askConfigured: () => fake.configured,
   askModel: () => "claude-opus-5-5",
+  askModels: () => ["claude-opus-5-5", "claude-opus-4-8"],
   createLlm: () => fakeLlm(),
 }));
 
-const { GET, POST, ASK_PER_HOUR, MAX_BODY_BYTES } = await import("@/app/api/ask/route");
+const { GET, POST } = await import("@/app/api/ask/route");
+const { ASK_PER_HOUR, MAX_BODY_BYTES } = await import("@/lib/ask-server");
 
 const question = (text: string) => ({ role: "user", parts: [{ type: "text", text }] });
+const ask = (text: string) => post({ question: text });
 const post = (body: unknown, origin = "http://localhost:3000") =>
   POST(new Request("http://localhost:3000/api/ask", { method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body) }));
 
@@ -138,65 +143,95 @@ describe("/api/ask", () => {
   it("streams the answer as the model writes it: the first words reach the browser before the last are written, through headers that keep proxies from holding it back", async () => {
     const pieces = ["You have ", "one app, ", "Round-up ", "savings."];
     fake.steps = [{ pieces, gapMs: 150 }];
-    const res = await post({ messages: [question("Which apps do I have?")] });
+    const res = await ask("Which apps do I have?");
     expect(res.headers.get("content-type")).toContain("text/event-stream");
     expect(res.headers.get("cache-control")).toBe("no-store, no-transform");
     expect(res.headers.get("x-accel-buffering")).toBe("no");
     const got = await readTimed(res);
-    const deltas = got.filter((c) => c.chunk.type === "text-delta");
-    expect(deltas.map((c) => c.chunk.delta)).toEqual(pieces); // a delta per piece, not one at the end
+    const deltas = got.filter((c) => c.chunk.type === "delta");
+    expect(deltas.map((c) => c.chunk.text)).toEqual(pieces); // a delta per piece, not one at the end
     expect(fake.producedAt).toHaveLength(pieces.length);
     const lastWritten = fake.producedAt[pieces.length - 1];
     console.info(`ask: first delta at +${(deltas[0].at - fake.producedAt[0]).toFixed(1)} ms after the model wrote it; ${(lastWritten - deltas[0].at).toFixed(1)} ms before the last piece was written`);
     expect(deltas[0].at).toBeLessThan(lastWritten);
     // Each piece arrives before the next is written.
     for (let i = 0; i < pieces.length - 1; i++) expect(deltas[i].at).toBeLessThan(fake.producedAt[i + 1]);
+    // The stream ends with the whole answer and the model that wrote it.
+    expect(got.at(-1)!.chunk).toMatchObject({ type: "done", answer: "You have one app, Round-up savings.", covered: true, model: "claude-opus-5-5", reason: null });
   });
 
-  it("asks for summarized adaptive thinking and streams it as reasoning parts before the answer's text, never logging it", async () => {
+  it("each read is a numbered source: sent before the answer, cited by the model, and what was written before the read is dropped", async () => {
+    fake.steps = [{ text: "Let me look.", tool: { name: "list_my_apps", input: {} } }, { text: "You have one app: Round-up savings [1]." }];
+    const out = await chunks(await ask("Which apps do I have?"));
+    expect(out.map((c) => c.type)).toEqual(["delta", "reset", "sources", "delta", "done"]);
+    expect(out[2].sources).toEqual([{ n: 1, title: "Dashboard", heading: "Apps", href: "/" }]);
+    expect(out.at(-1)).toMatchObject({ type: "done", answer: "You have one app: Round-up savings [1].", covered: true, reason: null });
+    expect(fake.calls.map((c) => c.name)).toContain("list_my_apps");
+    // The model saw Mynt's reply under its source number; the browser sees the source, never Mynt's reply.
+    expect(JSON.stringify(fake.requests[1].messages)).toContain("Source [1] (Dashboard, Apps):");
+    expect(JSON.stringify(fake.requests[1].messages)).toContain("Round-up savings");
+    expect(JSON.stringify(out)).not.toContain('"apps"');
+    // One question, asked as it was typed: nothing else is in the conversation.
+    expect(fake.requests[0].messages).toEqual([{ role: "user", content: "Which apps do I have?" }]);
+  });
+
+  it("cleans the answer: links become their text, headings go, and citations of sources it wasn't given are dropped", async () => {
+    fake.steps = [{ tool: { name: "list_my_apps", input: {} } }, { text: "## Apps\nSee [your dashboard](https://evil.example/x) [1][7]. <b>Done</b>" }];
+    const out = await chunks(await ask("Which apps do I have?"));
+    expect(out.at(-1)).toMatchObject({ type: "done", answer: "Apps\nSee your dashboard [1]. Done" });
+  });
+
+  it("says when the data doesn't cover the question", async () => {
+    fake.steps = [{ text: "Mynt's data doesn't cover this. It has no weather." }];
+    const out = await chunks(await ask("What's the weather today?"));
+    expect(out.at(-1)).toMatchObject({ type: "done", covered: false, reason: null });
+  });
+
+  it("the first model that answers is the answer's: when one fails, what it wrote is dropped and the next starts", async () => {
+    fake.steps = [{ text: "You have ", fail: true }, { text: "You have no apps yet." }];
+    const out = await chunks(await ask("Which apps do I have?"));
+    expect(out.map((c) => c.type)).toEqual(["delta", "reset", "delta", "done"]);
+    expect(out.at(-1)).toMatchObject({ type: "done", answer: "You have no apps yet.", model: "claude-opus-4-8", reason: null });
+    expect(fake.requests.map((r) => r.model)).toEqual(["claude-opus-5-5", "claude-opus-4-8"]);
+  });
+
+  it("when no model answers there is no answer, and the reason says so", async () => {
+    fake.steps = [{ fail: true }, { fail: true }];
+    const out = await chunks(await ask("Which apps do I have?"));
+    expect(out.at(-1)).toEqual({ type: "done", answer: null, covered: null, sources: [], model: null, reason: "unavailable" });
+    expect(fake.requests).toHaveLength(2);
+  });
+
+  it("asks for summarized adaptive thinking, and shows none of it", async () => {
     fake.steps = [{ thinking: ["Looking up ", "their apps."], tool: { name: "list_my_apps", input: {} } }, { thinking: ["One app found."], text: "You have one app." }];
-    const out = await chunks(await post({ messages: [question("Which apps do I have?")] }));
+    const out = await chunks(await ask("Which apps do I have?"));
     expect(fake.requests.map((r) => r.thinking)).toEqual([
       { type: "adaptive", display: "summarized" },
       { type: "adaptive", display: "summarized" },
     ]);
-    const shown = out.filter((c) => /^(reasoning|text)-/.test(String(c.type))).map((c) => [c.type, c.id, c.delta ?? null]);
-    expect(shown).toEqual([
-      ["reasoning-start", "r1", null],
-      ["reasoning-delta", "r1", "Looking up "],
-      ["reasoning-delta", "r1", "their apps."],
-      ["reasoning-end", "r1", null],
-      ["reasoning-start", "r2", null],
-      ["reasoning-delta", "r2", "One app found."],
-      ["reasoning-end", "r2", null],
-      ["text-start", "t1", null],
-      ["text-delta", "t1", "You have one app."],
-      ["text-end", "t1", null],
-    ]);
-    // The read ran between the two thinking blocks.
-    expect(out.findIndex((c) => c.type === "tool-input-available")).toBeGreaterThan(out.findIndex((c) => c.type === "reasoning-end"));
+    expect(JSON.stringify(out)).not.toContain("their apps");
     expect(fake.logged.join("\n")).not.toContain("their apps");
   });
 
   it("refuses unauthenticated calls, both the status check and questions", async () => {
     fake.session = undefined;
     expect((await GET()).status).toBe(401);
-    expect((await post({ messages: [question("Which apps do I have?")] })).status).toBe(401);
+    expect((await ask("Which apps do I have?")).status).toBe(401);
     fake.session = { id: "s", createdAt: 0, lastSeen: 0 } as Session; // a session that never signed in
-    expect((await post({ messages: [question("Which apps do I have?")] })).status).toBe(401);
+    expect((await ask("Which apps do I have?")).status).toBe(401);
     expect(fake.calls).toEqual([]);
     expect(fake.requests).toEqual([]);
   });
 
   it("refuses questions from another origin", async () => {
-    expect((await post({ messages: [question("hi")] }, "https://evil.example")).status).toBe(403);
+    expect((await post({ question: "Which apps do I have?" }, "https://evil.example")).status).toBe(403);
     expect(fake.requests).toEqual([]);
   });
 
   it("says when no model is configured (503), and the status check says it's off", async () => {
     fake.configured = false;
     expect(await (await GET()).json()).toEqual({ enabled: false });
-    const res = await post({ messages: [question("hi")] });
+    const res = await ask("Which apps do I have?");
     expect(res.status).toBe(503);
     expect((await res.json()).message).toBe("AI is not configured.");
     expect(fake.requests).toEqual([]);
@@ -204,7 +239,7 @@ describe("/api/ask", () => {
 
   it("offers the model only read tools, though Mynt lists writes too", async () => {
     fake.steps = [{ text: "You have no apps yet." }];
-    const res = await post({ messages: [question("Which apps do I have?")] });
+    const res = await ask("Which apps do I have?");
     expect(res.status).toBe(200);
     await chunks(res);
     const offered = fake.requests[0].tools.map((t) => t.name).sort();
@@ -213,36 +248,27 @@ describe("/api/ask", () => {
       expect(offered).not.toContain(write);
   });
 
-  it("streams the answer, reading through Mynt as the user", async () => {
-    fake.steps = [{ text: "Let me look.", tool: { name: "list_my_apps", input: {} } }, { text: "You have one app: Round-up savings." }];
-    const res = await post({ messages: [question("Which apps do I have?")] });
-    const parts = await chunks(res);
-    const text = parts.filter((p) => p.type === "text-delta").map((p) => p.delta).join("");
-    expect(text).toBe("Let me look.You have one app: Round-up savings.");
-    expect(parts.some((p) => p.type === "tool-input-available" && p.toolName === "list_my_apps")).toBe(true);
-    // The browser sees that a read ran, not Mynt's reply.
-    expect(JSON.stringify(parts)).not.toContain('"apps"');
-    expect(fake.calls.map((c) => c.name)).toContain("list_my_apps");
-    // The model saw Mynt's reply.
-    expect(JSON.stringify(fake.requests[1].messages)).toContain("Round-up savings");
-  });
-
   it("never runs a write the model asks for", async () => {
     fake.steps = [{ tool: { name: "create_app", input: { name: "x", description: "x", audience: "x", product_ids: ["p"] } } }, { text: "I can't create apps." }];
-    const parts = await chunks(await post({ messages: [question("Make me an app")] }));
+    const out = await chunks(await ask("Make me an app"));
     expect(fake.calls.map((c) => c.name)).not.toContain("create_app");
     expect(JSON.stringify(fake.requests[1].messages)).toContain("can only read");
-    expect(parts.some((p) => p.type === "tool-output-available" && (p.output as { ok?: boolean }).ok === false)).toBe(true);
+    // A refused call is no source.
+    expect(out.some((c) => c.type === "sources")).toBe(false);
   });
 
   it("never logs what was asked or answered", async () => {
     fake.steps = [{ text: "secret-answer-text" }];
-    await chunks(await post({ messages: [question("secret-question-text")] }));
+    await chunks(await ask("secret-question-text please"));
     expect(fake.logged.join("\n")).not.toMatch(/secret-(question|answer)-text/);
   });
 
-  it("refuses a body with no question", async () => {
-    expect((await post({ messages: [{ role: "assistant", parts: [{ type: "text", text: "hi" }] }] })).status).toBe(400);
+  it("refuses a body with no question, one too short and one too long", async () => {
+    expect((await post({ messages: [question("Which apps do I have?")] })).status).toBe(400);
+    expect((await post({ question: "hi" })).status).toBe(400);
+    expect((await post({ question: "x".repeat(401) })).status).toBe(400);
+    expect((await post({ question: 7 })).status).toBe(400);
+    expect(fake.requests).toEqual([]);
   });
 });
 
@@ -420,13 +446,12 @@ describe("Ask AI's limits", () => {
 
   it("the route asks the model for few output tokens", async () => {
     fake.steps = [{ text: "hi" }];
-    await chunks(await post({ messages: [question("hi")] }));
+    await chunks(await ask("Which apps do I have?"));
     expect(fake.requests[0].max_tokens).toBe(MAX_OUTPUT_TOKENS);
   });
 
   it("refuses a body over 64 KB with 413, by its declared length or by what's sent", async () => {
-    const big = JSON.stringify({ messages: [question("x".repeat(MAX_BODY_BYTES))] });
-    expect((await post(JSON.parse(big))).status).toBe(413);
+    expect((await post({ question: "x".repeat(MAX_BODY_BYTES) })).status).toBe(413);
     // No content-length (a stream): refused once it passes the limit.
     const body = new ReadableStream<Uint8Array>({
       start(c) {
@@ -442,17 +467,28 @@ describe("Ask AI's limits", () => {
     expect(fake.requests).toEqual([]);
   });
 
-  it(`answers ${ASK_PER_HOUR} questions an hour per user, then a polite 429`, async () => {
+  it(`answers ${ASK_PER_HOUR} questions an hour per user; past that there is no answer, and the reason says why`, async () => {
     for (let i = 0; i < ASK_PER_HOUR; i++) {
       fake.steps = [{ text: "ok" }];
-      const res = await post({ messages: [question(`q${i}`)] });
+      const res = await ask(`question number ${i}`);
       expect(res.status).toBe(200);
       await chunks(res);
     }
-    const res = await post({ messages: [question("one more")] });
-    expect(res.status).toBe(429);
-    expect(res.headers.get("retry-after")).toBe("3600");
-    expect((await res.json()).message).toMatch(/questions in the last hour/);
+    const res = await ask("one more question");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toEqual({ answer: null, covered: null, sources: [], model: null, reason: "rate_limited" });
     expect(fake.requests).toHaveLength(ASK_PER_HOUR);
+  });
+
+  it("answers one question at a time per user", async () => {
+    fake.steps = [{ pieces: ["slow ", "answer"], gapMs: 40 }];
+    const first = await ask("Which apps do I have?");
+    const second = await ask("And which builds?");
+    expect(second.status).toBe(429);
+    expect((await second.json()).error).toBe("busy");
+    await chunks(first);
+    fake.steps = [{ text: "ok" }];
+    expect((await ask("And which builds?")).status).toBe(200);
   });
 });

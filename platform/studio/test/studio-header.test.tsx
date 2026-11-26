@@ -11,7 +11,7 @@ vi.mock("next/navigation", () => ({
 
 const { default: StudioLayout } = await import("@/app/(studio)/layout");
 const { AppTopBar } = await import("@/components/app-top-bar");
-const { AskAiPanel, AskAiUnavailable, NOT_CONFIGURED } = await import("@/components/ask-ai");
+const { AskAiProvider, forgetAnswers, NOT_CONFIGURED, useAskAi } = await import("@/components/ask-ai");
 const { FOLDER_ICONS, NavFolders } = await import("@/components/nav-folders");
 const { NavUser } = await import("@/components/nav-user");
 const { SearchResults } = await import("@/components/studio-search");
@@ -198,7 +198,13 @@ describe("the studio's header", () => {
       fireEvent.keyDown(document, { key: "k", metaKey: true });
     });
     await act(async () => undefined);
-    expect(screen.getByPlaceholderText(/Search apps, pages, members/)).toBeTruthy();
+    const field = screen.getByPlaceholderText(/Search apps, pages, members/);
+    // Ask AI is offered once a question is typed, never for a word or an empty field.
+    expect(document.querySelector("[data-ask-ai]")).toBeNull();
+    expect(document.querySelector("[data-search-keys]")?.textContent).toMatch(/navigate.*open.*close/);
+    await act(async () => {
+      fireEvent.change(field, { target: { value: "which apps are live" } });
+    });
     const ask = document.querySelector("[data-ask-ai]")!;
     expect(ask.getAttribute("data-disabled")).toBe("true");
     expect(ask.textContent).toContain(NOT_CONFIGURED);
@@ -366,17 +372,25 @@ describe("search", () => {
     const shown = [...document.querySelectorAll("[data-result]")].map((e) => e.textContent);
     expect(shown).toEqual(["BudgetingStaging"]);
     const selected = () => document.querySelector('[cmdk-item][data-selected="true"]');
-    // Ask AI is first; Down moves to the first result, Enter opens it.
-    expect(selected()?.hasAttribute("data-ask-ai")).toBe(true);
-    await act(async () => {
-      fireEvent.keyDown(input, { key: "ArrowDown" });
-    });
+    // A word is a search, never a question: no Ask AI, and Enter opens the first result.
+    expect(document.querySelector("[data-ask-ai]")).toBeNull();
     expect(selected()?.textContent).toBe("BudgetingStaging");
     await act(async () => {
       fireEvent.keyDown(input, { key: "Enter" });
     });
     expect(picked).toEqual(["/a2"]);
-    // Up goes back to Ask AI, and Enter asks.
+    expect(asked).toBe(0);
+    // A question of a few words: Ask AI is first, with what was typed; Down moves to the first result, Up goes back, Enter asks.
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "budgeting staging" } });
+    });
+    expect(selected()?.hasAttribute("data-ask-ai")).toBe(true);
+    expect(document.querySelector("[data-ask-ai]")?.textContent).toContain("Ask AI: “budgeting staging”");
+    expect(document.querySelector("[data-ask-ai]")?.textContent).toContain("A short answer from Mynt's data, with its sources");
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "ArrowDown" });
+    });
+    expect(selected()?.hasAttribute("data-ask-ai")).toBe(false);
     await act(async () => {
       fireEvent.keyDown(input, { key: "ArrowUp" });
     });
@@ -384,19 +398,25 @@ describe("search", () => {
       fireEvent.keyDown(input, { key: "Enter" });
     });
     expect(asked).toBe(1);
-    expect(document.querySelector("[data-ask-ai]")?.textContent).toContain("Ask AI: “budg”");
+    // One word ending in a question mark is a question too; a short word isn't.
+    for (const [typed, offered] of [["budgets?", true], ["apps?", false], ["budgeting", false]] as const) {
+      await act(async () => {
+        fireEvent.change(input, { target: { value: typed } });
+      });
+      expect(Boolean(document.querySelector("[data-ask-ai]")), typed).toBe(offered);
+    }
   });
 
   it("with no model configured, Ask AI is disabled and says so, and search still works", async () => {
     let asked = 0;
     results("disabled", () => undefined, () => asked++);
-    const ask = document.querySelector("[data-ask-ai]")!;
-    expect(ask.getAttribute("data-disabled")).toBe("true");
-    expect(ask.textContent).toContain(NOT_CONFIGURED);
     const input = screen.getByPlaceholderText("Search");
     await act(async () => {
       fireEvent.change(input, { target: { value: "ines diaz" } });
     });
+    const ask = document.querySelector("[data-ask-ai]")!;
+    expect(ask.getAttribute("data-disabled")).toBe("true");
+    expect(ask.textContent).toContain(NOT_CONFIGURED);
     expect([...document.querySelectorAll("[data-result]")].map((e) => e.textContent)).toEqual(["Ines Diazowner"]);
     await act(async () => {
       fireEvent.keyDown(input, { key: "Enter" });
@@ -428,39 +448,132 @@ describe("links in Ask AI's answers", () => {
     expect(container.innerHTML).not.toContain("javascript:");
   });
 
-  it("a click on a studio link navigates in place; anything else goes nowhere", () => {
-    const chat = { messages: [], setMessages: () => undefined, stop: async () => undefined } as unknown as Parameters<typeof AskAiPanel>[0]["chat"];
-    const went: string[] = [];
-    const { container } = render(<AskAiPanel chat={chat} status="disabled" onBack={() => undefined} onClose={() => undefined} onNavigate={(h) => went.push(h)} />);
-    const panel = container.querySelector("[data-ask-ai-panel]")!;
-    const studio = document.createElement("a");
-    studio.setAttribute("href", "/licences");
-    const outside = document.createElement("a");
-    outside.setAttribute("href", "//evil.example/");
-    panel.append(studio, outside);
-    expect(fireEvent.click(studio)).toBe(false); // default prevented
-    expect(fireEvent.click(outside)).toBe(false);
-    expect(went).toEqual(["/licences"]);
-  });
 });
 
-describe("Ask AI when not configured", () => {
-  it("shows the notice and a composer that can't be typed in", () => {
-    render(<AskAiUnavailable status="disabled" />);
-    expect(screen.getByRole("status").textContent).toContain(NOT_CONFIGURED);
-    const box = screen.getByLabelText("Message input") as HTMLTextAreaElement;
-    expect(box.disabled).toBe(true);
-    expect(box.placeholder).toBe(NOT_CONFIGURED);
+describe("Ask AI's answer", () => {
+  // The route's stream, as the browser reads it: sources, the text as it's written, then the cleaned answer.
+  const sse = (events: unknown[]) => new Response(events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(""), { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8" } });
+  const SOURCES = [
+    { n: 1, title: "Dashboard", heading: "Apps", href: "/" },
+    { n: 2, title: "Licences", heading: null, href: "/licences" },
+  ];
+  const ANSWER = [
+    { type: "delta", text: "Let me look." },
+    { type: "reset" },
+    { type: "sources", sources: SOURCES },
+    { type: "delta", text: "You have one app, " },
+    { type: "delta", text: "Round-up savings [1]. Its licence is verified [2][9]." },
+    { type: "done", answer: "You have one app, Round-up savings [1]. Its licence is verified [2][9].", covered: true, model: "claude-opus-5-5", reason: null },
+  ];
+  let asked: { url: string; body: unknown }[] = [];
+  const stub = (reply: () => Response) =>
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      asked.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null });
+      return reply();
+    });
+  function Opener({ question }: { question: string }) {
+    const ask = useAskAi();
+    return (
+      <button type="button" onClick={() => ask(question)}>
+        open
+      </button>
+    );
+  }
+  const open = async (area: "studio" | "admin" = "studio", question = "Which apps do I have?") => {
+    render(
+      <AskAiProvider area={area}>
+        <Opener question={question} />
+      </AskAiProvider>,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "open" }));
+    });
+    await act(async () => undefined);
+    await act(async () => undefined);
+  };
+  beforeEach(() => {
+    asked = [];
+    forgetAnswers();
   });
 
-  it("the panel keeps Search (back), New chat and Close", () => {
-    const chat = { messages: [], setMessages: () => undefined, stop: async () => undefined } as unknown as Parameters<typeof AskAiPanel>[0]["chat"];
-    let back = 0;
-    render(<AskAiPanel chat={chat} status="disabled" onBack={() => back++} onClose={() => undefined} onNavigate={() => undefined} />);
-    fireEvent.click(screen.getByRole("button", { name: /Search/ }));
-    expect(back).toBe(1);
-    expect((screen.getByRole("button", { name: /New chat/ }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
-    expect(screen.getByRole("status").textContent).toContain(NOT_CONFIGURED);
+  it("opens in its own dialog with the question, and shows the answer with numbered citations, its sources and the model", async () => {
+    stub(() => sse(ANSWER));
+    await open();
+    expect(asked).toEqual([{ url: "/api/ask", body: { question: "Which apps do I have?" } }]);
+    const dialog = document.querySelector('[data-ask-ai-dialog="studio"]')!;
+    expect(dialog.textContent).toContain("Ask AI");
+    expect((dialog.querySelector("[data-ask-question]") as HTMLInputElement).value).toBe("Which apps do I have?");
+    const text = dialog.querySelector("[data-ask-text]")!;
+    // What was written before the read was dropped; citations of real sources are links to their pages.
+    expect(text.textContent).toBe("You have one app, Round-up savings [1]. Its licence is verified [2][9].");
+    expect([...text.querySelectorAll("a")].map((a) => [a.textContent, a.getAttribute("href")])).toEqual([["[1]", "/"], ["[2]", "/licences"]]);
+    expect(dialog.querySelector("[data-ask-note]")!.textContent).toBe("AI summary from your Mynt data — may be imperfect (claude-opus-5-5).");
+    expect([...dialog.querySelectorAll("[data-ask-source]")].map((a) => [a.textContent, a.getAttribute("href")])).toEqual([["Dashboard › Apps", "/"], ["Licences", "/licences"]]);
+  });
+
+  it("a citation or a source opens its page in place and closes the dialog; any other link goes nowhere", async () => {
+    stub(() => sse(ANSWER));
+    await open();
+    const body = document.querySelector("[data-ask-answer]")!;
+    const outside = document.createElement("a");
+    outside.setAttribute("href", "//evil.example/");
+    body.append(outside);
+    expect(fireEvent.click(outside)).toBe(false); // default prevented
+    expect(nav.pushed).toEqual([]);
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-ask-source="2"]')!);
+    });
+    expect(nav.pushed).toEqual(["/licences"]);
+    expect(document.querySelector("[data-ask-ai-dialog]")).toBeNull();
+  });
+
+  it("the question can be edited and asked again; one already answered is shown without asking twice", async () => {
+    stub(() => sse(ANSWER));
+    await open();
+    const ask = async (q: string) => {
+      const input = document.querySelector("[data-ask-question]") as HTMLInputElement;
+      await act(async () => {
+        fireEvent.change(input, { target: { value: q } });
+        fireEvent.submit(input.closest("form")!);
+      });
+      await act(async () => undefined);
+      await act(async () => undefined);
+    };
+    await ask("And which builds failed?");
+    expect(asked.map((a) => a.body)).toEqual([{ question: "Which apps do I have?" }, { question: "And which builds failed?" }]);
+    await ask("Which apps do I have?");
+    expect(asked).toHaveLength(2);
+    expect(document.querySelector("[data-ask-text]")!.textContent).toContain("Round-up savings");
+    // Too short to be a question: nothing is asked.
+    await ask("hi");
+    expect(asked).toHaveLength(2);
+  });
+
+  it("says why when there is no AI summary: the hourly limit, or no model answered", async () => {
+    stub(() => new Response(JSON.stringify({ answer: null, covered: null, sources: [], model: null, reason: "rate_limited" }), { status: 200, headers: { "content-type": "application/json" } }));
+    await open();
+    expect(document.querySelector('[data-ask-unavailable="rate_limited"]')!.textContent).toMatch(/AI summary unavailable: that was a lot of questions in an hour/);
+    cleanup();
+    forgetAnswers();
+    stub(() => sse([{ type: "sources", sources: SOURCES }, { type: "done", answer: null, covered: null, model: null, reason: "unavailable" }]));
+    await open();
+    expect(document.querySelector('[data-ask-unavailable="unavailable"]')!.textContent).toMatch(/^AI summary unavailable\./);
+    // The sources it read still show.
+    expect(document.querySelectorAll("[data-ask-source]")).toHaveLength(2);
+  });
+
+  it("shows a refusal as a sentence, never raw JSON", async () => {
+    stub(() => new Response(JSON.stringify({ error: "busy", message: "Ask AI is still answering your last question." }), { status: 429, headers: { "content-type": "application/json" } }));
+    await open();
+    expect(screen.getByRole("alert").textContent).toBe("Ask AI is still answering your last question.");
+  });
+
+  it("the platform admin's asks its own route, and says so", async () => {
+    stub(() => sse([{ type: "sources", sources: [{ n: 1, title: "Regulated firms", heading: "Licences", href: "/platform/firms?tab=licences" }] }, { type: "done", answer: "One firm is waiting [1].", covered: true, model: "m", reason: null }]));
+    await open("admin", "Which regulated firms are waiting on a licence review?");
+    expect(asked).toEqual([{ url: "/api/admin/ask", body: { question: "Which regulated firms are waiting on a licence review?" } }]);
+    const dialog = document.querySelector('[data-ask-ai-dialog="admin"]')!;
+    expect(dialog.querySelector("[data-ask-note]")!.textContent).toContain("AI summary from Mynt's data");
+    expect([...dialog.querySelectorAll("[data-ask-text] a")].map((a) => a.getAttribute("href"))).toEqual(["/platform/firms?tab=licences"]);
   });
 });

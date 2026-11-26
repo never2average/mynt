@@ -780,6 +780,8 @@ export const ADMIN_TOOLS = {
   // real-company check and the registers' answers so far (its page), reading only; and Run checks on a firm's page.
   get_regulated_firm_onboarding: z.union([z.object({ all_firms: z.literal(true) }).strict(), z.object({ entity_id: uuid }).strict()]),
   run_firm_checks: z.object({ entity_id: uuid }).strict(),
+  // The confidential service's announced builds (measurements and when each takes effect): a read, for Ask AI.
+  list_enclave_releases: z.object({}).strict(),
 } as const;
 
 export type AdminTool = keyof typeof ADMIN_TOOLS;
