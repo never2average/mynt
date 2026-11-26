@@ -728,7 +728,7 @@ export function registerAgreementAuditTools(server: McpServer, store: Store, use
     async ({ audit_id }) => {
       const got = await loadAudit(audit_id);
       if (!got) return fail(`No audit '${audit_id}' you're a party to`);
-      const { rows } = await store.db.query(`SELECT id, action, actor_id, details, created_at FROM ${T}.audit_log WHERE target = $1 ORDER BY created_at, id`, [got.x.id]);
+      const { rows } = await store.db.query(`SELECT id, action, actor_id, details, created_at FROM ${T}.audit_log WHERE target = $1 ORDER BY created_at, seq`, [got.x.id]);
       const people = await names([...rows.map((r) => r.actor_id as string | null), got.x.reviewer, got.x.opened_by, got.x.submitted_by, got.x.closed_by, ...got.x.findings.flatMap((f) => [f.recorded_by, f.resolved_by, ...f.responses.map((y) => y.by)]), ...got.x.evidence.map((e) => e.submitted_by)]);
       return json({
         ...(await describe(got.x, got.req, got.a, got.who)),

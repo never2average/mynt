@@ -281,7 +281,7 @@ async function termsVersions(store: Store, o: Offering) {
     return v;
   };
   const audits = await store.db.query(
-    `SELECT a.details, a.created_at, u.name AS actor FROM ${T}.audit_log a LEFT JOIN ${T}.users u ON u.id = a.actor_id WHERE a.action = 'set_vendor_terms' AND a.target = $1 ORDER BY a.created_at`,
+    `SELECT a.details, a.created_at, u.name AS actor FROM ${T}.audit_log a LEFT JOIN ${T}.users u ON u.id = a.actor_id WHERE a.action = 'set_vendor_terms' AND a.target = $1 ORDER BY a.created_at, a.seq`,
     [o.id],
   );
   for (const r of audits.rows) {

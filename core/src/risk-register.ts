@@ -212,7 +212,7 @@ const shown = (v: unknown) => (v == null ? "none" : typeof v === "object" ? JSON
 export async function riskHistory(store: Store, riskId: string): Promise<RiskHistoryEntry[]> {
   const { rows } = await store.db.query(
     `SELECT l.action, l.details, l.created_at, l.actor_id, u.name AS actor FROM ${T}.audit_log l LEFT JOIN ${T}.users u ON u.id = l.actor_id
-      WHERE l.target = $1 AND l.action = ANY($2::text[]) ORDER BY l.created_at, l.id`,
+      WHERE l.target = $1 AND l.action = ANY($2::text[]) ORDER BY l.created_at, l.seq`,
     [riskId, [...RISK_HISTORY_ACTIONS]],
   );
   let last: Scores | null = null;
