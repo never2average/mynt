@@ -1,7 +1,8 @@
+import { NextResponse } from "next/server";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { ADMIN_ASK_CONTEXT, ADMIN_ASK_SYSTEM_PROMPT, isAdminAskTool } from "@/lib/admin-ask";
 import { askToolDefs } from "@/lib/ask";
-import { answerQuestion, askJson as json, readQuestion } from "@/lib/ask-server";
+import { answerQuestion, askJson as json, readAsk } from "@/lib/ask-server";
 import { askConfigured } from "@/lib/llm";
 import { NotAllowedError } from "@/lib/mynt-client";
 import { currentSession, fromOwnOrigin } from "@/lib/session";
@@ -51,14 +52,14 @@ export async function POST(req: Request) {
   };
   if (!sessionIsAdmin(session)) return refuse(json(NOT_FOUND, 404));
   if (!askConfigured()) return refuse(json({ error: "not_configured", message: "AI is not configured." }, 503));
-  const question = await readQuestion(req);
-  if (typeof question !== "string") return refuse(question);
+  const asked = await readAsk(req);
+  if (asked instanceof NextResponse) return refuse(asked);
 
   return answerQuestion(req, {
     area: "admin",
     bucket: "admin-ask",
     what: "the platform admin's Ask AI",
-    question,
+    asked,
     session,
     mynt,
     prepare: async () => ({

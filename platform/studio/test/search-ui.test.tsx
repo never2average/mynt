@@ -19,7 +19,8 @@ const { useMatches } = await import("kbar");
 const { default: KBar, KBarFooter } = await import("@/components/kbar");
 const { default: SearchInput } = await import("@/components/search-input");
 const { default: ResultItem } = await import("@/components/kbar/result-item");
-const { AskAiDialog, AskAiProvider, askAction, forgetAnswers, useAskAi } = await import("@/components/kbar/ask-ai");
+const { AskAiDialog, AskAiProvider, applyEvent, askAction, historyOf, PANEL_SIZE, stepsLine, useAskAi } = await import("@/components/kbar/ask-ai");
+const { CITE, CITE_TIP } = await import("@/components/kbar/markdown");
 const { searchActions, BROWSE_IDS } = await import("@/components/kbar/actions");
 const { WorkspaceProvider } = await import("@/components/workspace-context");
 const { resetStudioAccess } = await import("@/lib/use-liquidity-access");
@@ -39,7 +40,6 @@ beforeAll(() => {
 beforeEach(() => {
   nav.pushed = [];
   resetStudioAccess();
-  forgetAnswers();
 });
 afterEach(() => {
   cleanup();
@@ -98,26 +98,26 @@ const PINNED: Record<string, string[]> = {
   ],
   "components/kbar/ask-ai.tsx": [
     "icon: <IconSparkles className='text-primary size-4' />",
-    "<DialogContent className='max-h-[85svh] gap-0 overflow-y-auto p-0 sm:max-w-xl'",
+    "export const PANEL_SIZE = 'h-[60vh] w-[33vw] max-w-none min-w-[22rem] sm:max-w-none max-sm:h-dvh max-sm:w-screen max-sm:min-w-0 max-sm:rounded-none';",
+    "<DialogContent className={cn('flex flex-col gap-0 overflow-hidden p-0', PANEL_SIZE)}",
     "<DialogHeader className='border-b p-4 pr-12'>",
     "<DialogTitle className='flex items-center gap-2'><IconSparkles className='text-primary size-4' /> Ask AI</DialogTitle>",
-    "<form className='mt-2'",
-    "aria-label='Your question' maxLength={400}",
-    "<div className='flex flex-col gap-4 p-4' onClick={onLinkClick}>",
-    "<p className='text-destructive text-sm'>{error}</p>",
-    "<div className='flex flex-col gap-2' aria-live='polite' aria-busy={streaming}>",
-    "<Markdown className='max-w-none text-sm [&_a]:no-underline [&_p]:my-2 [&_p]:leading-6 [&_ul]:my-2'>{linked(text, sources)}</Markdown>",
+    "<div className='relative min-h-0 flex-1'>",
+    "className='flex h-full flex-col gap-6 overflow-y-auto p-4' data-ask-messages>",
+    "<form className='flex flex-col gap-1.5 border-t p-3' data-composer",
+    "aria-label='Your question' placeholder={about}",
+    "<p className='text-destructive text-sm' role='alert'>{error}</p>",
+    "<div className='flex flex-col gap-2' aria-live='polite' aria-busy={streaming} data-answer>",
+    "className='max-w-none text-sm [&_a]:no-underline [&_p]:my-2 [&_p]:leading-6 [&_ul]:my-2'>{linked(text, sources)}</Markdown>",
     "<span className='bg-primary inline-block h-4 w-1.5 animate-pulse rounded-sm' aria-hidden />",
     "<p className='text-muted-foreground text-xs'>",
-    "<div className='text-muted-foreground flex items-center gap-2 py-6 text-sm' role='status'><Spinner className='size-4' />",
     "<p className='text-muted-foreground text-sm'>",
-    "<div className='flex flex-col gap-2 border-t pt-3'>",
+    "<div className='flex flex-col gap-2 border-t pt-3' data-sources>",
     "<span className='text-muted-foreground text-xs font-medium tracking-wider uppercase'>Sources</span>",
     "<ol className='flex flex-col gap-1'>",
     "<li key={s.n} className='flex gap-2 text-sm'>",
     "<span className='text-muted-foreground w-5 shrink-0 text-right tabular-nums'>{s.n}.</span>",
-    "<Link href={s.href} className='hover:text-primary min-w-0 transition-colors'>",
-    "{s.title}{s.heading && <span className='text-muted-foreground'> › {s.heading}</span>}",
+    "<Link href={s.href} className='hover:text-primary min-w-0 transition-colors'",
   ],
   "components/kbar/ui.tsx": [
     `"${BUTTON_BASE}"`,
@@ -247,7 +247,7 @@ describe("the search's look, pinned", () => {
 
   it("the Ask row: a sparkle, the question and what it gives", () => {
     const a = askAction("which apps are live", () => undefined);
-    expect(a).toMatchObject({ id: "ask-ai", name: "Ask AI: which apps are live", keywords: "which apps are live", priority: 10, section: { name: "Ask AI", priority: 10 }, subtitle: "A short answer from Mynt's data, with its sources" });
+    expect(a).toMatchObject({ id: "ask-ai", name: "Ask AI: which apps are live", keywords: "which apps are live", priority: 10, section: { name: "Ask AI", priority: 10 }, subtitle: "An answer from Mynt's data, with its sources" });
     expect(renderToStaticMarkup(a.icon)).toContain('class="tabler-icon tabler-icon-sparkles text-primary size-4"');
   });
 });
@@ -290,7 +290,7 @@ describe("the platform admin's search", () => {
       calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null });
       if (init?.method === "POST")
         return sse([
-          { type: "sources", sources: [{ n: 1, title: "Regulated firms", heading: "Licences", href: "/platform/firms?tab=licences" }] },
+          { type: "sources", sources: [{ n: 1, title: "Regulated firms › Licences", href: "/platform/firms?tab=licences", tool: "list_license_reviews", readAt: "2026-11-26T10:42:00Z" }] },
           { type: "done", answer: "Atlas Trust Bank is waiting on a licence review [1].", covered: true, model: "claude-opus-5-5", reason: null },
         ]);
       if (url === "/api/admin/ask") return json({ enabled: askEnabled });
@@ -354,12 +354,26 @@ describe("the platform admin's search", () => {
     });
     await act(async () => undefined);
     await act(async () => undefined);
-    expect(calls.filter((c) => c.body)).toEqual([{ url: "/api/admin/ask", body: { question } }]);
+    expect(calls.filter((c) => c.body)).toEqual([{ url: "/api/admin/ask", body: { question, history: [] } }]);
     expect(calls.some((c) => c.url === "/api/ask" || c.url.startsWith("/api/workspaces") || c.url.startsWith("/api/projects"))).toBe(false);
     const dialog = document.querySelector("[data-slot=dialog-content]")!;
-    expect(dialog.textContent).toContain("Atlas Trust Bank is waiting on a licence review [1].");
+    expect(dialog.querySelector("[data-answer]")!.textContent).toContain("Atlas Trust Bank is waiting on a licence review");
+    expect(dialog.querySelector("[data-cite] a")!.getAttribute("href")).toBe("/platform/firms?tab=licences");
     expect(dialog.textContent).toContain("AI summary from Mynt's data — may be imperfect (claude-opus-5-5).");
-    expect([...dialog.querySelectorAll("ol a")].map((a) => [a.textContent, a.getAttribute("href")])).toEqual([["Regulated firms › Licences", "/platform/firms?tab=licences"]]);
+    expect([...dialog.querySelectorAll("[data-sources] ol a")].map((a) => [a.textContent, a.getAttribute("href")])).toEqual([["Regulated firms › Licences", "/platform/firms?tab=licences"]]);
+    expect(dialog.getAttribute("data-ask-panel")).toBe("admin");
+    // Closed, the conversation is kept for the visit: the bar offers the way back to it.
+    await act(async () => {
+      fireEvent.keyDown(dialog, { key: "Escape" });
+    });
+    expect(document.querySelector("[data-slot=dialog-content]")).toBeNull();
+    await openBar();
+    expect(seen.rows.slice(0, 2)).toEqual(["Ask AI", { section: "Ask AI", name: "Ask AI: back to the conversation", under: [] }]);
+    await act(async () => {
+      seen.perform("Ask AI: back to the conversation");
+    });
+    expect(document.querySelector("[data-slot=dialog-content] [data-question]")!.textContent).toBe(question);
+    expect(calls.filter((c) => c.body)).toHaveLength(1);
   });
 
   it("with no model configured there is no Ask AI row; search still works", async () => {
@@ -465,30 +479,61 @@ describe("the bar's actions, from what Mynt's search finds", () => {
   });
 });
 
-// ---------- the Ask AI dialog ----------
+// ---------- the Ask AI panel ----------
 
-describe("the Ask AI dialog", () => {
+describe("the Ask AI panel", () => {
+  const at = "2026-11-26T10:42:00Z";
   const SOURCES = [
-    { n: 1, title: "Dashboard", heading: "Apps", href: "/" },
-    { n: 2, title: "Licences", heading: null, href: "/licences" },
+    { n: 1, title: "Dashboard › Apps", href: "/", tool: "list_my_apps", readAt: at },
+    { n: 2, title: "Apps › Round-up savings", href: "/a1", tool: "list_my_apps", readAt: at },
+    { n: 3, title: "Licences", href: "/licences", tool: "list_workspace_licences", readAt: at },
   ];
+  const TEXT = "You have one app, Round-up savings [2]. Its licence is verified [3][9].";
   const ANSWER = [
+    { type: "reasoning", id: "r1", text: "The user wants " },
+    { type: "reasoning", id: "r1", text: "their apps." },
     { type: "delta", text: "Let me look." },
     { type: "reset" },
+    { type: "tool_start", id: "s1", tool: "list_my_apps", label: "Read apps and their stages", args: "workspace_id: 44444444…" },
+    { type: "sources", sources: SOURCES.slice(0, 2) },
+    { type: "tool_end", id: "s1", ok: true, ms: 420, summary: "1 app", result: '{\n "apps": [\n  {\n   "name": "Round-up savings"\n  }\n ]\n}' },
+    { type: "tool_start", id: "s2", tool: "get_build", label: "Read a build", args: "build_id: b1" },
+    { type: "tool_end", id: "s2", ok: false, ms: 80, summary: "Failed", message: "No build 'b1'" },
     { type: "sources", sources: SOURCES },
-    { type: "delta", text: "You have one app, Round-up savings [1]. Its licence is verified [2][9]." },
-    { type: "done", answer: "You have one app, Round-up savings [1]. Its licence is verified [2][9].", covered: true, model: "claude-opus-5-5", reason: null },
+    { type: "delta", text: TEXT },
+    { type: "done", answer: TEXT, covered: true, model: "claude-opus-5-5", reason: null, uncited: false, thoughtMs: 6200 },
   ];
-  let asked: { url: string; body: unknown }[] = [];
-  const stub = (reply: () => Response) =>
+  let asked: { url: string; body: { question: string; history: unknown[] } }[] = [];
+  const stub = (reply: (n: number) => Response) =>
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
-      asked.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null });
-      return reply();
+      asked.push({ url, body: JSON.parse(String(init!.body)) });
+      return reply(asked.length);
     });
+  // A stream the test writes to, an event at a time.
+  const live = () => {
+    const encoder = new TextEncoder();
+    let push: (e: unknown) => void = () => undefined;
+    let end: () => void = () => undefined;
+    const res = new Response(
+      new ReadableStream<Uint8Array>({
+        start(c) {
+          push = (e) => c.enqueue(encoder.encode(`data: ${JSON.stringify(e)}\n\n`));
+          end = () => c.close();
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+    const write = async (...events: unknown[]) =>
+      act(async () => {
+        for (const e of events) push(e);
+        await new Promise((r) => setTimeout(r, 10));
+      });
+    return { res, write, end: () => end() };
+  };
   function Opener({ question }: { question: string }) {
     const ask = useAskAi();
     return (
-      <button type="button" onClick={() => ask(question)}>
+      <button type="button" data-opener onClick={() => ask(question)}>
         open
       </button>
     );
@@ -500,165 +545,359 @@ describe("the Ask AI dialog", () => {
       </AskAiProvider>,
     );
     await act(async () => {
-      fireEvent.click(document.querySelector("button")!);
+      fireEvent.click(document.querySelector("[data-opener]")!);
     });
     await act(async () => undefined);
     await act(async () => undefined);
   };
-  const dialog = () => document.querySelector("[data-slot=dialog-content]")!;
+  const panel = () => document.querySelector("[data-slot=dialog-content]")!;
+  const field = () => panel().querySelector("textarea[name=question]") as HTMLTextAreaElement;
+  const button = (name: string | RegExp) => [...panel().querySelectorAll("button")].find((b) => (typeof name === "string" ? b.textContent!.trim() === name : name.test(b.textContent!.trim()))) as HTMLButtonElement | undefined;
+  const typeIn = async (value: string) =>
+    act(async () => {
+      fireEvent.change(field(), { target: { value } });
+    });
+  const press = async (init: KeyboardEventInit) => {
+    await act(async () => {
+      fireEvent.keyDown(field(), init);
+    });
+    await act(async () => undefined);
+    await act(async () => undefined);
+  };
   beforeEach(() => {
     asked = [];
   });
 
-  it("its markup: the panel, the header with the question, the answer, its note and its sources", async () => {
+  it("its size is fixed: 60% of the screen's height and a third of its width, never under 22rem; the whole screen below sm", async () => {
+    expect(PANEL_SIZE).toBe("h-[60vh] w-[33vw] max-w-none min-w-[22rem] sm:max-w-none max-sm:h-dvh max-sm:w-screen max-sm:min-w-0 max-sm:rounded-none");
     stub(() => sse(ANSWER));
     await open();
-    expect(asked).toEqual([{ url: "/api/ask", body: { question: "Which apps do I have?" } }]);
-    const d = dialog();
-    for (const c of ["search-port", "fixed", "top-1/2", "left-1/2", "z-50", "grid", "rounded-xl", "bg-popover", "text-popover-foreground", "ring-1", "ring-foreground/10", "duration-100", "max-h-[85svh]", "gap-0", "overflow-y-auto", "p-0", "sm:max-w-xl"])
-      expect(classOf(d)!.split(" "), c).toContain(c);
-    const overlay = document.querySelector("[data-slot=dialog-overlay]")!;
-    expect(classOf(overlay)).toContain("fixed inset-0 isolate z-50 bg-black/10 duration-100 supports-backdrop-filter:backdrop-blur-xs");
-    const header = d.querySelector("[data-slot=dialog-header]")!;
+    const classes = classOf(panel())!.split(" ");
+    for (const c of [...PANEL_SIZE.split(" "), "search-port", "fixed", "top-1/2", "left-1/2", "-translate-x-1/2", "-translate-y-1/2", "z-50", "flex", "flex-col", "gap-0", "overflow-hidden", "p-0", "rounded-xl", "bg-popover", "text-popover-foreground", "ring-1", "ring-foreground/10"])
+      expect(classes, c).toContain(c);
+    // Nothing of the old size is left to fight it.
+    for (const c of ["grid", "w-full", "sm:max-w-sm", "max-w-[calc(100%-2rem)]", "max-h-[85svh]", "overflow-y-auto"]) expect(classes, c).not.toContain(c);
+  });
+
+  it("its layout: the header, the messages (which scroll), and the question field pinned at the foot", async () => {
+    stub(() => sse(ANSWER));
+    await open();
+    const [header, middle, composer] = [...panel().children];
     expect(classOf(header)).toBe("flex flex-col gap-2 border-b p-4 pr-12");
-    const title = d.querySelector("[data-slot=dialog-title]")!;
+    const title = header.querySelector("[data-slot=dialog-title]")!;
     expect(classOf(title)).toBe("text-base leading-none font-medium flex items-center gap-2");
     expect(title.textContent).toBe(" Ask AI");
     expect(classOf(title.querySelector("svg"))).toBe("tabler-icon tabler-icon-sparkles text-primary size-4");
-    const input = d.querySelector("input[name=question]") as HTMLInputElement;
-    expect(input.value).toBe("Which apps do I have?");
-    expect(input.getAttribute("aria-label")).toBe("Your question");
-    expect(input.maxLength).toBe(400);
-    expect(input.placeholder).toBe("Ask a question about your Mynt data");
-    expect(classOf(input.closest("form"))).toBe("mt-2");
-    // The close control: an icon, named for a screen reader.
-    const close = d.querySelector("[data-slot=dialog-close]")!;
+    expect(button("New chat")).toBeTruthy();
+    // The messages take what's left and scroll inside it.
+    expect(classOf(middle)).toBe("relative min-h-0 flex-1");
+    expect(classOf(middle.firstElementChild)).toBe("flex h-full flex-col gap-6 overflow-y-auto p-4");
+    // The question field is the panel's last row, outside what scrolls.
+    expect(composer.tagName).toBe("FORM");
+    expect(composer.hasAttribute("data-composer")).toBe(true);
+    expect(classOf(composer)).toBe("flex flex-col gap-1.5 border-t p-3");
+    expect(middle.contains(field())).toBe(false);
+    expect(composer.contains(field())).toBe(true);
+    expect(field().getAttribute("aria-label")).toBe("Your question");
+    expect(field().rows).toBe(1);
+    expect(field().maxLength).toBe(400);
+    expect(field().placeholder).toBe("Ask about your Mynt data");
+    for (const c of ["max-h-[7.5rem]", "min-h-8", "flex-1", "resize-none", "rounded-lg", "border", "border-border", "bg-transparent"]) expect(classOf(field())!.split(" "), c).toContain(c);
+    // Every control has its name in words; the close X is named for a screen reader.
+    expect(button("Send")).toBeTruthy();
+    const close = panel().querySelector("[data-slot=dialog-close]")!;
     expect(close.textContent).toBe("Close");
     expect(classOf(close.querySelector("span"))).toBe("sr-only");
-    for (const c of ["absolute", "top-2", "right-2", "size-7"]) expect(classOf(close)!.split(" "), c).toContain(c);
-
-    const body = header.nextElementSibling!;
-    expect(classOf(body)).toBe("flex flex-col gap-4 p-4");
-    const answer = body.firstElementChild!;
-    expect(classOf(answer)).toBe("flex flex-col gap-2");
-    expect(answer.getAttribute("aria-live")).toBe("polite");
-    for (const c of ["text-foreground", "break-words", "max-w-none", "text-sm", "[&_a]:no-underline", "[&_p]:my-2", "[&_p]:leading-6", "[&_ul]:my-2"]) expect(classOf(answer.firstElementChild)!.split(" "), c).toContain(c);
-    // What was written before the read was dropped; citations of real sources are links to their pages.
-    expect(answer.firstElementChild!.textContent).toBe("You have one app, Round-up savings [1]. Its licence is verified [2][9].");
-    const cites = [...answer.firstElementChild!.querySelectorAll("a")];
-    expect(cites.map((a) => [a.textContent, a.getAttribute("href")])).toEqual([["[1]", "/"], ["[2]", "/licences"]]);
-    expect(classOf(cites[0])).toBe("text-primary decoration-primary/40 hover:decoration-primary font-medium underline underline-offset-4 transition-colors");
-    const note = answer.lastElementChild!;
-    expect(classOf(note)).toBe("text-muted-foreground text-xs");
-    expect(note.textContent).toBe("AI summary from your Mynt data — may be imperfect (claude-opus-5-5).");
-
-    const sources = body.lastElementChild!;
-    expect(classOf(sources)).toBe("flex flex-col gap-2 border-t pt-3");
-    expect(sources.firstElementChild!.outerHTML).toBe('<span class="text-muted-foreground text-xs font-medium tracking-wider uppercase">Sources</span>');
-    expect(classOf(sources.querySelector("ol"))).toBe("flex flex-col gap-1");
-    expect(sources.querySelector("li")!.outerHTML).toBe(
-      '<li class="flex gap-2 text-sm"><span class="text-muted-foreground w-5 shrink-0 text-right tabular-nums">1.</span><a class="hover:text-primary min-w-0 transition-colors" href="/">Dashboard<span class="text-muted-foreground"> › Apps</span></a></li>',
-    );
-    expect([...sources.querySelectorAll("a")].map((a) => a.textContent)).toEqual(["Dashboard › Apps", "Licences"]);
+    for (const b of panel().querySelectorAll("button")) expect(b.textContent!.trim(), b.outerHTML.slice(0, 80)).not.toBe("");
   });
 
-  it("while it reads: a spinner and what it's doing; while it writes: a pulsing cursor", async () => {
-    let finish: () => void = () => undefined;
-    const encoder = new TextEncoder();
-    stub(
-      () =>
-        new Response(
-          new ReadableStream<Uint8Array>({
-            start(c) {
-              finish = () => {
-                c.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "delta", text: "You have " })}\n\n`));
-              };
-            },
-          }),
-          { status: 200, headers: { "content-type": "text/event-stream" } },
-        ),
-    );
-    await open();
-    const body = dialog().querySelector("[data-slot=dialog-header]")!.nextElementSibling!;
-    const reading = body.firstElementChild!;
-    expect(classOf(reading)).toBe("text-muted-foreground flex items-center gap-2 py-6 text-sm");
-    expect(reading.getAttribute("role")).toBe("status");
-    expect(reading.textContent).toBe(" Reading your Mynt data…");
-    expect(classOf(reading.querySelector("svg"))).toBe("tabler-icon tabler-icon-loader animate-spin size-4");
-    await act(async () => {
-      finish();
-      await new Promise((r) => setTimeout(r, 10));
-    });
-    const cursor = body.firstElementChild!.lastElementChild!;
-    expect(cursor.outerHTML).toBe('<span class="bg-primary inline-block h-4 w-1.5 animate-pulse rounded-sm" aria-hidden="true"></span>');
-    expect(body.firstElementChild!.getAttribute("aria-busy")).toBe("true");
-  });
-
-  it("a citation or a source closes the dialog as its page opens", async () => {
+  it("opens with the question already asked, and shows the answer under its steps on one line", async () => {
     stub(() => sse(ANSWER));
     await open();
-    const source = [...dialog().querySelectorAll("ol a")][1] as HTMLAnchorElement;
-    source.addEventListener("click", (e) => e.preventDefault()); // jsdom doesn't navigate
+    expect(asked).toEqual([{ url: "/api/ask", body: { question: "Which apps do I have?", history: [] } }]);
+    const turn = panel().querySelector("[data-turn]")!;
+    expect(turn.querySelector("[data-question]")!.textContent).toBe("Which apps do I have?");
+    // Collapsed: one line, with what it took.
+    const steps = turn.querySelector("[data-steps]")!;
+    const line = steps.querySelector("button")!;
+    expect(line.textContent!.trim()).toBe("Used 2 reads · Thought for 6s");
+    expect(line.getAttribute("aria-expanded")).toBe("false");
+    expect(steps.querySelector("ol")).toBeNull();
+    // What was written before the read was dropped.
+    expect(turn.querySelector("[data-answer]")!.textContent).toContain("You have one app, Round-up savings");
+    expect(turn.textContent).not.toContain("Let me look.");
+    expect(turn.textContent).toContain("AI summary from your Mynt data — may be imperfect (claude-opus-5-5).");
+    expect(turn.querySelector("[data-uncited]")).toBeNull();
+    // The steps come before the answer.
+    expect(steps.compareDocumentPosition(turn.querySelector("[data-answer]")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("the line opens into the steps, in order: the model's thinking as it wrote it, then each read with its name, arguments, outcome and result", async () => {
+    stub(() => sse(ANSWER));
+    await open();
+    const steps = panel().querySelector("[data-steps]")!;
     await act(async () => {
-      fireEvent.click(source);
+      fireEvent.click(steps.querySelector("button")!);
+    });
+    expect(steps.querySelector("button")!.getAttribute("aria-expanded")).toBe("true");
+    const items = [...steps.querySelectorAll(":scope > ol > li")];
+    expect(items.map((li) => li.getAttribute("data-step"))).toEqual(["reasoning", "tool", "tool"]);
+    expect(items[0].textContent).toBe("ThinkingThe user wants their apps.");
+    expect(classOf(items[0].querySelector("p"))).toBe("bg-muted/60 rounded-md p-2 leading-relaxed whitespace-pre-wrap");
+    // A read: its name in words with the tool's own name in a code tag, its arguments, how it went.
+    expect(items[1].querySelector(".font-medium")!.textContent).toBe("Read apps and their stages");
+    expect(items[1].querySelector("code")!.textContent).toBe("list_my_apps");
+    expect(items[1].textContent).toContain("workspace_id: 44444444…");
+    expect(items[1].textContent).toContain("Done · 1 app · under a second");
+    expect(items[1].getAttribute("data-status")).toBe("done");
+    expect(items[1].querySelector("pre")).toBeNull();
+    await act(async () => {
+      fireEvent.click([...items[1].querySelectorAll("button")].find((b) => b.textContent!.trim() === "Show result")!);
+    });
+    expect(items[1].querySelector("pre")!.textContent).toContain('"name": "Round-up savings"');
+    expect([...items[1].querySelectorAll("button")].some((b) => b.textContent!.trim() === "Hide result")).toBe(true);
+    // A read Mynt refused: failed, with Mynt's message, and no result to show.
+    expect(items[2].getAttribute("data-status")).toBe("failed");
+    expect(items[2].textContent).toContain("Failed: No build 'b1'");
+    expect(items[2].querySelector("button")).toBeNull();
+  });
+
+  it("a model that returned no thinking shows none; an answer with no steps has no line", async () => {
+    stub((n) =>
+      n === 1
+        ? sse([{ type: "tool_start", id: "s1", tool: "list_my_apps", label: "Read apps and their stages", args: "" }, { type: "tool_end", id: "s1", ok: true, ms: 10, summary: "0 apps", result: "[]" }, { type: "done", answer: "You have no apps yet [1].", covered: true, model: "m", reason: null }])
+        : sse([{ type: "done", answer: "Mynt's data doesn't cover this.", covered: false, model: "m", reason: null }]),
+    );
+    await open();
+    expect(panel().querySelector("[data-steps] button")!.textContent!.trim()).toBe("Used 1 read");
+    await typeIn("What is the weather?");
+    await press({ key: "Enter" });
+    const turns = panel().querySelectorAll("[data-turn]");
+    expect(turns).toHaveLength(2);
+    expect(turns[1].querySelector("[data-steps]")).toBeNull();
+    expect(panel().textContent).not.toContain("Thinking");
+  });
+
+  it("citations are chips: the source's number, linked to its record, with its title and when it was read on hover or focus", async () => {
+    stub(() => sse(ANSWER));
+    await open();
+    const answer = panel().querySelector("[data-answer]")!;
+    const chips = [...answer.querySelectorAll("[data-cite]")];
+    expect(chips.map((c) => c.getAttribute("data-cite"))).toEqual(["2", "3"]);
+    // A citation of a source it wasn't given stays text, never a link.
+    expect(answer.textContent).toContain("[9]");
+    const chip = chips[0];
+    expect(classOf(chip)).toBe("group/cite relative inline-block");
+    const link = chip.querySelector("a")!;
+    expect(link.textContent).toBe("2");
+    expect(link.getAttribute("href")).toBe("/a1");
+    expect(link.getAttribute("aria-label")).toBe("Source 2: Apps › Round-up savings");
+    expect(classOf(link)).toBe(CITE);
+    const tip = chip.querySelector("[role=tooltip]")!;
+    expect(classOf(tip)).toBe(CITE_TIP);
+    for (const c of ["hidden", "group-hover/cite:block", "group-focus-within/cite:block"]) expect(CITE_TIP.split(" "), c).toContain(c);
+    expect(tip.textContent).toMatch(/^Apps › Round-up savings · read \d/);
+    // Under the answer, its sources, numbered, each with its title and its page.
+    const sources = panel().querySelector("[data-sources]")!;
+    expect(sources.firstElementChild!.outerHTML).toBe('<span class="text-muted-foreground text-xs font-medium tracking-wider uppercase">Sources</span>');
+    expect([...sources.querySelectorAll("li")].map((li) => li.textContent)).toEqual(["1.Dashboard › Apps", "2.Apps › Round-up savings", "3.Licences"]);
+    expect([...sources.querySelectorAll("a")].map((a) => a.getAttribute("href"))).toEqual(["/", "/a1", "/licences"]);
+    expect(sources.querySelector("a")!.getAttribute("title")).toMatch(/^Read \d.* · list_my_apps$/);
+    // Following one closes the panel as its page opens.
+    link.addEventListener("click", (e) => e.preventDefault()); // jsdom doesn't navigate
+    await act(async () => {
+      fireEvent.click(link);
     });
     expect(document.querySelector("[data-slot=dialog-content]")).toBeNull();
   });
 
-  it("the question can be edited and asked again; one already answered is shown without asking twice", async () => {
+  it("a follow-up is asked with Enter and carries the conversation so far; Shift+Enter starts a new line; each answer numbers its own sources", async () => {
+    stub((n) => (n === 1 ? sse(ANSWER) : sse([{ type: "sources", sources: [{ n: 1, title: "Apps › Round-up savings", href: "/a1", tool: "list_my_apps", readAt: at }] }, { type: "done", answer: "It is in production [1].", covered: true, model: "m", reason: null }])));
+    await open();
+    // After an answer the question field has focus again.
+    expect(document.activeElement).toBe(field());
+    // Too short to be a question: Send is off, and Enter asks nothing.
+    await typeIn("hi");
+    expect(button("Send")!.disabled).toBe(true);
+    await press({ key: "Enter" });
+    expect(asked).toHaveLength(1);
+    await typeIn("What stage is it in?");
+    expect(button("Send")!.disabled).toBe(false);
+    await press({ key: "Enter", shiftKey: true });
+    expect(asked).toHaveLength(1);
+    expect(field().value).toBe("What stage is it in?");
+    await press({ key: "Enter" });
+    expect(asked).toHaveLength(2);
+    expect(asked[1]).toEqual({
+      url: "/api/ask",
+      body: { question: "What stage is it in?", history: [{ role: "user", text: "Which apps do I have?" }, { role: "assistant", text: TEXT }] },
+    });
+    expect(field().value).toBe("");
+    const turns = [...panel().querySelectorAll("[data-turn]")];
+    expect(turns.map((t) => t.querySelector("[data-question]")!.textContent)).toEqual(["Which apps do I have?", "What stage is it in?"]);
+    // The first answer keeps its own sources; the follow-up's [1] is its own first source.
+    expect(turns[0].querySelectorAll("[data-sources] li")).toHaveLength(3);
+    expect([...turns[1].querySelectorAll("[data-sources] li")].map((li) => li.textContent)).toEqual(["1.Apps › Round-up savings"]);
+    expect(turns[1].querySelector("[data-cite] a")!.getAttribute("href")).toBe("/a1");
+    // Only the last answer can be asked again; each can be copied.
+    expect(turns.map((t) => [...t.querySelectorAll("button")].some((b) => b.textContent!.trim() === "Ask again"))).toEqual([false, true]);
+    expect(turns.map((t) => [...t.querySelectorAll("button")].some((b) => b.textContent!.trim() === "Copy answer"))).toEqual([true, true]);
+  });
+
+  it("the count shows near the 400-character limit, and the Send button is the form's", async () => {
     stub(() => sse(ANSWER));
     await open();
-    const ask = async (q: string) => {
-      const input = dialog().querySelector("input[name=question]") as HTMLInputElement;
-      await act(async () => {
-        fireEvent.change(input, { target: { value: q } });
-        fireEvent.submit(input.closest("form")!);
-      });
-      await act(async () => undefined);
-      await act(async () => undefined);
-    };
-    await ask("And which builds failed?");
-    expect(asked.map((a) => a.body)).toEqual([{ question: "Which apps do I have?" }, { question: "And which builds failed?" }]);
-    await ask("Which apps do I have?");
-    expect(asked).toHaveLength(2);
-    expect(dialog().textContent).toContain("Round-up savings");
-    // Too short to be a question: nothing is asked.
-    await ask("hi");
+    await typeIn("x".repeat(349));
+    expect(panel().querySelector("[data-composer]")!.textContent).not.toContain("/400");
+    await typeIn(`why ${"x".repeat(360)}`);
+    expect(panel().querySelector("[data-composer]")!.textContent).toContain("364/400");
+    expect(button("Send")!.type).toBe("submit");
+    await act(async () => {
+      fireEvent.submit(panel().querySelector("[data-composer]")!);
+    });
+    await act(async () => undefined);
     expect(asked).toHaveLength(2);
   });
 
-  it("says why when there is no AI summary, and shows a refusal as a sentence", async () => {
+  it("while an answer is coming: the line says what it's doing, Send is Stop, and Stop ends it with what was written", async () => {
+    const s = live();
+    stub(() => s.res);
+    await open();
+    const line = () => panel().querySelector("[data-steps] button")!.textContent!.trim();
+    expect(line()).toBe("Working…");
+    expect(button("Stop")).toBeTruthy();
+    expect(button("Send")).toBeUndefined();
+    await s.write({ type: "reasoning", id: "r1", text: "Looking." });
+    expect(line()).toBe("Thinking…");
+    await s.write({ type: "tool_start", id: "s1", tool: "list_my_apps", label: "Read apps and their stages", args: "" });
+    expect(line()).toBe("Reading apps and their stages…");
+    expect(panel().querySelector("[data-steps] [data-slot=spinner]")).not.toBeNull();
+    await s.write({ type: "tool_end", id: "s1", ok: true, ms: 5, summary: "1 app", result: "[]" }, { type: "delta", text: "You have " });
+    expect(line()).toBe("Writing the answer…");
+    const answer = panel().querySelector("[data-answer]")!;
+    expect(answer.getAttribute("aria-live")).toBe("polite");
+    expect(answer.getAttribute("aria-busy")).toBe("true");
+    expect(answer.lastElementChild!.outerHTML).toBe('<span class="bg-primary inline-block h-4 w-1.5 animate-pulse rounded-sm" aria-hidden="true"></span>');
+    // Enter asks nothing while an answer is coming.
+    await typeIn("And which builds failed?");
+    await press({ key: "Enter" });
+    expect(asked).toHaveLength(1);
+    await act(async () => {
+      fireEvent.click(button("Stop")!);
+    });
+    await act(async () => undefined);
+    expect(button("Stop")).toBeUndefined();
+    expect(button("Send")).toBeTruthy();
+    expect(panel().querySelector("[data-answer]")!.textContent).toBe("You haveStopped.");
+    expect(line()).toBe("Used 1 read");
+    // A stopped answer isn't part of what a follow-up carries.
+    await press({ key: "Enter" });
+    expect(asked[1].body).toEqual({ question: "And which builds failed?", history: [] });
+  });
+
+  it("New chat clears the conversation; it's off when there is none", async () => {
+    stub(() => sse(ANSWER));
+    await open();
+    expect(button("New chat")!.disabled).toBe(false);
+    await act(async () => {
+      fireEvent.click(button("New chat")!);
+    });
+    expect(panel().querySelectorAll("[data-turn]")).toHaveLength(0);
+    expect(panel().querySelector("[data-ask-messages]")!.textContent).toBe("Ask about your apps, builds, members, licences or the audit trail.");
+    expect(button("New chat")!.disabled).toBe(true);
+    await typeIn("Which builds failed this week?");
+    await press({ key: "Enter" });
+    expect(asked[1].body).toEqual({ question: "Which builds failed this week?", history: [] });
+  });
+
+  it("Copy answer copies the answer's text; Ask again asks the question once more, in its place", async () => {
+    const copied: string[] = [];
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText: async (t: string) => void copied.push(t) } });
+    stub(() => sse(ANSWER));
+    await open();
+    await act(async () => {
+      fireEvent.click(button("Copy answer")!);
+    });
+    await act(async () => undefined);
+    expect(copied).toEqual([TEXT]);
+    expect(button("Copied")).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(button("Ask again")!);
+    });
+    await act(async () => undefined);
+    await act(async () => undefined);
+    expect(asked.map((a) => a.body)).toEqual([{ question: "Which apps do I have?", history: [] }, { question: "Which apps do I have?", history: [] }]);
+    expect(panel().querySelectorAll("[data-turn]")).toHaveLength(1);
+  });
+
+  it("the messages follow the answer; once the reader scrolls up, Jump to latest brings them back", async () => {
+    stub(() => sse(ANSWER));
+    await open();
+    const scroller = panel().querySelector("[data-ask-messages]") as HTMLDivElement;
+    expect(button("Jump to latest")).toBeUndefined();
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 2000 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+    scroller.scrollTop = 300;
+    await act(async () => {
+      fireEvent.scroll(scroller);
+    });
+    expect(button("Jump to latest")).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(button("Jump to latest")!);
+    });
+    expect(scroller.scrollTop).toBe(2000);
+    expect(button("Jump to latest")).toBeUndefined();
+    // At the foot, a new question keeps it there.
+    await typeIn("What stage is it in?");
+    await press({ key: "Enter" });
+    expect(scroller.scrollTop).toBe(2000);
+  });
+
+  it("says when some statements have no source, why there is no answer, and shows a refusal as a sentence", async () => {
+    stub(() => sse([{ type: "done", answer: "You have one app, and it is doing very well.", covered: true, model: "m", reason: null, uncited: true }]));
+    await open();
+    expect(panel().querySelector("[data-uncited]")!.textContent).toBe("Some statements have no source.");
+    cleanup();
     stub(() => json({ answer: null, covered: null, sources: [], model: null, reason: "rate_limited" }));
     await open();
-    const body = () => dialog().querySelector("[data-slot=dialog-header]")!.nextElementSibling!;
-    expect(body().firstElementChild!.outerHTML).toMatch(/^<p class="text-muted-foreground text-sm">AI summary unavailable: that was a lot of questions in an hour/);
+    expect(panel().querySelector("[data-turn]")!.textContent).toContain("That was a lot of questions in an hour.");
     cleanup();
-    forgetAnswers();
     stub(() => sse([{ type: "sources", sources: SOURCES }, { type: "done", answer: null, covered: null, model: null, reason: "unavailable" }]));
     await open();
-    expect(body().firstElementChild!.textContent).toMatch(/^AI summary unavailable\./);
-    expect(dialog().querySelectorAll("ol a")).toHaveLength(2); // the sources it read still show
+    expect(panel().querySelector("[data-turn]")!.textContent).toContain("Ask AI couldn't answer just now. Please ask again.");
+    expect(panel().querySelector("[data-sources]")).toBeNull();
     cleanup();
-    forgetAnswers();
     stub(() => json({ error: "busy", message: "Ask AI is still answering your last question." }, 429));
     await open();
-    expect(body().firstElementChild!.outerHTML).toBe('<p class="text-destructive text-sm">Ask AI is still answering your last question.</p>');
+    expect(panel().querySelector("[role=alert]")!.outerHTML).toBe('<p class="text-destructive text-sm" role="alert">Ask AI is still answering your last question.</p>');
+    expect(button("Ask again")).toBeTruthy();
   });
 
   it("the platform admin's asks its own route, in its own words", async () => {
-    stub(() => sse([{ type: "sources", sources: [{ n: 1, title: "Regulated firms", heading: "Licences", href: "/platform/firms?tab=licences" }] }, { type: "done", answer: "One firm is waiting [1].", covered: true, model: "m", reason: null }]));
+    stub(() => sse([{ type: "sources", sources: [{ n: 1, title: "Regulated firms › Atlas Trust Bank › Licences", href: "/platform/firms?tab=licences", tool: "list_license_reviews", readAt: at }] }, { type: "done", answer: "One firm is waiting [1].", covered: true, model: "m", reason: null }]));
     await open("admin", "Which regulated firms are waiting on a licence review?");
-    expect(asked).toEqual([{ url: "/api/admin/ask", body: { question: "Which regulated firms are waiting on a licence review?" } }]);
-    expect((dialog().querySelector("input[name=question]") as HTMLInputElement).placeholder).toBe("Ask a question about Mynt");
-    expect(dialog().textContent).toContain("AI summary from Mynt's data — may be imperfect (m).");
-    expect([...dialog().querySelectorAll("a")].map((a) => a.getAttribute("href"))).toEqual(["/platform/firms?tab=licences", "/platform/firms?tab=licences"]);
+    expect(asked).toEqual([{ url: "/api/admin/ask", body: { question: "Which regulated firms are waiting on a licence review?", history: [] } }]);
+    expect(field().placeholder).toBe("Ask about Mynt");
+    expect(panel().textContent).toContain("AI summary from Mynt's data — may be imperfect (m).");
+    expect([...panel().querySelectorAll("[data-turn] a")].map((a) => a.getAttribute("href"))).toEqual(["/platform/firms?tab=licences", "/platform/firms?tab=licences"]);
   });
 
   it("a link out of Studio in an answer is its text only", async () => {
     stub(() => sse([{ type: "done", answer: "See [the site](https://evil.example/x) and ![pic](https://evil.example/p.png).", covered: true, model: "m", reason: null }]));
     await open();
-    expect(dialog().querySelectorAll("a, img")).toHaveLength(0);
-    expect(dialog().innerHTML).not.toContain("evil.example");
+    expect(panel().querySelectorAll("[data-turn] a, img")).toHaveLength(0);
+    expect(panel().innerHTML).not.toContain("evil.example");
     expect(AskAiDialog).toBeTypeOf("function");
+  });
+
+  it("one event at a time: a turn takes the stream as it comes", () => {
+    const start = { id: 1, question: "q", text: "", steps: [], sources: [], done: null, error: null, stopped: false, streaming: true };
+    const end = (ANSWER as Parameters<typeof applyEvent>[1][]).reduce(applyEvent, start);
+    expect(end.streaming).toBe(false);
+    expect(end.text).toBe(TEXT);
+    expect(end.steps.map((s) => [s.kind, s.id])).toEqual([["reasoning", "r1"], ["tool", "s1"], ["tool", "s2"]]);
+    expect(end.done).toMatchObject({ answer: TEXT, model: "claude-opus-5-5", thoughtMs: 6200, sources: SOURCES });
+    expect(stepsLine(end)).toBe("Used 2 reads · Thought for 6s");
+    expect(historyOf([end, { ...start, id: 2 }])).toEqual([{ role: "user", text: "q" }, { role: "assistant", text: TEXT }]);
   });
 });

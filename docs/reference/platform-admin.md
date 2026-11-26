@@ -224,7 +224,9 @@ The register's routes are `GET /api/admin/risks?area=<area>` and `POST /api/admi
 
 The header's search box (or Cmd+K, Ctrl+K) opens the command bar, as in Studio. With nothing typed it lists the platform admin's sections, then Studio's pages. Typing also finds every workspace and regulated firm by name, each shown under its section ("Workspaces › the workspace"), and the Licences tab under Regulated firms. Arrow keys move, Enter opens, Esc closes.
 
-Type a question and **Ask AI** is the first result, as in Studio's search. It opens a short answer in its own dialog, with numbered citations and its sources under it. Each source is the platform admin section that holds the data, and opens it.
+Type a question and **Ask AI** is the first result, as in Studio's search. It opens the same conversation panel: the question field pinned at the foot, follow-ups answered with the conversation so far, each answer under its steps (the model's thinking and each read) and with numbered citation chips and its sources. See [Ask AI](studio.md#ask-ai) for how the panel works.
+
+A source here is the record a fact came from: a workspace's page, a firm's page (for its licences and its onboarding), a risk's page, and otherwise the section that holds the read.
 
 It answers a Mynt admin's questions across all workspaces and firms: what needs attention in production, workspaces and their members, regulated firms with their onboarding and licence reviews, vendors with their services and onboarding, the audit trail, risks and risk models, and the platform's settings.
 

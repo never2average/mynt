@@ -515,15 +515,20 @@ The header's search box ("Search...", with its ⌘K key; an icon button named Se
 
 ### Ask AI
 
-Type a question in the command bar and **Ask AI** is the first result: a few words, or one word ending in a question mark, of at least 6 characters. Enter closes the bar and opens the answer in its own dialog.
+Type a question in the command bar and **Ask AI** is the first result: a few words, or one word ending in a question mark, of at least 6 characters. Enter closes the bar and opens the Ask AI panel with that question already asked.
 
-- The answer is short (about 120 words), written from your Mynt data only, and streams in as it is written. It reads through Mynt's tools as you, never with an app key, and only with read tools.
-- Each statement cites its source by number. The sources are listed under the answer: the reads the answer was made from, each shown as the Studio page that holds that data. A citation or a source opens its page and closes the dialog. Nothing else in an answer is a link.
-- The question sits in a field at the top of the dialog. Edit it and press Enter to ask again. Each question is answered on its own; there are no follow-ups.
-- A question already answered in this visit is shown again without asking twice. Nothing is kept after you leave the page.
-- Questions and answers are never logged.
-- You may ask 20 questions an hour, one at a time. Past that it says the AI summary is unavailable and why.
-- The answer comes from the first model that answers: the configured model, then the fallback model. When neither answers it says the AI summary is unavailable.
+**The panel** is a fixed size: 60% of the screen's height and a third of its width, centred, and never narrower than 22rem. Below the `sm` breakpoint (640px) it fills the screen. It has a header (**New chat**, close), the conversation, which scrolls, and the question field pinned at the foot.
+
+- **Asking.** Enter sends and Shift+Enter starts a new line. The field grows to five lines and takes 400 characters, with a count near the limit. While an answer is coming, **Send** is **Stop**.
+- **Follow-ups.** Each new question is answered with the conversation so far (the last 20 turns, as text). **New chat** clears it. The conversation is kept in memory for the visit: close the panel and the bar offers "Ask AI: back to the conversation". Nothing is kept after you leave the page.
+- **Steps.** Above each answer, one line says what Ask AI is doing ("Reading apps and their stages…") and then what it took ("Used 3 reads · Thought for 6s"). It opens into the steps in order: the model's thinking as it wrote it (nothing is shown when the model returned none), and each read with its name in words, the tool's name, its arguments, whether it is running, done or failed (with Mynt's message), how long it took and what it returned ("4 apps"). **Show result** opens the read's reply as JSON, cut to 4,000 characters, with anything that looks like a secret replaced.
+- **Citations.** Every statement of fact cites a numbered source. A source is the record the fact came from where Studio has a page for it (an app, an audit action's filtered trail), and otherwise the page that holds the read. Each answer numbers its own sources. A citation is a small chip: hover or focus shows the source's title and when it was read, and a click opens it and closes the panel. The sources are listed under the answer. A citation with no source is dropped, and an answer with a statement that cites nothing says "Some statements have no source." Nothing is added to the answer for it.
+- **Copy answer** copies the answer's text. **Ask again** re-asks the last question in its place.
+- The answer follows the stream as it is written. Scroll up and it stops following; **Jump to latest** brings it back.
+- Ask AI reads through Mynt's tools as you, never with an app key, and only with read tools.
+- Questions and answers are never logged, and the conversation is never stored: the browser sends it again with each follow-up.
+- You may ask 20 questions an hour, one at a time; a follow-up is a question. Past that it says so.
+- The answer comes from the first model that answers: the configured model, then the fallback model.
 - With no model configured the bar has no Ask AI entry, and search keeps working.
 
 The platform admin's search has its own Ask AI, for Mynt admins. See [Search and Ask AI](platform-admin.md#search-and-ask-ai).
