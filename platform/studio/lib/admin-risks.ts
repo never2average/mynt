@@ -1,9 +1,12 @@
 // The platform admin's Risk register (/platform/risk-register), one tab per risk area (lib/risk-register.ts
-// RISK_AREAS): Mynt's own risk register filtered to that area (risk_register with subject "platform", kept and read by
-// Mynt admins only; the risks with no area under the Unassigned filter), the open risks across every app and product in
-// that area (admin_list_risks, each risk's area as Mynt gave it, else its category's), and that area's signals. Every
-// signal is a table with its own columns; one Mynt doesn't measure is a single row "Not available." with why (never an
-// empty table, or 0, for something Mynt didn't measure):
+// RISK_AREAS). A tab is ONE table of risk items (registerItemsFrom), each with its source in words:
+// - "Mynt": Mynt's own risk register filtered to that area (risk_register with subject "platform", kept and read by
+//   Mynt admins only; the risks with no area under the Unassigned filter),
+// - "App: <name>" / "Product: <name>": the open risks across every app and product in that area (admin_list_risks,
+//   each risk's area as Mynt gave it, else its category's),
+// - "Signal: <name>": that area's signals, one row per thing that needs attention. A signal measured and clear is one
+//   row, "Clear"; one Mynt doesn't measure is one row, "Not available", with why (never 0, never left out).
+// The signals, as the route sends them (each with its own columns, which the table reads into items):
 // - Financial: liquidity pools' and treasury pools' flags (ops_status's attention lines): Area, What needs attention,
 // - Compliance: production apps without a signed program agreement (App, Missing agreements), and overdue oversight
 //   audits (Overdue audits, Apps flagged); ops_status counts both, without naming the sponsor, product or audit,
@@ -19,7 +22,7 @@ import { adminHref, words } from "./admin"
 import type { AuditEntry } from "./admin-audit"
 import { actionLabel, actorWords, whenWords } from "./admin-audit"
 import { peopleFrom } from "./people"
-import { areaOfRisk, isRiskArea, RISK_LEVEL_LABELS, riskLevel, unavailable, type RiskArea, type RiskRegister, type Signal, type Unavailable } from "./risk-register"
+import { areaOfRisk, isRiskArea, RISK_CATEGORY_LABELS, RISK_LEVEL_LABELS, RISK_STATUS_LABELS, RISK_STATUSES, riskLevel, scoreText, unavailable, type RiskArea, type RiskCategory, type RiskRegister, type RiskRow, type RiskStatus, type Signal, type Unavailable } from "./risk-register"
 
 type Obj = Record<string, unknown>
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v)
@@ -42,8 +45,13 @@ export type CrossRisk = {
   subjectName: string | null
   href: string | null // where it lives in the platform admin: the app's workspace, the product's firm (its Products tab)
   riskArea: RiskArea | null
+  category: string | null
+  likelihood: number | null
+  impact: number | null
   score: number
   level: RiskLevel
+  owner: string | null // the owner's name, when the risk has one
+  mitigation: string | null
   status: string
   reviewBy: string | null
   overdue: boolean
@@ -64,14 +72,12 @@ export function crossRisksFrom(reply: unknown, area: RiskArea): CrossRisks {
     const ws = str(r.workspace_id)
     const firm = str(r.firm_id)
     const href = type === "app" && ws ? adminHref("workspaces", ws) : type === "product" && firm ? `${adminHref("firms", firm)}?tab=products` : null
-    return [{ id, title, subjectType: type, subjectName: str(r.subject_name), href, riskArea, score, level: riskLevel(score) as RiskLevel, status: str(r.status) ?? "open", reviewBy: str(r.review_by), overdue: r.overdue === true }]
+    const owner = isObj(r.owner) ? (str(r.owner.name) ?? (str(r.owner.user_id) ? "Unnamed member" : null)) : null
+    return [{ id, title, subjectType: type, subjectName: str(r.subject_name), href, riskArea, category: str(r.category), likelihood: num(r.likelihood), impact: num(r.impact), score, level: riskLevel(score) as RiskLevel, owner, mitigation: str(r.mitigation), status: str(r.status) ?? "open", reviewBy: str(r.review_by), overdue: r.overdue === true }]
   })
   return { available: true, risks }
 }
 export const levelWords = (l: RiskLevel) => RISK_LEVEL_LABELS[l]
-export const subjectWords = (r: CrossRisk) => `${r.subjectType === "app" ? "App" : r.subjectType === "product" ? "Financial product" : "Mynt"}: ${r.subjectName ?? "Unnamed"}`
-/** Who keeps the risk's register (Mynt sends the workspace's or firm's id, which the subject links to, not its name). */
-export const keeperWords = (r: CrossRisk) => (r.subjectType === "app" ? (r.href ? "The app's workspace" : "Workspace not known") : r.subjectType === "product" ? (r.href ? "The product's firm" : "No firm: Mynt's reference product") : "Mynt")
 export const reviewWords = (r: { reviewBy: string | null; overdue: boolean }) => (r.reviewBy ? `${r.reviewBy}${r.overdue ? " (overdue)" : ""}` : "Not set")
 
 // ---- each area's signals ----
@@ -257,4 +263,166 @@ export type RegisterAreaData ={ area: RiskArea; register: RiskRegister | Unavail
 /** The register's owner choices: Mynt admins who have signed in (list_whitelist). */
 export function adminOwnersFrom(whitelist: unknown): { userId: string; name: string }[] {
   return (peopleFrom(whitelist)?.people ?? []).filter((p) => p.status === "signed_in" && p.userId && p.roles.includes("admin")).map((p) => ({ userId: p.userId!, name: p.name ?? p.email ?? "Mynt admin" }))
+}
+
+// ---- a tab's one table: every risk item of the area, whatever its source ----
+
+export const REGISTER_SOURCES = ["mynt", "subjects", "signals"] as const
+export type RegisterSource = (typeof REGISTER_SOURCES)[number]
+export const REGISTER_SOURCE_LABELS: Record<RegisterSource, string> = { mynt: "Mynt", subjects: "Apps and products", signals: "Signals" }
+export const SIGNAL_STATUSES = ["needs_attention", "clear", "not_available"] as const
+export const ITEM_STATUSES = [...RISK_STATUSES, ...SIGNAL_STATUSES] as const
+export type ItemStatus = (typeof ITEM_STATUSES)[number]
+export const ITEM_STATUS_LABELS: Record<ItemStatus, string> = { ...RISK_STATUS_LABELS, needs_attention: "Needs attention", clear: "Clear", not_available: "Not available" }
+export const NOT_SCORED = "Not scored"
+export const NOT_ASSIGNED = "Not assigned"
+export const NO_MITIGATION = "None recorded"
+
+export type RegisterItem = {
+  key: string
+  source: RegisterSource
+  sourceWords: string // "Mynt", "App: Saver", "Product: Fixed deposit", "Signal: Backup"
+  subject: { kind: string; name: string; href: string | null } | null // an app's or a product's risk: what it is on
+  title: string
+  category: string
+  likelihood: number | null
+  impact: number | null
+  score: number | null // null: not scored (a signal), or not available
+  level: RiskLevel | null
+  scoreWords: string
+  owner: string
+  status: ItemStatus
+  when: string // a register risk's review date ("(overdue)" in words); when a signal was observed
+  reviewBy: string | null
+  overdue: boolean
+  detail: string // the mitigation, the signal's detail, or why it isn't available: in full
+  risk: RiskRow | null // Mynt's own: what Review risk opens
+}
+
+// Each signal's name for one of its rows ("Signal: Backup"); a signal this doesn't know keeps its title.
+const SIGNAL_NAMES: Record<string, string> = {
+  pools: "Pool flag",
+  agreements: "Missing program agreement",
+  audits: "Overdue agreement audit",
+  vendors: "Vendor conformance",
+  operations: "Agent/hosting failure",
+  covenants: "Covenant",
+  "product-health": "Product health",
+  drift: "Drifted product",
+  security: "Security event",
+  backups: "Backup",
+}
+export const signalName = (spec: { id: string; title: string }) => SIGNAL_NAMES[spec.id] ?? spec.title
+const seen = (v: string | undefined) => (v && v !== "—" ? v : NOT_RECORDED)
+const upper = (v: string) => (v ? v[0].toUpperCase() + v.slice(1) : v)
+
+type SignalPart = Pick<RegisterItem, "title" | "category" | "when" | "detail"> & { status?: ItemStatus }
+/** One signal row as a risk item: what needs attention, its kind, when it was observed, and the rest in words. */
+function signalPart(spec: SignalSpec, cells: string[]): SignalPart {
+  const [a = "", b = "", c = ""] = cells
+  switch (spec.id) {
+    case "pools":
+    case "covenants":
+    case "product-health":
+      return { title: upper(b), category: a, when: NOT_RECORDED, detail: spec.description }
+    case "operations":
+      return { title: upper(b), category: a, when: seen(c), detail: spec.description }
+    case "agreements":
+      return { title: `${a}: in production without its program agreements`, category: "Program agreement", when: NOT_RECORDED, detail: `${upper(b)}. ${spec.description}` }
+    case "audits":
+      return { title: a === "1" ? "1 oversight audit is overdue" : `${a} oversight audits are overdue`, category: "Oversight audit", when: NOT_RECORDED, detail: `Apps flagged: ${b}. ${spec.description}` }
+    case "vendors":
+      return { title: `${a}: conformance run failed`, category: "Vendor conformance", when: seen(b), detail: spec.description }
+    case "security":
+      return { title: b, category: "Security event", when: seen(a), detail: `Actor: ${c}. Target: ${cells[3] ?? "—"}.` }
+    case "backups": {
+      const failed = [b.startsWith("Failed") ? "the last run failed" : null, c === OFFSITE.failed ? "the off-site upload failed" : null, (cells[4] ?? "").startsWith("Failed") ? "the last restore test failed" : null].filter((x): x is string => x !== null)
+      const problem = failed.length ? failed.join(", ") : b === "Succeeded" ? null : "the last run's result isn't recorded"
+      return { title: `Server backups: ${problem ?? "the last run succeeded"}`, category: "Backup", when: seen(a), detail: `${spec.columns.map((h, i) => `${h}: ${cells[i] ?? NOT_RECORDED}`).join(". ")}.`, status: problem ? "needs_attention" : "clear" }
+    }
+    default:
+      return { title: a, category: spec.title, when: NOT_RECORDED, detail: spec.columns.slice(1).map((h, i) => `${h}: ${cells[i + 1] ?? NOT_RECORDED}`).join(". ") }
+  }
+}
+
+const blank = { subject: null, likelihood: null, impact: null, score: null, level: null, reviewBy: null, overdue: false, risk: null } as const
+
+/** A signal's rows as risk items: one per thing that needs attention; one "Clear" row when it is measured and nothing
+ * does; one "Not available" row, with why, when Mynt doesn't measure it. Never no row, never a 0. */
+export function signalItems(spec: SignalSpec): RegisterItem[] {
+  const base = { ...blank, source: "signals" as const, sourceWords: `Signal: ${signalName(spec)}`, scoreWords: NOT_SCORED, owner: "Mynt" }
+  if (!spec.signal.available) return [{ ...base, key: `signal:${spec.id}:none`, title: spec.title, category: signalName(spec), status: "not_available", when: NOT_RECORDED, detail: spec.signal.reason }]
+  if (!spec.signal.rows.length) return [{ ...base, key: `signal:${spec.id}:clear`, title: spec.empty, category: signalName(spec), status: "clear", when: NOT_RECORDED, detail: spec.description }]
+  return spec.signal.rows.map((r) => {
+    const { status = "needs_attention", ...part } = signalPart(spec, r.cells)
+    return { ...base, key: `signal:${spec.id}:${r.key}`, status, ...part }
+  })
+}
+
+const byScore = (a: RegisterItem, b: RegisterItem) => (b.score ?? -1) - (a.score ?? -1)
+const registerItems = (reg: RiskRegister | Unavailable, what: string): RegisterItem[] =>
+  reg.available
+    ? reg.risks
+        .map(
+          (r): RegisterItem => ({
+            key: `mynt:${r.id}`,
+            source: "mynt",
+            sourceWords: "Mynt",
+            subject: null,
+            title: r.title,
+            category: RISK_CATEGORY_LABELS[r.category],
+            likelihood: r.likelihood,
+            impact: r.impact,
+            score: r.score,
+            level: riskLevel(r.score) as RiskLevel,
+            scoreWords: scoreText(r.likelihood, r.impact),
+            owner: r.owner ? (r.owner.name ?? "Unnamed member") : NOT_ASSIGNED,
+            status: r.status,
+            when: reviewWords(r),
+            reviewBy: r.reviewBy,
+            overdue: r.overdue,
+            detail: r.mitigation ?? NO_MITIGATION,
+            risk: r,
+          }),
+        )
+        .sort(byScore)
+    : [{ ...blank, key: "mynt:none", source: "mynt", sourceWords: "Mynt", title: what, category: "Risk register", scoreWords: "Not available", owner: "Mynt", status: "not_available", when: NOT_RECORDED, detail: reg.reason }]
+
+const crossItems = (cross: CrossRisks): RegisterItem[] =>
+  cross.available
+    ? cross.risks
+        .map((r): RegisterItem => {
+          const kind = r.subjectType === "app" ? "App" : "Product"
+          const name = r.subjectName ?? "Unnamed"
+          return {
+            key: `subject:${r.id}`,
+            source: "subjects",
+            sourceWords: `${kind}: ${name}`,
+            subject: { kind, name, href: r.href },
+            title: r.title,
+            category: r.category ? (RISK_CATEGORY_LABELS[r.category as RiskCategory] ?? words(r.category)) : NOT_RECORDED,
+            likelihood: r.likelihood,
+            impact: r.impact,
+            score: r.score,
+            level: r.level,
+            scoreWords: r.likelihood !== null && r.impact !== null && r.likelihood * r.impact === r.score ? scoreText(r.likelihood, r.impact) : `${r.score} (${levelWords(r.level)})`,
+            owner: r.owner ?? NOT_ASSIGNED,
+            status: (RISK_STATUSES as readonly string[]).includes(r.status) ? (r.status as RiskStatus) : "open",
+            when: reviewWords(r),
+            reviewBy: r.reviewBy,
+            overdue: r.overdue,
+            detail: r.mitigation ?? NO_MITIGATION,
+            risk: null,
+          }
+        })
+        .sort(byScore)
+    : [{ ...blank, key: "subject:none", source: "subjects", sourceWords: REGISTER_SOURCE_LABELS.subjects, title: "Open risks across apps and products", category: "Risk register", scoreWords: "Not available", owner: "Their workspaces and firms", status: "not_available", when: NOT_RECORDED, detail: cross.reason }]
+
+/** A tab's one table: Mynt's own risks in the area (highest score first), then the apps' and products' (highest score
+ * first), then the signals (what needs attention first, then what is clear, then what isn't available). With
+ * unassigned, Mynt's own risks that have no area yet instead: only Mynt's register has those. */
+export function registerItemsFrom(data: RegisterAreaData, unassigned = false): RegisterItem[] {
+  if (unassigned) return registerItems(data.unassigned, "Mynt's own register: unassigned risks")
+  const signals = data.signals.flatMap(signalItems)
+  return [...registerItems(data.register, "Mynt's own register"), ...crossItems(data.cross), ...SIGNAL_STATUSES.flatMap((s) => signals.filter((i) => i.status === s))]
 }

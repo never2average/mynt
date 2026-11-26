@@ -154,47 +154,61 @@ Risk models (`/platform/risk-models`) and Risk register (`/platform/risk-registe
 
 See [Risk areas](risk.md#risk-areas) for the areas and how the older categories map to them.
 
-**Risk models** lists Mynt's own risk models in the tab's area (`list_risk_models`): name, status in words, owner, version, last validated and next validation due ("overdue" when it has passed).
+**Risk models** is one table on each tab, filling the page under the list toolbar: search, Filters, Import (off until Mynt's next update), Export CSV and Add risk model. It lists Mynt's own risk models in the tab's area (`list_risk_models`): name, status in words, owner, version, last validated and next validation due ("overdue" when it has passed).
 
 - Add risk model runs `add_risk_model`. Inputs, outputs and thresholds are typed as JSON lists.
 - A row opens `/platform/risk-models/<id>`: its metadata card, then the tabs Definition (four tables: the purpose and method, the inputs, the outputs and the thresholds), Validations and Versions, each a table.
 - The card's actions are Edit model (`update_risk_model`: a change to what the model is makes a new version, and the old one is kept), Record validation (`validate_risk_model`) and Retire model (`retire_risk_model`, with a reason).
-- The Regulated product risk tab also lists, read-only, Product risk models: a table, with its own search and pager, of the risk models financial products declare in their definitions (`admin_list_product_risk_models`: product, firm, model, its type and version), each linked to its firm's Products tab.
-- What Mynt can't answer is one table row under the table's headers: "Not available." with why.
+- On the Regulated product risk tab the same table also holds, read-only, the risk models financial products declare in their definitions (`admin_list_product_risk_models`). That tab's table has two more columns: Source ("Mynt model", or "Product: <name> (<firm>)" linked to the firm's Products tab) and Type. Filters can narrow it to Mynt models or Product models. A product's row has no status, owner or validation on Mynt, and says so in words.
+- What Mynt can't answer is one row in the table: "Not available." with why.
 - Models overdue for validation count in `ops_status`.
 
-**Risk register** shows, on each tab, three kinds of section, and every one is a table.
+**Risk register** is one table on each tab, filling the page under the list toolbar: search, Filters, Import (off until Mynt's next update), Export CSV and Add risk. There are no sections: every risk item of the area is a row, 25 to a page, and the Source column says where it comes from.
 
-First is Mynt's own risk register in that area. These are risks on the `platform` subject, `subject_id` `mynt`, kept and read by Mynt admins only.
+| Source | What the rows are |
+| --- | --- |
+| Mynt | Mynt's own risk register in that area: risks on the `platform` subject, `subject_id` `mynt`, kept and read by Mynt admins only |
+| App: `<name>` or Product: `<name>` | The open risks in that area on apps' and products' own registers (`admin_list_risks` with `risk_area`). Read-only; the name links to the app's workspace page or the product's firm page |
+| Signal: `<name>` | What the area's signals say needs attention, one row each |
 
-- It is one table under the list toolbar: search, Filters, Import (off until Mynt's next update), Export CSV and Add risk.
-- Its columns are Risk, Category, Likelihood, Impact, Score (with its level in words), Owner, Status in words, Review by ("overdue" when it has passed) and Mitigation, which is cut short in the table and shown in full in the review sheet and the CSV.
-- Filters narrow it by status and by level, and Unassigned shows the risks with no area yet instead of the tab's.
-- Each row has a labelled Review risk, which can change the risk's area. Add risk starts on the tab's area; a platform risk always has one.
+Its columns:
+
+| Column | What it shows |
+| --- | --- |
+| Risk | The risk's title. For a signal, what needs attention |
+| Source | As above |
+| Category | The risk's category, or the signal's kind |
+| Score | Likelihood × impact with its level in words. "Not scored" for a signal |
+| Owner | The risk's owner, or "Not assigned". "Mynt" for a signal |
+| Status | In words: the register's status for a risk. "Needs attention", "Clear" or "Not available" for a signal |
+| Review by / When | A risk's review date ("overdue" when it has passed). For a signal, when it was observed, or "Not recorded" |
+| Detail | The mitigation, or the signal's detail. It is cut short in the table and shown in full in the review sheet and the CSV |
+| Action | Review risk on Mynt's rows, Open on an app's or a product's row. None on a signal |
+
+- The rows come in this order: Mynt's risks by score, then apps' and products' by score, then the signals, with what needs attention first.
+- Search covers the risk, its source and its detail. Filters narrow the table by source (Mynt, Apps and products, Signals), by status and by level. Unassigned shows Mynt's own risks with no area yet instead of the tab's rows.
+- Review risk, or a click on one of Mynt's rows, opens the review sheet, which can change the risk's area. Add risk starts on the tab's area; a platform risk always has one.
+- A signal that is measured and clear is one row with the status "Clear". A signal Mynt doesn't measure is one row with the status "Not available" and the reason in Detail. Neither is ever left out or shown as 0. The same holds for Mynt's register and for the apps' and products' risks when Mynt can't read them.
 - Overdue reviews of platform risks count in `ops_status` with the apps' and products'.
 
-Second, read-only, is Across apps and products: the open risks in that area on apps' and products' own registers (`admin_list_risks` with `risk_area`), highest score first, with its own search and pager.
+The signals on each tab:
 
-- Its columns are Subject, Workspace / firm, Risk, Score (with its level), Status and Review by.
-- The subject links to its app's workspace page or its product's firm page. `admin_list_risks` sends the workspace's or firm's id, not its name, so the Workspace / firm column says which of the two keeps the risk.
-
-Then come the area's signals, each a table with its own columns. A signal Mynt doesn't measure is one row under those columns, "Not available." with why; one that is measured and clear is one row saying so in words. Neither is ever an empty table or a 0.
-
-| Area | Signal tables and their columns |
+| Area | Signals (the name in Source) |
 | --- | --- |
-| Financial | Liquidity and treasury pools: Area, What needs attention |
-| Compliance | Apps missing a program agreement: App, Missing agreements. Overdue oversight audits: Overdue audits, Apps flagged |
-| Third-party | Vendor conformance (runs that failed): Service, Last conformance, Result |
-| Operations | Agents and hosting (failed and stuck runs, machines and apps): Area, Item, Since |
-| Business process | Covenants (products paused, open breaches): Area, What needs attention. Drifted products: Product, Detail |
-| Regulated product | Covenants and Product health: Area, What needs attention. Drifted products: Product, Detail |
-| Technology | Security events in the last 30 days (`audit_log` entries of class security): When, Action, Actor, Target. Backups: Last run, Result, Off-site, Last success, Last restore test |
+| Financial | Pool flag: flags on liquidity and treasury pools |
+| Compliance | Missing program agreement: production apps without their signed program agreements. Overdue agreement audit: oversight audits past their due date |
+| Third-party | Vendor conformance: conformance runs that failed |
+| Operations | Agent/hosting failure: failed and stuck runs, machines and apps |
+| Business process | Covenant: products paused and open breaches. Drifted product |
+| Regulated product | Covenant, Product health and Drifted product |
+| Technology | Security event: `audit_log` entries of class security in the last 30 days. Backup: the server's last backup run, off-site copy and restore test, as one row |
 
 The signals come from `ops_status`, so they show what it reports and no more:
 
 - It counts an app's missing program agreements and the overdue audits, without naming the sponsor, the product or the audit.
 - It names a failed conformance run's service, not its vendor.
-- Where it has only a line for an operations area, and no list of runs behind it, the row's Since is "Not recorded".
+- Where it has only a line for an operations area, and no list of runs behind it, the row's When is "Not recorded".
+- The Backup row is "Clear" when the last run succeeded and nothing failed. It is "Needs attention" when the run, the off-site upload or the restore test failed, or when the last run's result isn't recorded.
 
 Drifted products are not available until `ops_status` counts them across firms.
 

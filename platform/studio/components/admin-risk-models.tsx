@@ -1,13 +1,14 @@
 "use client"
 
 // Admin → Risk models (/platform/risk-models; lib/risk-models.ts, /api/admin/risk-models), one tab per risk area
-// (components/risk-area-tabs.tsx). Each tab lists Mynt's own risk models in that area (name, status in words, owner,
-// version, last validated, next validation due with "overdue" in words) with a labelled Add risk model; a row opens
-// /platform/risk-models/<id>: its metadata card with Edit model (a change to what it is is a new version), Record
-// validation and Retire model, each a labelled button opening its sheet, then the tabs Definition (method, inputs,
-// outputs and thresholds, each a table), Validations and Versions. The Regulated product risk tab also lists, read-only
-// in its own searched and paged table, the risk models financial products declare in their own definitions, each
-// linked to its firm's Products tab. What Mynt can't answer is one table row, "Not available." with why.
+// (components/risk-area-tabs.tsx). Each tab is ONE table filling the page, under the list toolbar: Mynt's own risk
+// models in that area (name, status in words, owner, version, last validated, next validation due with "overdue" in
+// words) with a labelled Add risk model; a row opens /platform/risk-models/<id>: its metadata card with Edit model (a
+// change to what it is is a new version), Record validation and Retire model, each a labelled button opening its
+// sheet, then the tabs Definition (method, inputs, outputs and thresholds, each a table), Validations and Versions.
+// On the Regulated product risk tab the same table also holds, read-only, the risk models financial products declare
+// in their own definitions, with a Source column ("Mynt model" / "Product: <name> (<firm>)", linked to the firm's
+// Products tab) and a Type column. What Mynt can't answer is one table row, "Not available." with why.
 // Server-renderable.
 import Link from "next/link"
 import { useRouter } from "next/navigation"
@@ -16,7 +17,7 @@ import { Archive, ClipboardCheck, ExternalLink, Pencil, Plus } from "lucide-reac
 
 import { AdminDetail, AdminList, AdminNotReady, AdminSheet, AdminTable, Field, fieldClass, useAdminAction, useAdminData } from "@/components/admin-kit"
 import { downloadCsv } from "@/components/licences-view"
-import { ListLayout, matches, usePaged } from "@/components/list-layout"
+import { matches, usePaged } from "@/components/list-layout"
 import { RiskAreaTabs, useAreaInAddress } from "@/components/risk-area-tabs"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -326,118 +327,178 @@ export function RetireRiskModelSheet({ model, open, onClose, onDone, fetcher }: 
   )
 }
 
-// ---- the list (one area's tab) ----
+// ---- the list (one area's tab): ONE table ----
 
-export const PRODUCT_MODEL_HEAD = ["Product", "Firm", "Model", "Type", "Version"] as const
+export const MODEL_HEAD = ["Model", "Status", "Owner", "Version", "Last validated", "Next validation due", "Action"] as const
+// The Regulated product risk tab's table also holds the models financial products declare: it says each row's source and type.
+export const MODEL_HEAD_WITH_PRODUCTS = ["Model", "Source", "Type", "Status", "Owner", "Version", "Last validated", "Next validation due", "Action"] as const
+export const MODEL_SOURCE_LABELS = { mynt: "Mynt models", product: "Product models" } as const
+const NOT_AVAILABLE = "Not available"
+const NOT_RECORDED = "Not recorded"
 
-function ProductRiskModelsSection({ data }: { data: ProductRiskModels }) {
-  const [query, setQuery] = useState("")
-  const all = data.available ? data.rows : []
-  const rows = useMemo(() => all.filter((r) => matches(query, r.productName, r.firmName, r.modelName, r.type)), [all, query])
-  const paged = usePaged(rows)
-  return (
-    <section className="flex min-w-0 shrink-0 flex-col gap-2" data-product-risk-models aria-labelledby="product-risk-models">
-      <h2 id="product-risk-models" className="text-sm font-semibold">
-        Product risk models
-      </h2>
-      <p className="text-xs text-muted-foreground">The risk models financial products declare in their own definitions. Read-only: each product&apos;s firm keeps them.</p>
-      <ListLayout search={query} onSearch={setQuery} searchLabel="Search product risk models by product, firm, model or type" page={paged.page} pages={paged.pages} total={rows.length} onPage={paged.setPage}>
-        <AdminTable
-          head={PRODUCT_MODEL_HEAD}
-          unavailable={data.available ? null : data.reason}
-          rowKeys={paged.shown.map((r) => r.key)}
-          rows={paged.shown.map((r) => [
-            r.href ? (
-              <Link key="p" href={r.href} className="underline underline-offset-2" data-product-model-link={r.href}>
-                {r.productName}
-              </Link>
-            ) : (
-              r.productName
-            ),
-            r.firmName ?? "Mynt's reference product",
-            r.modelName,
-            r.type,
-            r.version ?? "Not stated",
-          ])}
-          empty={all.length ? "No product risk models match this search." : "No financial product declares a risk model in its definition yet."}
-        />
-      </ListLayout>
-    </section>
-  )
+type ModelRow = {
+  key: string
+  source: "mynt" | "product"
+  sourceWords: string // "Mynt model", "Product: Fixed deposit (Builder Inc)"
+  name: string
+  type: string
+  status: string // a Mynt model's status; "" for a product's model, which has none on Mynt
+  statusWords: string
+  owner: string
+  version: string
+  lastValidated: string
+  due: string
+  overdue: boolean
+  model: RiskModel | null // Mynt's own: its page opens
+  href: string | null // a product's: its firm's Products tab
+  search: string
+  missing?: boolean // the one row for a part Mynt can't answer
 }
 
-const MODEL_HEAD = ["Model", "Status", "Owner", "Version", "Last validated", "Next validation due", ""]
+/** A tab's rows: Mynt's own models, then (Regulated product risk) the models products declare, read-only. A part Mynt
+ * can't answer is one row, "Not available." with why: never left out, never a 0. */
+function modelRows(data: RiskModelsData): ModelRow[] {
+  const none = (key: string, source: ModelRow["source"], sourceWords: string, reason: string): ModelRow => ({ key, source, sourceWords, name: `Not available. ${reason}`, type: NOT_AVAILABLE, status: "", statusWords: NOT_AVAILABLE, owner: NOT_AVAILABLE, version: NOT_AVAILABLE, lastValidated: NOT_AVAILABLE, due: NOT_AVAILABLE, overdue: false, model: null, href: null, search: reason, missing: true })
+  const mynt: ModelRow[] = data.models.available
+    ? data.models.models.map((m) => ({ key: m.id, source: "mynt", sourceWords: "Mynt model", name: m.name, type: "Not stated", status: m.status, statusWords: statusWords(m), owner: ownerWords(m.owner), version: `Version ${m.version}`, lastValidated: lastValidatedWords(m), due: dueWords(m), overdue: m.overdue, model: m, href: null, search: m.purpose }))
+    : [none("mynt:none", "mynt", "Mynt model", data.models.reason)]
+  const products: ModelRow[] = !data.productModels
+    ? []
+    : data.productModels.available
+      ? data.productModels.rows.map((r) => ({
+          key: `product:${r.key}`,
+          source: "product",
+          sourceWords: `Product: ${r.productName} (${r.firmName ?? "Mynt's reference product"})`,
+          name: r.modelName,
+          type: r.type,
+          status: "",
+          statusWords: "Declared in the product's definition",
+          owner: r.firmName ?? "Mynt's reference product",
+          version: r.version ?? "Not stated",
+          lastValidated: NOT_RECORDED,
+          due: NOT_RECORDED,
+          overdue: false,
+          model: null,
+          href: r.href,
+          search: r.productName,
+        }))
+      : [none("product:none", "product", "Product models", data.productModels.reason)]
+  return [...mynt, ...products]
+}
 
-/** One area's models: the list's toolbar (search, Filters, Import, Export CSV, Add risk model) over its table. */
+/** One area's models: the list's toolbar (search, Filters, Import, Export CSV, Add risk model) over its ONE table. */
 export function RiskModelsAreaView({ data, onOpen = () => undefined, onChanged = () => undefined, sheet = null, fetcher }: { data: RiskModelsData; onOpen?: (id: string) => void; onChanged?: () => void; sheet?: "add" | null; fetcher?: typeof fetch }) {
   const [query, setQuery] = useState("")
   const [status, setStatus] = useState<string[]>([])
+  const [source, setSource] = useState<string[]>([])
   const [adding, setAdding] = useState(sheet === "add")
   const [dirty, setDirty] = useState(false)
-  const all = data.models.available ? data.models.models : []
-  const rows = useMemo(() => all.filter((m) => matches(query, m.name, m.purpose, m.owner?.name) && (!status.length || status.includes(m.status))), [all, query, status])
+  const withProducts = data.area === "regulated_product" && data.productModels !== null
+  const all = useMemo(() => modelRows(withProducts ? data : { ...data, productModels: null }), [data, withProducts])
+  const rows = useMemo(() => all.filter((r) => matches(query, r.name, r.search, r.owner, r.sourceWords, r.type) && (!status.length || status.includes(r.status)) && (!source.length || source.includes(r.source))), [all, query, status, source])
   const paged = usePaged(rows)
   const label = RISK_AREA_LABELS[data.area].toLowerCase()
+  const overdue = data.models.available ? data.models.counts.overdue : 0
   const close = () => {
     setAdding(false)
     if (dirty) onChanged()
     setDirty(false)
   }
+  const cell = (r: ModelRow) => ({
+    name: (
+      <span key="n" className={r.missing ? "block min-w-48 font-normal whitespace-normal text-muted-foreground" : undefined} data-not-available={r.missing ? "" : undefined}>
+        {r.name}
+      </span>
+    ),
+    source: (
+      <span key="src" className="block min-w-40 whitespace-normal" data-model-source={r.source}>
+        {r.href ? (
+          <Link href={r.href} className="underline underline-offset-2" onClick={(e) => e.stopPropagation()} data-product-model-link={r.href}>
+            {r.sourceWords}
+          </Link>
+        ) : (
+          r.sourceWords
+        )}
+      </span>
+    ),
+    status: (
+      <span key="s" data-model-status={r.status || undefined}>
+        {r.statusWords}
+      </span>
+    ),
+    due: (
+      <span key="d" data-overdue={r.overdue ? "true" : undefined}>
+        {r.due}
+      </span>
+    ),
+    action: r.model ? (
+      <span key="o" className="flex justify-end">
+        <Button size="sm" variant="outline" onClick={(e) => (e.stopPropagation(), onOpen(r.model!.id))} data-open-model={r.model.id}>
+          <ExternalLink />
+          Open
+        </Button>
+      </span>
+    ) : r.href ? (
+      <span key="o" className="flex justify-end">
+        <Button asChild size="sm" variant="outline">
+          <Link href={r.href} aria-label={`Open the firm of ${r.sourceWords}`} data-open-product-model={r.href}>
+            <ExternalLink />
+            Open
+          </Link>
+        </Button>
+      </span>
+    ) : (
+      ""
+    ),
+  })
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-6" data-risk-models-area={data.area}>
-      {!data.models.available ? (
-        <div className="min-w-0 shrink-0 overflow-x-auto rounded-lg border" data-table-view>
-          <AdminTable head={MODEL_HEAD.slice(0, -1)} rows={[]} empty="" unavailable={data.models.reason} />
-        </div>
-      ) : (
-        <AdminList
-          id="risk-models"
-          search={query}
-          onSearch={setQuery}
-          searchLabel={`Search ${label} models by name, purpose or owner`}
-          facets={[{ id: "status", label: "Status", options: MODEL_STATUSES.map((s) => ({ value: s, label: MODEL_STATUS_LABELS[s] })), selected: status, onChange: (v: string[]) => setStatus(v) }]}
-          onClearFilters={() => setStatus([])}
-          onExport={() => downloadCsv(`risk-models-${data.area}.csv`, csvOf(["Model", "Area", "Status", "Owner", "Version", "Last validated", "Next validation due"], rows.map((m) => [m.name, m.riskArea, m.status, ownerWords(m.owner), m.version, lastValidatedWords(m), dueWords(m)])))}
-          exportDisabled={!rows.length}
-          note={data.models.counts.overdue ? `${data.models.counts.overdue === 1 ? "1 model is" : `${data.models.counts.overdue} models are`} overdue for validation.` : null}
-          cta={
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-risk-models-area={data.area}>
+      <AdminList
+        id="risk-models"
+        search={query}
+        onSearch={setQuery}
+        searchLabel={withProducts ? `Search ${label} models by name, purpose, owner, product or type` : `Search ${label} models by name, purpose or owner`}
+        facets={[
+          ...(withProducts ? [{ id: "source", label: "Source", options: (["mynt", "product"] as const).map((s) => ({ value: s, label: MODEL_SOURCE_LABELS[s] })), selected: source, onChange: (v: string[]) => setSource(v) }] : []),
+          { id: "status", label: "Status", options: MODEL_STATUSES.map((s) => ({ value: s, label: MODEL_STATUS_LABELS[s] })), selected: status, onChange: (v: string[]) => setStatus(v) },
+        ]}
+        onClearFilters={() => (setStatus([]), setSource([]))}
+        onExport={() =>
+          downloadCsv(
+            `risk-models-${data.area}.csv`,
+            csvOf(
+              ["Model", ...(withProducts ? ["Source", "Type"] : []), "Area", "Status", "Owner", "Version", "Last validated", "Next validation due"],
+              rows.map((r) => [r.name, ...(withProducts ? [r.sourceWords, r.type] : []), data.area, r.model ? r.model.status : r.statusWords, r.owner, r.model ? r.model.version : r.version, r.lastValidated, r.due]),
+            ),
+          )
+        }
+        exportDisabled={!rows.some((r) => !r.missing)}
+        note={[overdue ? `${overdue === 1 ? "1 model is" : `${overdue} models are`} overdue for validation.` : null, withProducts ? "Product models are the ones financial products declare in their own definitions. Read-only: each product's firm keeps them." : null].filter(Boolean).join(" ") || null}
+        cta={
+          data.models.available ? (
             <Button onClick={() => setAdding(true)} data-add-risk-model>
               <Plus />
               Add risk model
             </Button>
-          }
-          page={paged.page}
-          pages={paged.pages}
-          total={rows.length}
-          onPage={paged.setPage}
-        >
-          <AdminTable
-            head={MODEL_HEAD}
-            rowKeys={paged.shown.map((m) => m.id)}
-            onRow={(i) => onOpen(paged.shown[i].id)}
-            rows={paged.shown.map((m) => [
-              m.name,
-              <span key="s" data-model-status={m.status}>
-                {statusWords(m)}
-              </span>,
-              ownerWords(m.owner),
-              `Version ${m.version}`,
-              lastValidatedWords(m),
-              <span key="d" data-overdue={m.overdue ? "true" : undefined}>
-                {dueWords(m)}
-              </span>,
-              <span key="o" className="flex justify-end">
-                <Button size="sm" variant="outline" onClick={(e) => (e.stopPropagation(), onOpen(m.id))} data-open-model={m.id}>
-                  <ExternalLink />
-                  Open
-                </Button>
-              </span>,
-            ])}
-            empty={all.length ? "No models match these filters." : `No ${label} models yet. Add the first one.`}
-          />
-        </AdminList>
-      )}
-      {data.area === "regulated_product" && data.productModels && <ProductRiskModelsSection data={data.productModels} />}
+          ) : undefined
+        }
+        page={paged.page}
+        pages={paged.pages}
+        total={rows.length}
+        onPage={paged.setPage}
+      >
+        <AdminTable
+          head={withProducts ? MODEL_HEAD_WITH_PRODUCTS : MODEL_HEAD}
+          rowKeys={paged.shown.map((r) => r.key)}
+          onRow={(i) => paged.shown[i].model && onOpen(paged.shown[i].model!.id)}
+          opens={paged.shown.map((r) => r.model !== null)}
+          rows={paged.shown.map((r) => {
+            const c = cell(r)
+            return [c.name, ...(withProducts ? [c.source, r.type] : []), c.status, r.owner, r.version, r.lastValidated, c.due, c.action]
+          })}
+          empty={all.length ? "No models match this search and these filters." : `No ${label} models yet. Add the first one.`}
+        />
+      </AdminList>
       <AddRiskModelSheet area={data.area} owners={data.owners} open={adding} onClose={close} onDone={() => setDirty(true)} fetcher={fetcher} />
     </div>
   )
