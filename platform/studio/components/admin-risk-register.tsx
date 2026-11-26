@@ -9,28 +9,32 @@
 //   linked to its workspace's or firm's page and a labelled Open,
 // - "Signal: <name>": what the area's signals say needs attention; a signal that is clear is one row saying so, and one
 //   Mynt doesn't measure is one row, "Not available", with why: never left out, never a 0.
-// Columns: Risk, Source, Category, Score (likelihood × impact with its level in words, or "Not scored"), Owner, Status
+// Columns: Risk, Source, Category, the three scores Inherent (likelihood × impact), Control (how well its controls
+// work, or "Not assessed") and Residual (each level in words with its number; a signal is "Not scored"), Owner, Status
 // in words, Review by / When ("overdue" in words), Detail (cut short; in full in its title, the review sheet and the
-// CSV), Action. Add risk (starting on the tab's area) and Review risk open their sheets (components/risk-register.tsx,
-// as an app's and a product's). Server-renderable.
+// CSV), Action. Sorted by residual score, highest first; Filters has the residual level. A risk's row opens its page
+// (/platform/risk-register/<id>, components/risk-detail.tsx) by a click or its labelled Open: Mynt's own to keep, an
+// app's or a product's to read. Add risk (starting on the tab's area) and Review risk open their sheets
+// (components/risk-register.tsx, as an app's and a product's). Server-renderable.
 import Link from "next/link"
 import { useCallback, useMemo, useState } from "react"
 import { ClipboardCheck, ExternalLink, ShieldPlus } from "lucide-react"
 
 import { AdminList, AdminNotReady, AdminTable, useAdminData } from "@/components/admin-kit"
+import { RiskDetailPage } from "@/components/risk-detail"
 import { downloadCsv } from "@/components/licences-view"
 import { matches, usePaged } from "@/components/list-layout"
 import { RiskAreaTabs, useAreaInAddress } from "@/components/risk-area-tabs"
 import { AddRiskSheet, ReviewRiskSheet } from "@/components/risk-register"
 import { Button } from "@/components/ui/button"
-import { csvOf } from "@/lib/admin"
+import { adminHref, csvOf } from "@/lib/admin"
 import { ITEM_STATUS_LABELS, ITEM_STATUSES, levelWords, PLATFORM_SUBJECT, REGISTER_SOURCE_LABELS, REGISTER_SOURCES, registerItemsFrom, RISK_LEVELS, type RegisterAreaData, type RegisterItem } from "@/lib/admin-risks"
 import { areaWords, RISK_AREA_LABELS, type RiskArea, type RiskRow } from "@/lib/risk-register"
 
 export type RegisterFilter = "area" | "unassigned"
 
-export const REGISTER_HEAD = ["Risk", "Source", "Category", "Score", "Owner", "Status", "Review by / When", "Detail", "Action"] as const
-export const REGISTER_CSV_HEAD = ["Risk", "Source", "Category", "Risk area", "Likelihood", "Impact", "Score", "Level", "Owner", "Status", "Review by / When", "Overdue", "Detail"]
+export const REGISTER_HEAD = ["Risk", "Source", "Category", "Inherent", "Control", "Residual", "Owner", "Status", "Review by / When", "Detail", "Action"] as const
+export const REGISTER_CSV_HEAD = ["Risk", "Source", "Category", "Risk area", "Likelihood", "Impact", "Inherent score", "Inherent level", "Control", "Residual score", "Residual level", "Residual", "Owner", "Status", "Review by / When", "Overdue", "Detail"]
 const registerCsvRow = (i: RegisterItem, area: string) => [
   i.title,
   i.sourceWords,
@@ -40,6 +44,10 @@ const registerCsvRow = (i: RegisterItem, area: string) => [
   i.impact ?? (i.score === null ? i.scoreWords : "Not recorded"),
   i.score ?? i.scoreWords,
   i.level ? levelWords(i.level) : i.scoreWords,
+  i.controlWords,
+  i.residual ?? i.residualWords,
+  i.residualLevel ? levelWords(i.residualLevel) : i.residualWords,
+  i.residualWords,
   i.owner,
   ITEM_STATUS_LABELS[i.status],
   i.reviewBy ?? i.when,
@@ -59,9 +67,11 @@ export function RiskRegisterAreaView({
   onChanged,
   filter = "area",
   onFilter = () => undefined,
+  onOpen = () => undefined,
   fetcher,
 }: {
   data: RegisterAreaData
+  onOpen?: (riskId: string) => void
   onChanged?: () => void
   filter?: RegisterFilter
   onFilter?: (f: RegisterFilter) => void
@@ -84,7 +94,7 @@ export function RiskRegisterAreaView({
           matches(query, i.title, i.sourceWords, i.category, i.owner, i.detail) &&
           (!source.length || source.includes(i.source)) &&
           (!status.length || status.includes(i.status)) &&
-          (!level.length || (i.level !== null && level.includes(i.level))),
+          (!level.length || (i.residualLevel !== null && level.includes(i.residualLevel))),
       ),
     [all, query, source, status, level],
   )
@@ -109,7 +119,7 @@ export function RiskRegisterAreaView({
         facets={[
           { id: "source", label: "Source", options: REGISTER_SOURCES.map((s) => ({ value: s, label: REGISTER_SOURCE_LABELS[s] })), selected: source, onChange: setSource },
           { id: "status", label: "Status", options: ITEM_STATUSES.map((s) => ({ value: s, label: ITEM_STATUS_LABELS[s] })), selected: status, onChange: setStatus },
-          { id: "level", label: "Level", options: RISK_LEVELS.map((l) => ({ value: l, label: levelWords(l) })), selected: level, onChange: setLevel },
+          { id: "level", label: "Residual level", options: RISK_LEVELS.map((l) => ({ value: l, label: levelWords(l) })), selected: level, onChange: setLevel },
           { id: "area", label: "Risk area", options: [{ value: "unassigned", label: "Unassigned (no area yet)" }], selected: unassigned ? ["unassigned"] : [], onChange: (v) => onFilter(v.includes("unassigned") ? "unassigned" : "area") },
         ]}
         onClearFilters={() => (setSource([]), setStatus([]), setLevel([]), onFilter("area"))}
@@ -131,8 +141,8 @@ export function RiskRegisterAreaView({
         <AdminTable
           head={REGISTER_HEAD}
           rowKeys={paged.shown.map((i) => i.key)}
-          onRow={(n) => review(paged.shown[n])?.()}
-          opens={paged.shown.map((i) => review(i) !== null)}
+          onRow={(n) => paged.shown[n].riskId && onOpen(paged.shown[n].riskId!)}
+          opens={paged.shown.map((i) => i.riskId !== null)}
           rows={paged.shown.map((i) => [
             wrap(i.title, "t"),
             <span key="src" className="block min-w-32 whitespace-normal" data-risk-source={i.source}>
@@ -152,8 +162,14 @@ export function RiskRegisterAreaView({
               )}
             </span>,
             i.category,
-            <span key="sc" className="tabular-nums" data-risk-score={i.score ?? undefined} data-risk-level={i.level ?? undefined}>
+            <span key="sc" className="tabular-nums whitespace-nowrap" data-risk-score={i.score ?? undefined} data-risk-level={i.level ?? undefined}>
               {i.scoreWords}
+            </span>,
+            <span key="ctl" data-risk-control>
+              {i.controlWords}
+            </span>,
+            <span key="res" className="block min-w-28 tabular-nums whitespace-normal" data-risk-residual={i.residual ?? undefined} data-residual-level={i.residualLevel ?? undefined}>
+              {i.residualWords}
             </span>,
             i.owner,
             <span key="st" data-risk-status={i.status}>
@@ -165,19 +181,18 @@ export function RiskRegisterAreaView({
             <span key="d" className="block max-w-64 truncate" title={i.detail} data-risk-detail>
               {i.detail}
             </span>,
-            review(i) ? (
-              <span key="a" className="flex justify-end">
-                <Button size="sm" variant="outline" onClick={(e) => (e.stopPropagation(), setReviewing(i.risk))} data-review-risk={i.risk!.id}>
-                  <ClipboardCheck /> Review risk
-                </Button>
-              </span>
-            ) : i.subject?.href ? (
-              <span key="a" className="flex justify-end">
+            i.riskId ? (
+              <span key="a" className="flex justify-end gap-2">
                 <Button asChild size="sm" variant="outline">
-                  <Link href={i.subject.href} aria-label={`Open ${i.subject.kind.toLowerCase()} ${i.subject.name}`} data-open-subject={i.subject.href}>
+                  <Link href={adminHref("risk-register", i.riskId)} aria-label={`Open the risk ${i.title}`} onClick={(e) => e.stopPropagation()} data-open-risk={i.riskId}>
                     <ExternalLink /> Open
                   </Link>
                 </Button>
+                {review(i) && (
+                  <Button size="sm" variant="outline" onClick={(e) => (e.stopPropagation(), setReviewing(i.risk))} data-review-risk={i.risk!.id}>
+                    <ClipboardCheck /> Review risk
+                  </Button>
+                )}
               </span>
             ) : (
               ""
@@ -206,7 +221,11 @@ export function RiskRegisterView({ area, onArea, body }: { area: RiskArea; onAre
   )
 }
 
-export function RiskRegisterTab() {
+export function RiskRegisterTab({ id = null, onOpen = () => undefined, onBack = () => undefined }: { id?: string | null; onOpen?: (riskId: string) => void; onBack?: () => void }) {
+  return id ? <RiskDetailPage riskId={id} onBack={onBack} /> : <RiskRegisterList onOpen={onOpen} />
+}
+
+function RiskRegisterList({ onOpen }: { onOpen: (riskId: string) => void }) {
   const [area, setArea] = useAreaInAddress()
   const [filter, setFilter] = useState<RegisterFilter>("area")
   const pick = useCallback((b: Record<string, unknown>) => (b.register && b.unassigned && Array.isArray(b.signals) ? (b as unknown as RegisterAreaData) : undefined), [])
@@ -215,7 +234,7 @@ export function RiskRegisterTab() {
     <RiskRegisterView
       area={area}
       onArea={(a) => (setFilter("area"), setArea(a))}
-      body={state.kind === "ready" && state.data.area === area ? <RiskRegisterAreaView key={area} data={state.data} onChanged={reload} filter={filter} onFilter={setFilter} /> : state.kind === "ready" ? null : <AdminNotReady state={state} what="The risk register" />}
+      body={state.kind === "ready" && state.data.area === area ? <RiskRegisterAreaView key={area} data={state.data} onChanged={reload} filter={filter} onFilter={setFilter} onOpen={onOpen} /> : state.kind === "ready" ? null : <AdminNotReady state={state} what="The risk register" />}
     />
   )
 }

@@ -27,12 +27,12 @@ export const adminTabOf = (v: unknown): AdminTab => (ADMIN_TABS.includes(v as Ad
 
 // Where it lives: its own base path and layout (app/(platform)), never inside the studio's shell. Overview is
 // /platform, each other section /platform/<section>, and a row opened in Workspaces, Firms, Audit trails or Risk models
-// /platform/<section>/<id>. People are each firm's and each workspace's Members, not a section of their own; licences
+// /platform/<section>/<id> (a risk on the Risk register too: /platform/risk-register/<id>). People are each firm's and each workspace's Members, not a section of their own; licences
 // are the Regulated firms section's Licences tab, and each firm's.
 export const PLATFORM_BASE = "/platform"
 export const PLATFORM_NAME = "Mynt platform admin"
 // The sections whose rows open a detail page.
-export const ADMIN_DETAIL_TABS: readonly AdminTab[] = ["workspaces", "firms", "audit", "risk-models"]
+export const ADMIN_DETAIL_TABS: readonly AdminTab[] = ["workspaces", "firms", "audit", "risk-models", "risk-register"]
 // An id in the address: letters, digits and dashes (Mynt's uuids), nothing that could leave the path.
 export const ADMIN_ID = /^[A-Za-z0-9-]{1,100}$/
 /** Whether an id may be opened in a section: a detail section, and an id of its kind. */
@@ -200,6 +200,8 @@ export function opsFrom(reply: unknown): Ops | null {
         { label: "Risk reviews overdue", value: isObj(reply.risks) ? String(count(reply.risks.overdue_reviews)) : NOT_MEASURED },
         // Mynt's own risk models past their next validation date and not retired (risk-models.ts).
         { label: "Risk model validations overdue", value: isObj(reply.risk_models) ? String(count(reply.risk_models.overdue_validations)) : NOT_MEASURED },
+        // ...and the ones whose health isn't Healthy: a failed last validation, an overdue one, or none yet.
+        { label: "Risk models not healthy", value: isObj(reply.risk_models) && typeof reply.risk_models.not_healthy === "number" ? String(reply.risk_models.not_healthy) : NOT_MEASURED },
       ],
     },
     {

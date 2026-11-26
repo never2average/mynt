@@ -13,7 +13,7 @@ import { ROLES, type Role, type Store } from "./store.js";
 export const TOOL_AREAS = [
   { id: "catalogue", title: "Catalogue & enrolment", summary: "Browse the published catalogue, read products, enrol, and ask for products that don't exist yet." },
   { id: "products", title: "Products & innovators", summary: "Compose products from regulated primitives, test, publish and version them, and decide who may build on them." },
-  { id: "apps", title: "Apps & developers", summary: "Register apps, read a product's developer contract, make an app's agreements with the firms behind its products and run their oversight audits, keep apps' and products' risk registers, and start from app kinds and ideas." },
+  { id: "apps", title: "Apps & developers", summary: "Register apps, read a product's developer contract, make an app's agreements with the firms behind its products and run their oversight audits, keep apps' and products' risk registers (each risk with its scoring factors, treatment tasks, controls and links), and start from app kinds and ideas." },
   { id: "builds", title: "Builds", summary: "Coding-agent builds that Mynt verifies outside the agent's sandbox, and the repositories they push to." },
   { id: "hosting", title: "Hosting", summary: "Host verified apps on isolated machines, with their logs, domains and modules." },
   { id: "runtime", title: "Runtime keys & webhooks", summary: "App keys, client sessions, webhooks and the sandbox an app's server uses at run time." },
@@ -54,6 +54,8 @@ export const AREA_OF_REGISTRAR: Record<string, ToolAreaId> = {
   registerAppRemovalTools: "apps",
   registerAppAgreementTools: "apps",
   registerRiskRegisterTools: "apps",
+  registerRiskDetailTools: "apps",
+  registerRiskGradingTools: "admin",
   registerRiskModelTools: "admin",
   registerAgreementEsignTools: "apps",
   registerEsignAdminTools: "admin",

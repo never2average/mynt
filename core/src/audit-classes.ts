@@ -179,6 +179,20 @@ const OBLIGATIONS = [
   // the risk registers of apps and financial products: risks added and reviewed (risk-register.ts)
   "add_risk",
   "update_risk",
+  // what a risk's keeper adds under it: scoring factors, treatment tasks, controls and links (risk-detail.ts)
+  "add_risk_factor",
+  "update_risk_factor",
+  "remove_risk_factor",
+  "add_risk_treatment",
+  "update_risk_treatment",
+  "add_risk_control",
+  "update_risk_control",
+  "retire_risk_control",
+  "link_risk",
+  "unlink_risk",
+  // the platform's risk grading: a new version, and each residual score it moved (risk-grading.ts)
+  "set_risk_grading",
+  "rederive_risk_residual",
   // Mynt's own risk models: added, edited (each edit a new version), validated and retired (risk-models.ts)
   "add_risk_model",
   "update_risk_model",

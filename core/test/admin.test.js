@@ -16,6 +16,7 @@ const ADMIN_TOOLS = [
   "admin_invite_workspace_member", "admin_change_workspace_member_role", "admin_remove_workspace_member", "admin_revoke_workspace_invite",
   "announce_enclave_release", "withdraw_enclave_release",
   "add_risk_model", "update_risk_model", "validate_risk_model", "retire_risk_model", "list_risk_models", "admin_list_product_risk_models",
+  "get_risk_grading", "set_risk_grading",
 ];
 
 async function setup() {

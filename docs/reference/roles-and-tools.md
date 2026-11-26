@@ -154,6 +154,7 @@ Workspaces, agreements and risk:
 - Oversight audits: `list_agreement_audits`, `get_agreement_audit`, `submit_agreement_audit_evidence`, `respond_to_agreement_audit_finding` (see [Oversight audits](agreements.md#oversight-audits))
 - Service levels: `list_agreement_slas`, `add_agreement_sla`, `retire_agreement_sla`, `record_sla_breach`, `resolve_sla_breach` (see [Service levels](agreements.md#service-levels))
 - Risk registers, for apps and products: `add_risk`, `update_risk`, `list_risks` (see [Risk registers](risk.md#risk-registers))
+- One risk in full, and what its keeper adds under it: `get_risk`, `add_risk_factor`, `update_risk_factor`, `remove_risk_factor`, `add_risk_treatment`, `update_risk_treatment`, `add_risk_control`, `update_risk_control`, `retire_risk_control`, `link_risk`, `unlink_risk` (see [One risk in full](risk.md#one-risk-in-full))
 
 Vendor services and pools:
 
@@ -173,7 +174,7 @@ A licence provider (`license_provider`) is a firm that holds licences, verified 
 - Program agreement templates: `upload_agreement_template`, `list_agreement_templates`, `retire_agreement_template` (see [E-signature](agreements.md#e-signature))
 - Oversight audits it runs: `add_agreement_audit_requirement`, `retire_agreement_audit_requirement`, `open_agreement_audit`, `record_agreement_audit_finding`, `resolve_agreement_audit_finding`, `close_agreement_audit`, `list_agreement_audits`, `get_agreement_audit` (see [Oversight audits](agreements.md#oversight-audits))
 - Service levels: `add_agreement_sla`, `retire_agreement_sla`, `record_sla_breach`, `resolve_sla_breach`, `list_agreement_slas` (see [Service levels](agreements.md#service-levels))
-- Risk registers of the products it sponsors: `list_risks`, read-only (see [Risk registers](risk.md#risk-registers))
+- Risk registers of the products it sponsors: `list_risks` and `get_risk`, read-only (see [Risk registers](risk.md#risk-registers))
 - Covenants: `set_covenant`, `list_covenants`, `delete_covenant`, `list_covenant_breaches`, `acknowledge_breach`, `release_covenant_pause` (see [Covenants](licence-providers.md#covenants))
 - Alerts to its firm: `create_firm_webhook`, `list_firm_webhooks`, `delete_firm_webhook` (see [Firm webhooks](vendors-and-marketplace.md#firm-webhooks))
 - Its ledger and product health: see [Partner kit](licence-providers.md#partner-kit) and [Product health](licence-providers.md#product-health)
@@ -206,7 +207,8 @@ A Mynt admin (`admin`) runs Mynt itself, from inside Mynt: regions, product type
 - Oversight: `audit_log`, where each entry carries its `class`, `list_all_campaigns`, `admin_pause_campaign`, `admin_set_product_status` (see [Oversight](platform-admin.md#oversight))
 - Take rates: `define_take_rate`, `list_take_rates` (see [Take rates](platform-admin.md#take-rates))
 - Any workspace's members, by its owners' rules: `admin_invite_workspace_member`, `admin_change_workspace_member_role`, `admin_remove_workspace_member`, `admin_revoke_workspace_invite` (see [Members and invitations](workspaces-and-sign-in.md#members-and-invitations))
-- Risk registers: `admin_list_risks`, and Mynt's own with `add_risk`, `update_risk` and `list_risks` on the `platform` subject (see [Risk](risk.md))
+- Risk registers: `admin_list_risks`, and Mynt's own with `add_risk`, `update_risk` and `list_risks` on the `platform` subject, and the tools under one risk (`get_risk` reads any register's risk for an admin) (see [Risk](risk.md))
+- Risk grading: `get_risk_grading`, `set_risk_grading` (see [Risk grading](risk.md#risk-grading))
 - App ideas for the Build page: `create_app_idea`, `update_app_idea`, `retire_app_idea`, `seed_app_ideas` (see [Coding-agent builds](apps-and-builds.md#coding-agent-builds))
 - Product ideas: `create_product_idea`, `update_product_idea`, `retire_product_idea`, `seed_product_ideas` (see [Product ideas](products.md#product-ideas))
 - Vendors: `define_service_type`, `load_service_types`, `suspend_vendor_offering`, `set_mynt_ramp`, `set_ramp_adapter`, `link_ramp_partner_customer` (see [Vendors and the marketplace](vendors-and-marketplace.md))

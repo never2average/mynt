@@ -141,7 +141,7 @@ describe("who gets in", () => {
       const el = (await sectionPage.default({ params: Promise.resolve({ section }) })) as El;
       expect(el.props).toMatchObject({ tab: section, id: null });
     }
-    for (const section of ["workspaces", "firms", "audit", "risk-models"]) {
+    for (const section of ["workspaces", "firms", "audit", "risk-models", "risk-register"]) {
       const el = (await detailPage.default({ params: Promise.resolve({ section, id: FIRM }) })) as El;
       expect(el.props).toMatchObject({ tab: section, id: FIRM });
     }
@@ -155,10 +155,11 @@ describe("who gets in", () => {
     expect(await sectionPage.generateMetadata({ params: Promise.resolve({ section: "risk-models" }) })).toEqual({ title: "Risk models" });
     expect(await sectionPage.generateMetadata({ params: Promise.resolve({ section: "risk-register" }) })).toEqual({ title: "Risk register" });
     expect(await detailPage.generateMetadata({ params: Promise.resolve({ section: "risk-models", id: FIRM }) })).toEqual({ title: "Risk models" });
+    expect(await detailPage.generateMetadata({ params: Promise.resolve({ section: "risk-register", id: FIRM }) })).toEqual({ title: "Risk register" });
     // Apps, People and Products are no longer sections: their pages and details are 404s.
     // Licences isn't one either (it's the firms section's tab; the proxy redirects its old address before the page is asked).
     for (const section of ["nope", "overview", "admin", "apps", "people", "products", "risks", "licences"]) await expect(sectionPage.default({ params: Promise.resolve({ section }) })).rejects.toThrow("NEXT_NOT_FOUND");
-    const bad: [string, string][] = [["products", FIRM], ["licences", LIC], ["vendors", OFF], ["settings", "x"], ["overview", FIRM], ["firms", "../x"], ["apps", FIRM], ["people", FIRM], ["products", FIRM], ["risks", FIRM], ["risk-register", FIRM], ["risk-models", "../x"], ["firms", "x".repeat(101)]];
+    const bad: [string, string][] = [["products", FIRM], ["licences", LIC], ["vendors", OFF], ["settings", "x"], ["overview", FIRM], ["firms", "../x"], ["apps", FIRM], ["people", FIRM], ["products", FIRM], ["risks", FIRM], ["risk-register", "../x"], ["risk-models", "../x"], ["firms", "x".repeat(101)]];
     for (const [section, id] of bad) await expect(detailPage.default({ params: Promise.resolve({ section, id }) })).rejects.toThrow("NEXT_NOT_FOUND");
     // The layout is the platform admin's own, not the studio's shell.
     const layout = (await platformLayout.default({ children: "page" })) as { type: { name: string }; props: { children: unknown } };
@@ -192,7 +193,10 @@ describe("who gets in", () => {
 
 describe("the allow-list", () => {
   it("admin tools are their own list: never callable through the studio's, and strict", () => {
-    for (const t of Object.keys(ADMIN_TOOLS)) if (!["list_vendor_offerings", "list_service_types", "get_vendor_onboarding", "list_risks", "add_risk", "update_risk"].includes(t)) expect(Object.keys(STUDIO_TOOLS)).not.toContain(t);
+    // A risk's own tools (its detail: factors, treatment tasks, controls, links) are on both lists too, each taking the risk's id and its own fields.
+    const RISK_DETAIL = ["get_risk", "add_risk_factor", "update_risk_factor", "remove_risk_factor", "add_risk_treatment", "update_risk_treatment", "add_risk_control", "update_risk_control", "retire_risk_control", "link_risk", "unlink_risk"];
+    for (const t of Object.keys(ADMIN_TOOLS)) if (!["list_vendor_offerings", "list_service_types", "get_vendor_onboarding", "list_risks", "add_risk", "update_risk", ...RISK_DETAIL].includes(t)) expect(Object.keys(STUDIO_TOOLS)).not.toContain(t);
+    for (const t of RISK_DETAIL) expect(Object.keys(STUDIO_TOOLS), t).toContain(t);
     // The risk tools are on both lists: the studio's take an app's or a product's register, the admin area's only Mynt's own.
     expect(parseStudioCall("list_risks", { subject_type: "platform", subject_id: "mynt" })).toHaveProperty("error");
     expect(parseAdminCall("list_risks", { subject_type: "platform", subject_id: "mynt" })).toHaveProperty("tool");

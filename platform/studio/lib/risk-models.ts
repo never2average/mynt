@@ -1,11 +1,12 @@
 // The platform admin's Risk models (/platform/risk-models): Mynt's own risk models, one risk area per tab
 // (list_risk_models), each opened at /platform/risk-models/<id> with its definition, validations and versions, and
 // the risk models financial products declare in their own definitions (admin_list_product_risk_models), read-only on
-// the Regulated product risk tab. Status is always in words; whatever Mynt can't answer says so with why, never 0 or
+// the Regulated product risk tab. Each model's health is in words (Healthy, Validation overdue, Last validation failed,
+// No validation yet; Retired), and it counts the risks on registers that link to it, which its page lists. Status is always in words; whatever Mynt can't answer says so with why, never 0 or
 // an empty table. Pure: the routes read Mynt's replies into these shapes, and the views, sheets and tests share them.
 
 import { adminHref } from "./admin"
-import { isRiskArea, RISK_AREAS, type RiskArea, type Unavailable } from "./risk-register"
+import { residualWords, RISK_AREA_LABELS, RISK_STATUS_LABELS, riskRowsFrom, isRiskArea, RISK_AREAS, type RiskArea, type RiskRow, type Unavailable } from "./risk-register"
 
 type Obj = Record<string, unknown>
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v)
@@ -21,6 +22,22 @@ export type ModelOutcome = (typeof MODEL_OUTCOMES)[number]
 export const MODEL_OUTCOME_LABELS: Record<ModelOutcome, string> = { passed: "Passed", passed_with_findings: "Passed with findings", failed: "Failed" }
 const isStatus = (v: unknown): v is ModelStatus => typeof v === "string" && (MODEL_STATUSES as readonly string[]).includes(v)
 const isOutcome = (v: unknown): v is ModelOutcome => typeof v === "string" && (MODEL_OUTCOMES as readonly string[]).includes(v)
+
+// A model's health, derived from its last validation and its due date (core/src/risk-models.ts), always in words.
+export const MODEL_HEALTH = ["healthy", "validation_overdue", "last_validation_failed", "no_validation_yet", "retired"] as const
+export type ModelHealth = (typeof MODEL_HEALTH)[number]
+export const MODEL_HEALTH_LABELS: Record<ModelHealth, string> = {
+  healthy: "Healthy",
+  validation_overdue: "Validation overdue",
+  last_validation_failed: "Last validation failed",
+  no_validation_yet: "No validation yet",
+  retired: "Retired",
+}
+const isHealth = (v: unknown): v is ModelHealth => typeof v === "string" && (MODEL_HEALTH as readonly string[]).includes(v)
+/** A failed last validation first, then an overdue one, then none at all; a retired model is "Retired". */
+export const healthOf = (m: { status: ModelStatus; outcome: ModelOutcome | null; overdue: boolean; lastValidatedAt: string | null }): ModelHealth =>
+  m.status === "retired" ? "retired" : m.outcome === "failed" ? "last_validation_failed" : m.overdue ? "validation_overdue" : !m.lastValidatedAt ? "no_validation_yet" : "healthy"
+export const NOT_COUNTED = "Not counted"
 
 export type ModelInput = { name: string; description: string | null; source: string | null }
 export type ModelOutput = { name: string; description: string | null }
@@ -46,10 +63,14 @@ export type RiskModel = {
   nextValidationDue: string | null
   overdue: boolean
   retiredReason: string | null
+  health: ModelHealth
+  linkedRisks: number | null // null: this Mynt doesn't count them ("Not counted", never 0)
 }
+// A risk linked to the model (risk_links), as its Linked risks tab lists it.
+export type LinkedRisk = { linkId: string; source: string; note: string | null; risk: RiskRow }
 export type ModelVersion = { version: number; name: string; purpose: string; method: string; inputs: ModelInput[]; outputs: ModelOutput[]; thresholds: ModelThreshold[]; changeNote: string | null; createdBy: Person | null; createdAt: string | null }
 export type ModelValidation = { id: string; version: number; outcome: ModelOutcome; notes: string; nextValidationDue: string | null; validatedBy: Person | null; validatedAt: string | null }
-export type ModelDetail = { model: RiskModel; versions: ModelVersion[]; validations: ModelValidation[] }
+export type ModelDetail = { model: RiskModel; versions: ModelVersion[]; validations: ModelValidation[]; linked: LinkedRisk[] | null }
 
 const person = (v: unknown): Person | null => (isObj(v) && str(v.user_id) ? { userId: str(v.user_id)!, name: str(v.name) } : null)
 const inputsOf = (v: unknown): ModelInput[] => arr(v).filter(isObj).flatMap((x) => (str(x.name) ? [{ name: str(x.name)!, description: str(x.description), source: str(x.source) }] : []))
@@ -66,7 +87,10 @@ export function modelFrom(v: unknown): RiskModel | null {
   if (!id || !name || !isRiskArea(v.risk_area) || !isStatus(v.status)) return null
   const val = isObj(v.validation) ? v.validation : {}
   const retired = isObj(v.retired) ? v.retired : null
+  const outcome = isOutcome(val.outcome) ? val.outcome : null
   return {
+    health: isHealth(v.health) ? v.health : healthOf({ status: v.status, outcome, overdue: val.overdue === true, lastValidatedAt: str(val.last_validated_at) }),
+    linkedRisks: num(v.linked_risks),
     id,
     riskArea: v.risk_area,
     status: v.status,
@@ -80,7 +104,7 @@ export function modelFrom(v: unknown): RiskModel | null {
     owner: person(v.owner),
     lastValidatedAt: str(val.last_validated_at),
     validatedBy: person(val.validated_by),
-    outcome: isOutcome(val.outcome) ? val.outcome : null,
+    outcome,
     validationNotes: str(val.notes),
     nextValidationDue: str(val.next_validation_due),
     overdue: val.overdue === true,
@@ -127,7 +151,13 @@ export function modelDetailFrom(reply: unknown): ModelDetail | null {
         ? [{ id: str(x.id)!, version: num(x.version) ?? model.version, outcome: x.outcome, notes: str(x.notes) ?? "", nextValidationDue: str(x.next_validation_due), validatedBy: person(x.validated_by), validatedAt: str(x.validated_at) }]
         : [],
     )
-  return { model, versions, validations }
+  const linked = Array.isArray(reply.linked)
+    ? reply.linked.filter(isObj).flatMap((l): LinkedRisk[] => {
+        const risk = riskRowsFrom([l.risk])[0]
+        return risk && str(l.link_id) ? [{ linkId: str(l.link_id)!, source: str(l.source) ?? "Mynt", note: str(l.note), risk }] : []
+      })
+    : null
+  return { model, versions, validations, linked }
 }
 
 // ---- financial products' own risk models (their definitions' risk_models) ----
@@ -176,6 +206,23 @@ export function productModelsFrom(reply: unknown): ProductRiskModels {
 // ---- words ----
 
 export const statusWords = (m: { status: ModelStatus }) => MODEL_STATUS_LABELS[m.status]
+export const healthWords = (m: { health: ModelHealth }) => MODEL_HEALTH_LABELS[m.health]
+export const linkedWords = (n: number | null) => (n === null ? NOT_COUNTED : n === 1 ? "1 risk" : `${n} risks`)
+export const MODEL_FACT_LABELS = ["Status", "Health", "Risk area", "Owner", "Version", "Last validated", "Next validation due", "Linked risks"] as const
+/** The model page's facts, in their order. */
+export const modelFacts = (m: RiskModel, linked: LinkedRisk[] | null): [(typeof MODEL_FACT_LABELS)[number], string][] => [
+  ["Status", statusWords(m)],
+  ["Health", healthWords(m)],
+  ["Risk area", RISK_AREA_LABELS[m.riskArea]],
+  ["Owner", ownerWords(m.owner)],
+  ["Version", `Version ${m.version}`],
+  ["Last validated", lastValidatedWords(m)],
+  ["Next validation due", dueWords(m)],
+  ["Linked risks", linkedWords(linked ? linked.length : m.linkedRisks)],
+]
+export const LINKED_RISK_HEAD = ["Risk", "Source", "Residual", "Status", "Review by"] as const
+/** A linked risk's cells after its title: source, residual in words, status in words, review date ("overdue" in words). */
+export const linkedRiskCells = (l: LinkedRisk) => [l.source, residualWords(l.risk), RISK_STATUS_LABELS[l.risk.status], l.risk.reviewBy ? `${l.risk.reviewBy}${l.risk.overdue ? " (overdue)" : ""}` : "Not set"]
 export const ownerWords = (p: Person | null) => (p ? (p.name ?? "Unnamed admin") : "No owner")
 const dayOf = (iso: string | null) => (iso ? iso.slice(0, 10) : null)
 export const lastValidatedWords = (m: RiskModel) => (m.lastValidatedAt ? `${dayOf(m.lastValidatedAt)}${m.outcome ? `: ${MODEL_OUTCOME_LABELS[m.outcome]}` : ""}` : "Never validated")

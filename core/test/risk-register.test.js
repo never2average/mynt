@@ -365,3 +365,58 @@ test("backfill: rows made before risk areas get their category's area, other sta
   await w.store.db.exec(RISK_REGISTER_TABLES);
   assert.deepEqual(await areas(), RISK_AREA_OF_CATEGORY);
 });
+
+test("three-step scoring on an app's and a product's register: inherent, control and residual, with levels in words, for keepers and readers alike", async () => {
+  const { dev, member, bea, lp, app, productId, store } = await setup();
+  const APP = { subject_type: "app", subject_id: app.id };
+  // Added without a control: not assessed, so the residual is the inherent score, and it says so.
+  const plain = ok(await dev.call("add_risk", { ...APP, title: "Card testing", category: "fraud", likelihood: 4, impact: 4 })).risk;
+  assert.deepEqual([plain.inherent.score, plain.inherent.level_name, plain.control.words, plain.residual.score, plain.residual.assessed], [16, "Critical", "Not assessed", 16, false]);
+  assert.match(plain.residual.words, /same as inherent, control not assessed/);
+  // Added with one: derived by the platform's grading (reduce: a strong control takes 75% off).
+  const strong = ok(await dev.call("add_risk", { ...APP, title: "Key leak", category: "security", likelihood: 4, impact: 5, control_effectiveness: "strong", control_note: "Keys are in the vault" })).risk;
+  assert.deepEqual([strong.inherent.score, strong.control.words, strong.residual.score, strong.residual.level_name, strong.residual.assessed], [20, "Strong", 5, "Medium", true]);
+
+  // A member reads all three; the list is by residual score, highest first, and counts by residual level.
+  const seen = ok(await member.call("list_risks", APP));
+  assert.deepEqual(seen.risks.map((r) => [r.title, r.inherent.score, r.control.words, r.residual.score, r.residual.level]), [
+    ["Card testing", 16, "Not assessed", 16, "critical"],
+    ["Key leak", 20, "Strong", 5, "medium"],
+  ]);
+  assert.deepEqual(seen.residual_levels, { low: 0, medium: 1, high: 0, critical: 1 });
+  assert.deepEqual(ok(await member.call("list_risks", { ...APP, residual_level: "medium" })).risks.map((r) => r.title), ["Key leak"]);
+  // A member can't assess the control or override the residual.
+  refused(await member.call("update_risk", { risk_id: plain.id, control_effectiveness: "weak" }), /owners and admins/);
+  refused(await member.call("update_risk", { risk_id: plain.id, residual_likelihood: 1, residual_impact: 1, residual_override_reason: "Not mine to say" }), /owners and admins/);
+
+  // A review assesses the control; the change is audited with the scores before and after.
+  const reviewed = ok(await dev.call("update_risk", { risk_id: plain.id, control_effectiveness: "weak" }));
+  assert.deepEqual(reviewed.changed, ["control_effectiveness"]);
+  assert.equal(reviewed.risk.residual.score, 12);
+  const audit = (await store.db.query(`SELECT details FROM ${T}.audit_log WHERE action = 'update_risk' AND target = $1`, [plain.id])).rows[0].details;
+  assert.deepEqual(audit.scores, { before: { inherent: 16, control: null, residual: 16 }, after: { inherent: 16, control: "weak", residual: 12 } });
+  assert.equal(audit.app_id, app.id);
+
+  // A product's: its firm sets them, its sponsor reads them and can't change them.
+  const risk = ok(await bea.call("add_risk", { subject_type: "product", subject_id: productId, title: "Rate shock", category: "liquidity", likelihood: 3, impact: 4, control_effectiveness: "partial" })).risk;
+  ok(await bea.call("update_risk", { risk_id: risk.id, residual_likelihood: 1, residual_impact: 4, residual_override_reason: "Deposits are term-locked" }));
+  const sponsor = ok(await lp.call("list_risks", { subject_type: "product", subject_id: productId })).risks[0];
+  assert.deepEqual([sponsor.inherent.score, sponsor.control.words, sponsor.residual.score, sponsor.residual.overridden, sponsor.residual.override.why], [12, "Partial", 4, true, "Deposits are term-locked"]);
+  assert.equal(sponsor.residual.words, "4 (Low), overridden: 1 × 4");
+  refused(await lp.call("update_risk", { risk_id: risk.id, clear_residual_override: true }));
+});
+
+test("existing risks keep working when the scoring columns arrive: nothing is assessed, and the residual is the inherent score", async () => {
+  const { dev, app, store } = await setup();
+  // A row as it was before three-step scoring: no control, no residual.
+  const id = randomUUID();
+  await store.db.query(`INSERT INTO ${T}.risk_register (id, subject_type, subject_id, title, category, likelihood, impact) VALUES ($1, 'app', $2, 'Old risk', 'vendor', 2, 3)`, [id, app.id]);
+  await store.db.exec(RISK_REGISTER_TABLES); // the store's schema, run again: idempotent
+  const row = (await store.db.query(`SELECT control_effectiveness, residual_score, residual_likelihood FROM ${T}.risk_register WHERE id = $1`, [id])).rows[0];
+  assert.deepEqual(row, { control_effectiveness: null, residual_score: null, residual_likelihood: null });
+  const risk = ok(await dev.call("list_risks", { subject_type: "app", subject_id: app.id })).risks[0];
+  assert.deepEqual([risk.score, risk.level, risk.control.effectiveness, risk.control.words, risk.residual.score, risk.residual.level_name, risk.residual.assessed, risk.residual.overridden], [6, "medium", null, "Not assessed", 6, "Medium", false, false]);
+  // Reviewed without touching the control: still not assessed, never a 0.
+  const after = ok(await dev.call("update_risk", { risk_id: id, impact: 5 })).risk;
+  assert.deepEqual([after.inherent.score, after.residual.score, after.residual.assessed], [10, 10, false]);
+});

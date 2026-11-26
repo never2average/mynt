@@ -3,10 +3,12 @@
 // Admin → Platform settings: Mynt's own settings, not a workspace's. E-signature (moved here from workspace Settings:
 // the key, the webhook and test mode, components/esign-settings-view.tsx), then the operational settings this server
 // runs with (get_platform_settings), read-only: prices, budgets and the build audit are changed on the server, never
-// from the studio, and no secret is ever listed. Server-renderable.
+// from the studio, and no secret is ever listed; then Risk grading (components/admin-risk-grading.tsx): how every risk
+// is graded, which Mynt's admins change here, each change a new version. Server-renderable.
 import { useCallback } from "react"
 
 import { AdminNotReady, AdminTable, useAdminData } from "@/components/admin-kit"
+import { RiskGradingSection } from "@/components/admin-risk-grading"
 import { Panel, Section } from "@/components/dashboard-panels"
 import { EsignSettingsPanel } from "@/components/esign-settings-view"
 import type { PlatformSetting } from "@/lib/admin"
@@ -36,6 +38,9 @@ export function SettingsTab() {
         <Section id="operational" title="Operational settings" description="What this server runs with. Read-only here: they're changed on the server itself.">
           {state.kind === "ready" ? <OperationalSettingsView settings={state.data} /> : <AdminNotReady state={state} what="Operational settings" />}
         </Section>
+      </Panel>
+      <Panel id="admin-risk-grading">
+        <RiskGradingSection />
       </Panel>
     </div>
   )

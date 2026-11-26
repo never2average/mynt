@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Db } from "./db.js";
 import { RISK_MODEL_OUTCOMES, RISK_MODEL_STATUSES } from "./risk-models-schema.js";
+import { risksLinkedToModel } from "./risk-detail.js";
 import { RISK_AREAS, type RiskArea } from "./risk-register-schema.js";
 import { effectiveRoles, type Store, type User } from "./store.js";
 
@@ -13,6 +14,11 @@ import { effectiveRoles, type Store, type User } from "./store.js";
 // due. Editing a model's definition adds a version and never changes an old one; every version and every validation
 // is kept. A model whose next validation date has passed (and that isn't retired) is overdue, and ops_status says so.
 // Kept and read by Mynt's admins only; every change is audited (class obligations, audit-classes.ts).
+//
+// A model's health is derived, in words: "Last validation failed", "Validation overdue" (its next validation date has
+// passed), "No validation yet", else "Healthy"; a retired model is "Retired" and never counted. ops_status counts the
+// models that aren't healthy. Risks on a register can link to a model (risk-detail.ts link_risk, target risk_model):
+// each model says how many do, and its page lists them.
 //
 // admin_list_product_risk_models reads the risk models financial products declare in their own definitions (the
 // product schema's risk_models), across every firm, for the platform admin's Regulated product risk tab. Read-only.
@@ -67,12 +73,34 @@ export interface RiskModel {
     overdue: boolean;
   };
   retired: { at: string | null; by: string | null; reason: string | null } | null;
+  health: ModelHealth;
+  health_words: string;
+  linked_risks: number;
   created_by: string | null;
   created_at: string;
   updated_at: string;
 }
 
-const SELECT = `SELECT m.*, v.name, v.purpose, v.method, v.inputs, v.outputs, v.thresholds, o.name AS owner_name, vb.name AS validated_by_name
+export const MODEL_HEALTH = ["healthy", "validation_overdue", "last_validation_failed", "no_validation_yet", "retired"] as const;
+export type ModelHealth = (typeof MODEL_HEALTH)[number];
+export const MODEL_HEALTH_WORDS: Record<ModelHealth, string> = {
+  healthy: "Healthy",
+  validation_overdue: "Validation overdue",
+  last_validation_failed: "Last validation failed",
+  no_validation_yet: "No validation yet",
+  retired: "Retired",
+};
+/** A model's health: a failed last validation first, then an overdue one, then none at all. */
+export function modelHealth(m: { status: string; outcome: string | null; overdue: boolean; last_validated_at: string | null }): ModelHealth {
+  if (m.status === "retired") return "retired";
+  if (m.outcome === "failed") return "last_validation_failed";
+  if (m.overdue) return "validation_overdue";
+  if (!m.last_validated_at) return "no_validation_yet";
+  return "healthy";
+}
+
+const SELECT = `SELECT m.*, v.name, v.purpose, v.method, v.inputs, v.outputs, v.thresholds, o.name AS owner_name, vb.name AS validated_by_name,
+  (SELECT count(*)::int FROM ${T}.risk_links l WHERE l.target_type = 'risk_model' AND l.target_id = m.id::text) AS linked_risks
   FROM ${T}.risk_models m JOIN ${T}.risk_model_versions v ON v.model_id = m.id AND v.version = m.version
   LEFT JOIN ${T}.users o ON o.id = m.owner_user_id LEFT JOIN ${T}.users vb ON vb.id = m.validated_by`;
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
@@ -80,7 +108,12 @@ const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 const toModel = (r: Row): RiskModel => {
   const status = r.status as RiskModel["status"];
   const due = day(r.next_validation_due);
+  const overdue = Boolean(due && status !== "retired" && due < today());
+  const health = modelHealth({ status, outcome: (r.validation_outcome as string | null) ?? null, overdue, last_validated_at: iso(r.last_validated_at) });
   return {
+    health,
+    health_words: MODEL_HEALTH_WORDS[health],
+    linked_risks: Number(r.linked_risks ?? 0),
     id: r.id as string,
     risk_area: r.risk_area as RiskArea,
     status,
@@ -98,7 +131,7 @@ const toModel = (r: Row): RiskModel => {
       outcome: (r.validation_outcome as RiskModel["validation"]["outcome"]) ?? null,
       notes: (r.validation_notes as string | null) ?? null,
       next_validation_due: due,
-      overdue: Boolean(due && status !== "retired" && due < today()),
+      overdue,
     },
     retired: status === "retired" ? { at: iso(r.retired_at), by: (r.retired_by as string | null) ?? null, reason: (r.retire_reason as string | null) ?? null } : null,
     created_by: (r.created_by as string | null) ?? null,
@@ -121,6 +154,12 @@ export async function overdueRiskModelValidations(db: Db): Promise<{ count: numb
   );
   const n = Number((await db.query(`SELECT count(*)::int AS n FROM ${T}.risk_models m WHERE ${where}`)).rows[0]?.n ?? 0);
   return { count: n, models: rows.map((r) => ({ id: r.id as string, name: r.name as string, risk_area: r.risk_area as string, next_validation_due: day(r.next_validation_due) })) };
+}
+
+/** Mynt's risk models that aren't retired and aren't healthy, for ops_status. */
+export async function unhealthyRiskModels(db: Db): Promise<{ count: number; models: { id: string; name: string; risk_area: string; health: ModelHealth; health_words: string }[] }> {
+  const models = (await db.query(`${SELECT} WHERE m.status <> 'retired' ORDER BY m.created_at, m.id`)).rows.map(toModel).filter((m) => m.health !== "healthy");
+  return { count: models.length, models: models.slice(0, 20).map((m) => ({ id: m.id, name: m.name, risk_area: m.risk_area, health: m.health, health_words: m.health_words })) };
 }
 
 const PURPOSES = ["pd_scorecard", "affordability", "fraud_score", "behaviour_score", "lgd", "fx_risk", "aml_risk", "other"] as const;
@@ -295,7 +334,7 @@ export function registerRiskModelTools(server: McpServer, store: Store, user: Us
     {
       title: "Mynt's risk models",
       description:
-        "Admin: Mynt's own risk models, each with its risk area, status (draft, active, retired), current version and definition (name, purpose, method, inputs, outputs, thresholds), owner, and validation (the last one: when, by whom, outcome, notes; the next due date, and whether it's overdue), newest first, with counts by status and how many are overdue. Filter by risk_area or status. With model_id: that model with every version (oldest first) and every validation (newest first).",
+        "Admin: Mynt's own risk models, each with its risk area, status (draft, active, retired), current version and definition (name, purpose, method, inputs, outputs, thresholds), owner, and validation (the last one: when, by whom, outcome, notes; the next due date, and whether it's overdue), its health in words (Healthy, Validation overdue, Last validation failed, No validation yet; Retired for a retired one) and how many risks link to it (linked_risks), newest first, with counts by status, how many are overdue and how many aren't healthy. Filter by risk_area or status. With model_id: that model with every version (oldest first), every validation (newest first) and the risks linked to it (linked: each risk with its source, residual score, status and review date; link one with link_risk, target_type risk_model).",
       inputSchema: {
         risk_area: z.enum(RISK_AREAS).optional(),
         status: z.enum(RISK_MODEL_STATUSES).optional(),
@@ -339,16 +378,17 @@ export function registerRiskModelTools(server: McpServer, store: Store, user: Us
           validated_by: x.validated_by ? { user_id: x.validated_by as string, name: (x.validator as string | null) ?? null } : null,
           validated_at: iso(x.validated_at),
         }));
-        return json({ model, versions, validations });
+        return json({ model, versions, validations, linked: await risksLinkedToModel(store, model_id) });
       }
       const { rows } = await store.db.query(`${SELECT} WHERE ($1::text IS NULL OR m.risk_area = $1) AND ($2::text IS NULL OR m.status = $2) ORDER BY m.created_at DESC, m.id LIMIT 500`, [
         risk_area ?? null,
         status ?? null,
       ]);
       const models = rows.map(toModel);
-      const all = (await store.db.query(`SELECT status, next_validation_due FROM ${T}.risk_models WHERE ($1::text IS NULL OR risk_area = $1)`, [risk_area ?? null])).rows;
+      const all = (await store.db.query(`${SELECT} WHERE ($1::text IS NULL OR m.risk_area = $1)`, [risk_area ?? null])).rows.map(toModel);
       const counts = Object.fromEntries(RISK_MODEL_STATUSES.map((s) => [s, all.filter((r) => r.status === s).length])) as Record<string, number>;
-      counts.overdue = all.filter((r) => r.status !== "retired" && r.next_validation_due && day(r.next_validation_due)! < today()).length;
+      counts.overdue = all.filter((r) => r.validation.overdue).length;
+      counts.not_healthy = all.filter((r) => r.health !== "healthy" && r.health !== "retired").length;
       return json({ models, counts });
     },
   );

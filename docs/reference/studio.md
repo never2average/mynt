@@ -209,7 +209,7 @@ Each tab is read live from Mynt for this app only: when it is opened, when the p
 | **Products** | The products this app uses, each with its stage and the licence providers sponsoring it, by state. An app holds no licences of its own; its products do |
 | **Agreements** | The program agreements Production needs, the app's agreements with firms, and its vendor contracts, with **Propose agreement** for owners and admins |
 | **Customers** | The customer personas this app targets, from its products, and introductions in progress |
-| **Security & risk** | The app's risk register (**Add risk**, **Review risk**), Mynt's build checks and security events, and the signals Mynt measures around the app: fraud, its vendors, conduct and its products |
+| **Security & risk** | The app's risk register (**Add risk**, **Review risk**; each risk with its inherent, control and residual scores, and a row opening [the risk's detail](risk.md#a-risks-detail)), Mynt's build checks and security events, and the signals Mynt measures around the app: fraud, its vendors, conduct and its products |
 | **P&L** | Money moved and costs for this app, with the statement |
 | **SDK** | Each product's integration kit: action, access, permitted actions, fields, contract and hand-off |
 | **Activity** | The app's builds and its audit events |
@@ -279,7 +279,7 @@ Each tab is a list of sections, and each section a table. A section Mynt can't f
 |---|---|
 | **Terms** | From the product definition: Terms, Rates, Fees, Limits, Lifecycle events, Servicing policies and Costs |
 | **Customers** | Customer segments, and Target market and eligibility |
-| **Risk** | The product's risk register first (**Add risk**, **Review risk**), then Risk models, Decisioning and underwriting, Covenants, Open breaches, Sales paused by a covenant, and Product health |
+| **Risk** | The product's risk register first (**Add risk**, **Review risk**; each risk with its inherent, control and residual scores, and a row opening [the risk's detail](risk.md#a-risks-detail)), then Risk models, Decisioning and underwriting, Covenants, Open breaches, Sales paused by a covenant, and Product health |
 | **Compliance** | Sponsorship, Regulatory obligations, Disclosures and documents, and What the next stage needs |
 | **Integrations** | Partner hand-offs, Vendor services, Connections and Partner ledger |
 | **Apps** | Apps built on this product, each linking to its app workspace |
@@ -488,7 +488,13 @@ The platform admin (`/platform`) is for Mynt admins only. It has its own layout,
 
 In Studio, only accounts Mynt says hold the `admin` role get the **Platform admin** entry above their name in the sidebar. For everyone else `/platform` is a 404.
 
-Each section is described in [The platform admin in Studio](platform-admin.md#the-platform-admin-in-studio).
+Each section is described in [The platform admin in Studio](platform-admin.md#the-platform-admin-in-studio). Three of its pages are about risk:
+
+| Page | What it is |
+| --- | --- |
+| `/platform/risk-register/<id>` | One risk in full: Mynt's own, or an app's or a product's opened from the register's table (read-only). See [A risk's detail](risk.md#a-risks-detail) |
+| `/platform/risk-models/<id>` | One of Mynt's risk models, with its health in words and the risks linked to it |
+| `/platform/settings` | Platform settings, with [Risk grading](platform-admin.md#platform-settings): the heat map, the bands, the residual method and the version history |
 
 ## Docs and search
 

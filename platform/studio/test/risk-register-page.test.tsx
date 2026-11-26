@@ -19,7 +19,7 @@ vi.mock("next/navigation", () => ({
 
 const { RiskRegisterAreaView, RiskRegisterView } = await import("@/components/admin-risk-register");
 const risks = await import("@/lib/admin-risks");
-const { RISK_AREAS, RISK_AREA_LABELS, RISK_AREA_OF_CATEGORY, areaOfRisk } = await import("@/lib/risk-register");
+const { RISK_AREAS, RISK_AREA_LABELS, RISK_AREA_OF_CATEGORY, areaOfRisk, scoresFrom } = await import("@/lib/risk-register");
 type Data = import("@/lib/admin-risks").RegisterAreaData;
 
 beforeAll(() => {
@@ -65,6 +65,10 @@ const MITIGATION = "Rotate every key each quarter, keep them in the vault only, 
 const heads = (root: ParentNode, sel: string) => [...root.querySelectorAll(`${sel} thead th`)].map((th) => th.textContent);
 const bodyRows = (root: ParentNode, sel: string) => [...root.querySelectorAll(`${sel} tbody tr`)].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent));
 const TABLE = "[data-risk-register-area]";
+// A register row with its three scores, as Mynt graded them (mynt: its inherent, control and residual; left out, an
+// older Mynt: the control not assessed and the residual the same as inherent).
+const scored = <T extends { likelihood: number; impact: number }>(r: T, mynt: Record<string, unknown> = {}) => ({ ...r, ...scoresFrom(mynt, r.likelihood, r.impact) });
+const PARTIAL = { control: { effectiveness: "partial", note: null }, residual: { score: 5, level: "medium", level_name: "Medium", assessed: true, overridden: false } };
 const data = (area: (typeof RISK_AREAS)[number] = "technology"): Data => ({
   area,
   register: {
@@ -73,15 +77,15 @@ const data = (area: (typeof RISK_AREAS)[number] = "technology"): Data => ({
     overdue: 1,
     owners: [{ userId: USER, name: "Boss" }],
     risks: [
-      { id: R1, title: "Key leak", category: "security", riskArea: "technology", description: null, likelihood: 2, impact: 5, score: 10, owner: null, mitigation: MITIGATION, status: "open", reviewBy: "2026-01-01", overdue: true },
-      { id: R3, title: "Laptop theft", category: "security", riskArea: "technology", description: null, likelihood: 1, impact: 3, score: 3, owner: { userId: USER, name: "Boss" }, mitigation: null, status: "mitigating", reviewBy: null, overdue: false },
+      scored({ id: R1, title: "Key leak", category: "security", riskArea: "technology", description: null, likelihood: 2, impact: 5, score: 10, owner: null, mitigation: MITIGATION, status: "open", reviewBy: "2026-01-01", overdue: true } as const, PARTIAL),
+      scored({ id: R3, title: "Laptop theft", category: "security", riskArea: "technology", description: null, likelihood: 1, impact: 3, score: 3, owner: { userId: USER, name: "Boss" }, mitigation: null, status: "mitigating", reviewBy: null, overdue: false } as const),
     ],
   },
-  unassigned: { available: true, canManage: true, overdue: 0, owners: [], risks: [{ id: R2, title: "Something else", category: "other", riskArea: null, description: null, likelihood: 1, impact: 2, score: 2, owner: null, mitigation: null, status: "open", reviewBy: null, overdue: false }] },
+  unassigned: { available: true, canManage: true, overdue: 0, owners: [], risks: [scored({ id: R2, title: "Something else", category: "other", riskArea: null, description: null, likelihood: 1, impact: 2, score: 2, owner: null, mitigation: null, status: "open", reviewBy: null, overdue: false } as const)] },
   cross: risks.crossRisksFrom(
     {
       risks: [
-        { id: "x1", subject_type: "app", subject_name: "Saver", workspace_id: WS, title: "Session hijack", category: "security", likelihood: 4, impact: 4, score: 16, owner: { user_id: USER, name: "Dana" }, mitigation: "Short sessions", status: "open", review_by: "2026-12-01" },
+        { id: "x1", subject_type: "app", subject_name: "Saver", workspace_id: WS, title: "Session hijack", category: "security", likelihood: 4, impact: 4, score: 16, inherent: { score: 16, level: "critical", level_name: "Critical" }, control: { effectiveness: "strong" }, residual: { score: 4, level: "low", level_name: "Low", assessed: true, overridden: true, likelihood: 1, impact: 4, override: { why: "Sessions are short-lived" } }, owner: { user_id: USER, name: "Dana" }, mitigation: "Short sessions", status: "open", review_by: "2026-12-01" },
         { id: "x2", subject_type: "product", subject_name: "Fixed deposit", firm_id: FIRM, title: "Patch lag", category: "operational", risk_area: "technology", score: 9, status: "mitigating" },
         { id: "x3", subject_type: "product", subject_name: "Loan", firm_id: FIRM, title: "Rate shock", category: "credit", score: 9, status: "open" },
         { id: "x4", subject_type: "platform", subject_name: "Mynt platform", title: "Ours", category: "security", score: 9, status: "open" },
@@ -123,7 +127,7 @@ describe("the page", () => {
       expect(document.querySelectorAll("[data-pager]"), area).toHaveLength(1);
       expect(document.querySelectorAll("h1, h2, h3, section"), area).toHaveLength(0);
       expect(document.querySelector("[data-signal]"), area).toBeNull();
-      expect(heads(document, TABLE), area).toEqual(["Risk", "Source", "Category", "Score", "Owner", "Status", "Review by / When", "Detail", "Action"]);
+      expect(heads(document, TABLE), area).toEqual(["Risk", "Source", "Category", "Inherent", "Control", "Residual", "Owner", "Status", "Review by / When", "Detail", "Action"]);
       // The table takes the height the tabs and the toolbar leave, and it is what scrolls; its header stays in view.
       for (const sel of ["[data-platform-risk-register]", "[data-risk-register-area]", "[data-admin-list]"]) {
         expect(document.querySelector(sel)!.className, `${area} ${sel}`).toContain("min-h-0");
@@ -150,34 +154,40 @@ describe("the page", () => {
     for (const b of document.querySelectorAll("button, a")) expect(b.textContent!.trim(), b.outerHTML).not.toBe("");
   });
 
-  it("the table's rows come from all three sources: Mynt's register by score, then apps' and products' by score, then the signals, what needs attention first", () => {
+  it("the table's rows come from all three sources, each with its three scores in words: Mynt's register by residual score, then apps' and products' by residual score, then the signals, what needs attention first", () => {
     render(<RiskRegisterAreaView data={data("technology")} />);
     expect(bodyRows(document, TABLE)).toEqual([
-      ["Key leak", "Mynt", "Security", "2 × 5 = 10 (High)", "Not assigned", "Open: not yet mitigated", "2026-01-01 (overdue)", MITIGATION, " Review risk"],
-      ["Laptop theft", "Mynt", "Security", "1 × 3 = 3 (Low)", "Boss", "Mitigating: work under way", "Not set", "None recorded", " Review risk"],
-      ["Session hijack", "App: Saver", "Security", "4 × 4 = 16 (Critical)", "Dana", "Open: not yet mitigated", "2026-12-01", "Short sessions", " Open"],
-      ["Patch lag", "Product: Fixed deposit", "Operational", "9 (Medium)", "Not assigned", "Mitigating: work under way", "Not set", "None recorded", " Open"],
-      ["Server backups: the last run's result isn't recorded", "Signal: Backup", "Backup", "Not scored", "Mynt", "Needs attention", "Not recorded", "Last run: Not recorded. Result: Not recorded. Off-site: Uploaded off-site. Last success: Not recorded. Last restore test: Not recorded.", ""],
-      ["No security events in the last 30 days among the newest audit entries.", "Signal: Security event", "Security event", "Not scored", "Mynt", "Clear", "Not recorded", "Audit trail entries of the security class: build audits, the mainnet gate, secrets revealed or rotated, machine access, people cut off.", ""],
+      ["Key leak", "Mynt", "Security", "2 × 5 = 10 (High)", "Partial", "5 (Medium)", "Not assigned", "Open: not yet mitigated", "2026-01-01 (overdue)", MITIGATION, " Open Review risk"],
+      // Not assessed: the residual is the inherent score, said in words, never a blank or a 0.
+      ["Laptop theft", "Mynt", "Security", "1 × 3 = 3 (Low)", "Not assessed", "3 (Low), same as inherent: control not assessed", "Boss", "Mitigating: work under way", "Not set", "None recorded", " Open Review risk"],
+      // Highest residual first: the product's 9 before the app's critical risk a strong control (and an override) took to 4.
+      ["Patch lag", "Product: Fixed deposit", "Operational", "9 (Medium)", "Not assessed", "9 (Medium), same as inherent: control not assessed", "Not assigned", "Mitigating: work under way", "Not set", "None recorded", " Open"],
+      ["Session hijack", "App: Saver", "Security", "4 × 4 = 16 (Critical)", "Strong", "4 (Low), overridden", "Dana", "Open: not yet mitigated", "2026-12-01", "Short sessions", " Open"],
+      ["Server backups: the last run's result isn't recorded", "Signal: Backup", "Backup", "Not scored", "Not scored", "Not scored", "Mynt", "Needs attention", "Not recorded", "Last run: Not recorded. Result: Not recorded. Off-site: Uploaded off-site. Last success: Not recorded. Last restore test: Not recorded.", ""],
+      ["No security events in the last 30 days among the newest audit entries.", "Signal: Security event", "Security event", "Not scored", "Not scored", "Not scored", "Mynt", "Clear", "Not recorded", "Audit trail entries of the security class: build audits, the mainnet gate, secrets revealed or rotated, machine access, people cut off.", ""],
     ]);
     expect(document.querySelector("[data-pager]")!.textContent).toContain("6 rows · Page 1 of 1");
     // Another area's risk and Mynt's own on admin_list_risks aren't app or product rows.
     expect(document.body.textContent).not.toContain("Rate shock");
     expect(document.body.textContent).not.toContain("Ours");
-    // An app's or a product's risk links its subject (in Source, and its labelled Open) to its workspace's or firm's page.
+    // Every risk's labelled Open goes to its page; an app's or a product's also links its subject (in Source) to its workspace's or firm's page.
     expect([...document.querySelectorAll(`${TABLE} a`)].map((a) => [a.textContent!.trim(), a.getAttribute("href")])).toEqual([
-      ["Saver", `/platform/workspaces/${WS}`],
-      ["Open", `/platform/workspaces/${WS}`],
+      ["Open", `/platform/risk-register/${R1}`],
+      ["Open", `/platform/risk-register/${R3}`],
       ["Fixed deposit", `/platform/firms/${FIRM}?tab=products`],
-      ["Open", `/platform/firms/${FIRM}?tab=products`],
+      ["Open", "/platform/risk-register/x2"],
+      ["Saver", `/platform/workspaces/${WS}`],
+      ["Open", "/platform/risk-register/x1"],
     ]);
+    // Each score cell says its level in words beside the number: colour is never the only signal.
+    expect([...document.querySelectorAll("[data-risk-residual]")].map((c) => [c.getAttribute("data-risk-residual"), c.getAttribute("data-residual-level")])).toEqual([["5", "medium"], ["3", "low"], ["9", "medium"], ["4", "low"]]); // a signal has no score
     // The detail is cut short in its cell: the whole of it is the cell's title (and the review sheet's, and the CSV's).
     const cell = document.querySelector(`[data-row="mynt:${R1}"] [data-risk-detail]`)!;
     expect(cell.className).toContain("truncate");
     expect(cell.getAttribute("title")).toBe(MITIGATION);
     // Status is in words on every row, and each row says its source.
     expect([...document.querySelectorAll("[data-risk-source]")].map((s) => s.getAttribute("data-risk-source"))).toEqual(["mynt", "mynt", "subjects", "subjects", "signals", "signals"]);
-    expect([...document.querySelectorAll("[data-risk-status]")].map((s) => s.getAttribute("data-risk-status"))).toEqual(["open", "mitigating", "open", "mitigating", "needs_attention", "clear"]);
+    expect([...document.querySelectorAll("[data-risk-status]")].map((s) => s.getAttribute("data-risk-status"))).toEqual(["open", "mitigating", "mitigating", "open", "needs_attention", "clear"]);
   });
 
   it("each area's signals are rows: Source 'Signal: <name>', what needs attention, when it was seen, its detail", () => {
@@ -185,7 +195,7 @@ describe("the page", () => {
       const view = render(<RiskRegisterAreaView data={{ ...data(area), signals: risks.areaSignalsFrom(area, ops, entries, new Date("2026-11-25T00:00:00.000Z")) }} />);
       const rows = bodyRows(document, TABLE)
         .filter((r) => r[1].startsWith("Signal: "))
-        .map((r) => [r[0], r[1], r[2], r[5], r[6]]);
+        .map((r) => [r[0], r[1], r[2], r[7], r[8]]);
       expect(document.querySelectorAll("table")).toHaveLength(1);
       view.unmount();
       return rows;
@@ -236,7 +246,7 @@ describe("the page", () => {
     expect(risks.areaSignalsFrom("technology", { ...OPS, backups: { status: "no status file" } }, []).flatMap(risks.signalItems)[1].detail).toBe("No backup has run on this server: there is no backup status file to read.");
     const bp = render(<RiskRegisterAreaView data={data("business_process")} />);
     expect(bodyRows(document, TABLE).filter((r) => r[1] === "Signal: Drifted product")).toEqual([
-      ["Drifted products", "Signal: Drifted product", "Drifted product", "Not scored", "Mynt", "Not available", "Not recorded", "Mynt's operations status doesn't count drifted products across firms yet; each app's Security & risk tab shows its own.", ""],
+      ["Drifted products", "Signal: Drifted product", "Drifted product", "Not scored", "Not scored", "Not scored", "Mynt", "Not available", "Not recorded", "Mynt's operations status doesn't count drifted products across firms yet; each app's Security & risk tab shows its own.", ""],
     ]);
     bp.unmount();
     // Every signal of every area is in the table, never left out; signals come needs-attention first, then clear, then not available.
@@ -266,11 +276,11 @@ describe("the page", () => {
       expect(document.querySelectorAll("table")).toHaveLength(1);
       const rows = bodyRows(document, TABLE);
       expect(rows, area).toHaveLength(2 + none.signals.length);
-      expect(rows[0]).toEqual(["Mynt's own register", "Mynt", "Risk register", "Not available", "Mynt", "Not available", "Not recorded", "Mynt's own risk register comes with Mynt's next update.", ""]);
-      expect(rows[1]).toEqual(["Open risks across apps and products", "Apps and products", "Risk register", "Not available", "Their workspaces and firms", "Not available", "Not recorded", "Risks across apps and products come with Mynt's next update.", ""]);
+      expect(rows[0]).toEqual(["Mynt's own register", "Mynt", "Risk register", "Not available", "Not available", "Not available", "Mynt", "Not available", "Not recorded", "Mynt's own risk register comes with Mynt's next update.", ""]);
+      expect(rows[1]).toEqual(["Open risks across apps and products", "Apps and products", "Risk register", "Not available", "Not available", "Not available", "Their workspaces and firms", "Not available", "Not recorded", "Risks across apps and products come with Mynt's next update.", ""]);
       none.signals.forEach((spec, n) => {
         const reason = spec.id === "security" ? "This Mynt has no audit log to read." : spec.id === "drift" ? "Mynt's operations status doesn't count drifted products across firms yet; each app's Security & risk tab shows its own." : "This Mynt has no operations status (ops_status) to read.";
-        expect(rows[2 + n], `${area} ${spec.id}`).toEqual([spec.title, `Signal: ${risks.signalName(spec)}`, risks.signalName(spec), "Not scored", "Mynt", "Not available", "Not recorded", reason, ""]);
+        expect(rows[2 + n], `${area} ${spec.id}`).toEqual([spec.title, `Signal: ${risks.signalName(spec)}`, risks.signalName(spec), "Not scored", "Not scored", "Not scored", "Mynt", "Not available", "Not recorded", reason, ""]);
       });
       for (const r of rows) for (const c of r) expect(c).not.toBe("0");
       view.unmount();
@@ -278,14 +288,14 @@ describe("the page", () => {
     expect(risks.areaSignalsFrom("technology", OPS, null)[0].signal).toMatchObject({ available: false, reason: "This Mynt has no audit log to read." });
   });
 
-  it("search covers the risk, its source and its detail; Filters narrow by source, status and level; Unassigned shows Mynt's risks with no area yet", async () => {
+  it("search covers the risk, its source and its detail; Filters narrow by source, status and residual level; Unassigned shows Mynt's risks with no area yet", async () => {
     function Harness() {
       const [filter, setFilter] = useState<"area" | "unassigned">("area");
       return <RiskRegisterAreaView data={data("technology")} filter={filter} onFilter={setFilter} />;
     }
     render(<Harness />);
     const titles = () => bodyRows(document, TABLE).map((r) => r[0]);
-    const ALL = ["Key leak", "Laptop theft", "Session hijack", "Patch lag", "Server backups: the last run's result isn't recorded", "No security events in the last 30 days among the newest audit entries."];
+    const ALL = ["Key leak", "Laptop theft", "Patch lag", "Session hijack", "Server backups: the last run's result isn't recorded", "No security events in the last 30 days among the newest audit entries."];
     expect(titles()).toEqual(ALL);
     const search = (q: string) => change("[data-toolbar] input", q);
     search("laptop");
@@ -300,7 +310,7 @@ describe("the page", () => {
     expect(titles()).toEqual(["No risks match this search and these filters."]);
     search("");
     await click("[data-filters-menu-button]");
-    expect([...document.querySelectorAll("[data-facet-heading]")].map((h) => h.textContent)).toEqual(["Source", "Status", "Level", "Risk area"]);
+    expect([...document.querySelectorAll("[data-facet-heading]")].map((h) => h.textContent)).toEqual(["Source", "Status", "Residual level", "Risk area"]);
     expect([...document.querySelectorAll('[data-facet="source"] [data-chip]')].map((c) => c.textContent)).toEqual(["Mynt", "Apps and products", "Signals"]);
     expect([...document.querySelectorAll('[data-facet="status"] [data-chip]')].map((c) => c.textContent)).toEqual(["Open: not yet mitigated", "Mitigating: work under way", "Accepted: living with it", "Closed", "Needs attention", "Clear", "Not available"]);
     expect([...document.querySelectorAll('[data-facet="level"] [data-chip]')].map((c) => c.textContent)).toEqual(["Critical", "High", "Medium", "Low"]);
@@ -316,11 +326,15 @@ describe("the page", () => {
     await click('[data-facet="source"] [data-chip="signals"]');
     expect(titles()).toEqual(ALL.slice(4));
     await click('[data-facet="source"] [data-chip="signals"]');
-    // Level: a signal has no score, so no level.
-    await click('[data-facet="level"] [data-chip="high"]');
-    expect(titles()).toEqual(["Key leak"]);
+    // Residual level: what a risk stands at after its controls, not its inherent level (Session hijack is critical
+    // before its control, low after). A signal has no score, so no level.
     await click('[data-facet="level"] [data-chip="critical"]');
-    expect(titles()).toEqual(["Key leak", "Session hijack"]);
+    expect(titles()).toEqual(["No risks match this search and these filters."]);
+    await click('[data-facet="level"] [data-chip="critical"]');
+    await click('[data-facet="level"] [data-chip="medium"]');
+    expect(titles()).toEqual(["Key leak", "Patch lag"]);
+    await click('[data-facet="level"] [data-chip="low"]');
+    expect(titles()).toEqual(["Key leak", "Laptop theft", "Patch lag", "Session hijack"]);
     await click("[data-filters-clear]");
     expect(titles()).toEqual(ALL);
     // Status.
@@ -334,28 +348,35 @@ describe("the page", () => {
     await click("[data-filters-clear]");
     // Unassigned: Mynt's risks with no area yet, in the same table.
     await click('[data-facet="area"] [data-chip="unassigned"]');
-    expect(bodyRows(document, TABLE)).toEqual([["Something else", "Mynt", "Other", "1 × 2 = 2 (Low)", "Not assigned", "Open: not yet mitigated", "Not set", "None recorded", " Review risk"]]);
+    expect(bodyRows(document, TABLE)).toEqual([["Something else", "Mynt", "Other", "1 × 2 = 2 (Low)", "Not assessed", "2 (Low), same as inherent: control not assessed", "Not assigned", "Open: not yet mitigated", "Not set", "None recorded", " Open Review risk"]]);
     expect(document.querySelectorAll("table")).toHaveLength(1);
     expect(document.querySelector("[data-toolbar] input")!.getAttribute("aria-label")).toBe("Search unassigned risks by risk, source or detail");
     await click('[data-facet="area"] [data-chip="unassigned"]');
     expect(titles()).toEqual(ALL);
   });
 
-  it("Review risk opens its sheet with the whole mitigation, from its button and from a click on a Mynt row; other rows open nothing", async () => {
-    render(<RiskRegisterAreaView data={data("technology")} />);
+  it("a risk's row opens its page, by a click or its labelled Open; Review risk stays a labelled button opening its sheet; a signal's row opens nothing", async () => {
+    const opened: string[] = [];
+    render(<RiskRegisterAreaView data={data("technology")} onOpen={(id) => opened.push(id)} />);
     const sheet = () => document.querySelector('[data-review-risk-sheet] [data-risk-field="mitigation"]') as HTMLTextAreaElement | null;
     await click('[data-row^="signal:backups"]');
-    await click('[data-row="subject:x2"]');
-    expect(sheet()).toBeNull();
+    expect(opened).toEqual([]);
     expect(document.querySelector('[data-row^="signal:backups"]')!.className).not.toContain("cursor-pointer");
+    // Mynt's own risk and an app's or a product's both open the risk's page.
     expect(document.querySelector(`[data-row="mynt:${R1}"]`)!.className).toContain("cursor-pointer");
+    await click(`[data-row="mynt:${R1}"]`);
+    await click('[data-row="subject:x2"]');
+    expect(opened).toEqual([R1, "x2"]);
+    expect(sheet()).toBeNull();
+    expect(document.querySelector(`[data-open-risk="${R1}"]`)!.getAttribute("href")).toBe(`/platform/risk-register/${R1}`);
+    expect(document.querySelector('[data-open-risk="x2"]')!.getAttribute("aria-label")).toBe("Open the risk Patch lag");
+    // Review risk is its own labelled action: its sheet, with the whole mitigation, and the page doesn't open too.
     await click(`[data-review-risk="${R1}"]`);
     expect(sheet()!.value).toBe(MITIGATION);
-    cleanup();
-    render(<RiskRegisterAreaView data={data("technology")} />);
-    await click(`[data-row="mynt:${R3}"]`);
-    expect(sheet()!.value).toBe("");
-    expect(document.querySelector(`[data-review-risk-form="${R3}"]`)).not.toBeNull();
+    expect(opened).toEqual([R1, "x2"]);
+    expect(document.querySelector(`[data-review-risk-form="${R1}"]`)).not.toBeNull();
+    // Only Mynt's own risks are reviewed here: an app's or a product's has no Review risk.
+    expect([...document.querySelectorAll("[data-review-risk]")].map((b) => b.getAttribute("data-review-risk"))).toEqual([R1, R3]);
     // Read-only (not an admin who keeps it): no Add risk, no Review risk.
     cleanup();
     const d = data("technology");
@@ -379,12 +400,12 @@ describe("the page", () => {
       reader.readAsText(blobs[0]);
     });
     const lines = csv.split("\r\n");
-    expect(lines[0]).toBe("Risk,Source,Category,Risk area,Likelihood,Impact,Score,Level,Owner,Status,Review by / When,Overdue,Detail");
+    expect(lines[0]).toBe("Risk,Source,Category,Risk area,Likelihood,Impact,Inherent score,Inherent level,Control,Residual score,Residual level,Residual,Owner,Status,Review by / When,Overdue,Detail");
     expect(lines.filter(Boolean)).toHaveLength(7);
-    expect(lines[1]).toBe(`Key leak,Mynt,Security,Technology risk,2,5,10,High,Not assigned,Open: not yet mitigated,2026-01-01,Yes,"${MITIGATION}"`);
-    expect(lines[3]).toBe("Session hijack,App: Saver,Security,Technology risk,4,4,16,Critical,Dana,Open: not yet mitigated,2026-12-01,No,Short sessions");
-    expect(lines[4]).toBe("Patch lag,Product: Fixed deposit,Operational,Technology risk,Not recorded,Not recorded,9,Medium,Not assigned,Mitigating: work under way,Not set,No,None recorded");
-    expect(lines[5]).toBe("Server backups: the last run's result isn't recorded,Signal: Backup,Backup,Technology risk,Not scored,Not scored,Not scored,Not scored,Mynt,Needs attention,Not recorded,Not applicable,Last run: Not recorded. Result: Not recorded. Off-site: Uploaded off-site. Last success: Not recorded. Last restore test: Not recorded.");
+    expect(lines[1]).toBe(`Key leak,Mynt,Security,Technology risk,2,5,10,High,Partial,5,Medium,5 (Medium),Not assigned,Open: not yet mitigated,2026-01-01,Yes,"${MITIGATION}"`);
+    expect(lines[3]).toBe('Patch lag,Product: Fixed deposit,Operational,Technology risk,Not recorded,Not recorded,9,Medium,Not assessed,9,Medium,"9 (Medium), same as inherent: control not assessed",Not assigned,Mitigating: work under way,Not set,No,None recorded');
+    expect(lines[4]).toBe('Session hijack,App: Saver,Security,Technology risk,4,4,16,Critical,Strong,4,Low,"4 (Low), overridden",Dana,Open: not yet mitigated,2026-12-01,No,Short sessions');
+    expect(lines[5]).toBe("Server backups: the last run's result isn't recorded,Signal: Backup,Backup,Technology risk,Not scored,Not scored,Not scored,Not scored,Not scored,Not scored,Not scored,Not scored,Mynt,Needs attention,Not recorded,Not applicable,Last run: Not recorded. Result: Not recorded. Off-site: Uploaded off-site. Last success: Not recorded. Last restore test: Not recorded.");
     clicked.mockRestore();
   });
 
