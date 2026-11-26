@@ -17,7 +17,6 @@ vi.mock("next/navigation", () => ({
 }));
 
 const { EarnWorkspace } = await import("@/components/earn-assistant");
-const { AskAiPanel } = await import("@/components/ask-ai");
 const { Thread } = await import("@/components/assistant-ui/thread");
 const { builderCommands } = await import("@/app/(studio)/[projectId]/assistant");
 const { ProjectWorkspaceShell } = await import("@/app/(studio)/[projectId]/project-workspace-shell");
@@ -299,30 +298,6 @@ describe("slash commands in Earn's composer", () => {
     await press("Enter");
     await settle();
     expect(sent).toEqual(["Lowest risk pools"]);
-  });
-});
-
-describe("slash commands in Ask AI", () => {
-  function Ask({ messages }: { messages?: UIMessage[] }) {
-    const [transport] = useState(() => fakeTransport([]));
-    const [id] = useState(() => `ask-${Math.random()}`);
-    const chat = useChat<UIMessage>({ id, transport, messages });
-    return <AskAiPanel chat={chat} status="enabled" onBack={() => undefined} onClose={() => undefined} onNavigate={() => undefined} />;
-  }
-
-  it("/new clears the conversation; the question templates fill the input", async () => {
-    render(<Ask messages={[{ id: "u", role: "user", parts: [{ type: "text", text: "Earlier question" }] }]} />);
-    expect(document.body.textContent).toContain("Earlier question");
-    await type("/");
-    expect(names()).toEqual(["new", "apps", "builds", "licences", "coverage", "audits"]);
-    await type("/new");
-    await press("Enter");
-    await settle();
-    expect(document.body.textContent).not.toContain("Earlier question");
-    await type("/lic");
-    await press("Enter");
-    await settle();
-    expect(input().value).toBe("Which partner licences cover ");
   });
 });
 

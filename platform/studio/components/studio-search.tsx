@@ -1,19 +1,16 @@
 "use client";
 
-// The header's search: a search field that opens a Cmd+K modal, with Ask AI in the same modal
-// (the field, or Cmd+K / Ctrl+K anywhere, opens it). Typing
-// searches the studio: its pages, the selected workspace's apps (by name or stage), the user's own financial products, members,
-// and audit actions, with the arrow keys and Enter (shadcn's Command, cmdk). "Ask AI"
-// switches the modal to a conversation with the studio's assistant (components/ask-ai.tsx),
-// streamed, with follow-ups, Stop and New chat; Search goes back. The conversation is kept in
-// memory while the tab stays open (never in storage), so closing and reopening the modal keeps it.
+// The header's search: a search field that opens a Cmd+K modal (the field, or Cmd+K / Ctrl+K anywhere, opens it).
+// Typing searches the studio: its pages, the selected workspace's apps (by name or stage), the user's own financial
+// products, members, and audit actions, with the arrow keys and Enter (shadcn's Command, cmdk). With a question of a
+// few words typed, the first result is "Ask AI": it closes the search and opens the answer in its own dialog
+// (components/ask-ai.tsx), a short answer from Mynt's data with its sources, streamed. The platform admin's search
+// (/platform) works the same way over its own sections, workspaces and firms, and asks its own assistant.
 import { useRouter } from "next/navigation";
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport, type UIMessage } from "ai";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Search, Sparkles } from "lucide-react";
 
-import { AskAiPanel, type AskStatus } from "@/components/ask-ai";
+import { AskAiProvider, NOT_CONFIGURED, useAskAi, type AskStatus } from "@/components/ask-ai";
 import { useWorkspace } from "@/components/workspace-context";
 import { Button } from "@/components/ui/button";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandShortcut } from "@/components/ui/command";
@@ -34,30 +31,23 @@ import { myProductsFrom } from "@/lib/threads";
 import { cn } from "@/lib/utils";
 import { withWorkspace } from "@/lib/workspaces";
 import { useStudioAccess } from "@/lib/use-liquidity-access";
-import { askFetch, withoutReasoning } from "@/lib/ask-client";
-
-export type SearchMode = "search" | "ai";
+import { askable, ASK_URL, type AskArea } from "@/lib/ask-answer";
 
 type SearchState = {
   open: boolean;
   setOpen: (open: boolean) => void;
-  mode: SearchMode;
-  setMode: (mode: SearchMode) => void;
-  // Whether the modal offers Ask AI (the studio's does; the platform admin's searches only).
+  // Whether the modal offers Ask AI (the studio's and the platform admin's both do).
   askAi: boolean;
 };
 
-const Ctx = createContext<SearchState>({ open: false, setOpen: () => undefined, mode: "search", setMode: () => undefined, askAi: true });
+const Ctx = createContext<SearchState>({ open: false, setOpen: () => undefined, askAi: true });
 export const useStudioSearch = () => useContext(Ctx);
 
 /** The header's search field: opens the search modal. `compact`: an icon button (the app top bar). */
 export function SearchTrigger({ compact = false, className }: { compact?: boolean; className?: string }) {
-  const { setOpen, setMode, askAi } = useStudioSearch();
+  const { setOpen, askAi } = useStudioSearch();
   const label = askAi ? "Search or ask AI" : "Search";
-  const open = () => {
-    setMode("search");
-    setOpen(true);
-  };
+  const open = () => setOpen(true);
   if (compact)
     return (
       <Button type="button" variant="ghost" size="icon" className={cn("size-8", className)} onClick={open} aria-label={label} title={`${label} (⌘K)`} data-search-trigger>
@@ -87,8 +77,8 @@ export function SearchTrigger({ compact = false, className }: { compact?: boolea
 }
 
 /**
- * The search results inside the modal's Command: Ask AI first (with what was typed), then each
- * group's hits. Filtering is the studio's (searchStudio), so cmdk only moves the selection.
+ * The search results inside the modal's Command: Ask AI first, once what's typed is a question (a few words, or one
+ * ending in "?"), then each group's hits. Filtering is the studio's (searchStudio), so cmdk only moves the selection.
  */
 export function SearchResults({
   items,
@@ -102,7 +92,7 @@ export function SearchResults({
 }: {
   items: SearchItem[];
   query: string;
-  // Without onAsk there's no Ask AI (the platform admin's search).
+  // Without onAsk there's no Ask AI.
   askStatus?: AskStatus;
   onSelect: (item: SearchItem) => void;
   onAsk?: () => void;
@@ -114,12 +104,15 @@ export function SearchResults({
   const off = askStatus === "disabled";
   return (
     <>
-      {onAsk && (
+      {onAsk && askable(query) && (
         <CommandGroup heading="Ask AI">
           <CommandItem value="ask-ai" onSelect={onAsk} disabled={off} data-ask-ai>
             <Sparkles className="text-link" />
-            <span className="truncate">{query.trim() ? `Ask AI: “${query.trim()}”` : "Ask AI about your apps"}</span>
-            <CommandShortcut className="tracking-normal">{off ? "AI is not configured" : "Enter"}</CommandShortcut>
+            <span className="flex min-w-0 flex-col">
+              <span className="truncate">{`Ask AI: “${query.trim()}”`}</span>
+              <span className="truncate text-xs text-muted-foreground">A short answer from Mynt&apos;s data, with its sources</span>
+            </span>
+            <CommandShortcut className="tracking-normal">{off ? NOT_CONFIGURED : "Enter"}</CommandShortcut>
           </CommandItem>
         </CommandGroup>
       )}
@@ -180,13 +173,13 @@ function useSearchSources(open: boolean): SearchSources {
   return sources;
 }
 
-// Whether Ask AI can answer (GET /api/ask), checked whenever the modal opens.
-function useAskStatus(open: boolean): AskStatus {
+// Whether Ask AI can answer (GET /api/ask, or /api/admin/ask in the platform admin), checked whenever the modal opens.
+function useAskStatus(open: boolean, area: AskArea): AskStatus {
   const [status, setStatus] = useState<AskStatus>("loading");
   useEffect(() => {
     if (!open) return;
     let live = true;
-    void fetch("/api/ask", { cache: "no-store" })
+    void fetch(ASK_URL[area], { cache: "no-store" })
       .then(async (res) => {
         const body = (await res.json().catch(() => null)) as { enabled?: unknown } | null;
         if (live) setStatus(res.ok && body?.enabled === true ? "enabled" : "disabled");
@@ -195,8 +188,27 @@ function useAskStatus(open: boolean): AskStatus {
     return () => {
       live = false;
     };
-  }, [open]);
+  }, [open, area]);
   return status;
+}
+
+// The modal's foot: what the keys do.
+function SearchKeys() {
+  const key = "rounded border bg-muted px-1 font-mono text-[10px]";
+  return (
+    <div className="flex items-center gap-3 border-t px-3 py-2 text-xs text-muted-foreground" data-search-keys>
+      <span className="flex items-center gap-1">
+        <kbd className={key}>↑</kbd>
+        <kbd className={key}>↓</kbd> navigate
+      </span>
+      <span className="flex items-center gap-1">
+        <kbd className={key}>↵</kbd> open
+      </span>
+      <span className="flex items-center gap-1">
+        <kbd className={key}>esc</kbd> close
+      </span>
+    </div>
+  );
 }
 
 // Cmd+K / Ctrl+K anywhere toggles the modal.
@@ -215,31 +227,34 @@ function useSearchShortcut(setOpen: React.Dispatch<React.SetStateAction<boolean>
 
 export function StudioSearchProvider({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<SearchMode>("search");
   useSearchShortcut(setOpen);
 
-  const value = useMemo(() => ({ open, setOpen, mode, setMode, askAi: true }), [open, mode]);
+  const value = useMemo(() => ({ open, setOpen, askAi: true }), [open]);
   return (
     <Ctx.Provider value={value}>
-      {children}
-      <StudioSearchDialog />
+      <AskAiProvider area="studio">
+        {children}
+        <StudioSearchDialog />
+      </AskAiProvider>
     </Ctx.Provider>
   );
 }
 
 // The platform admin's search (/platform, Mynt admins only): the same field and Cmd+K modal, searching its sections,
 // every workspace and firm (the admin list routes, loaded the first time the modal opens) and the studio's pages.
-// Across Mynt: no workspace is picked, so nothing here reads the studio's workspace. No Ask AI.
+// Across Mynt: no workspace is picked, so nothing here reads the studio's workspace. Its Ask AI is the platform
+// admin's own (/api/admin/ask), which reads across every workspace and firm.
 export function PlatformSearchProvider({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<SearchMode>("search");
   useSearchShortcut(setOpen);
 
-  const value = useMemo(() => ({ open, setOpen, mode, setMode, askAi: false }), [open, mode]);
+  const value = useMemo(() => ({ open, setOpen, askAi: true }), [open]);
   return (
     <Ctx.Provider value={value}>
-      {children}
-      <PlatformSearchDialog />
+      <AskAiProvider area="admin">
+        {children}
+        <PlatformSearchDialog />
+      </AskAiProvider>
     </Ctx.Provider>
   );
 }
@@ -260,12 +275,28 @@ function usePlatformSearchSources(open: boolean): PlatformSearchSources {
   return sources;
 }
 
+// Asking from the search: the search closes and the answer's dialog opens with what was typed.
+function useAskFromSearch(askStatus: AskStatus, query: string, setQuery: (q: string) => void) {
+  const { setOpen } = useStudioSearch();
+  const askAi = useAskAi();
+  return () => {
+    if (askStatus === "disabled") return;
+    const q = query.trim();
+    if (!askable(q)) return;
+    setOpen(false);
+    setQuery("");
+    askAi(q);
+  };
+}
+
 function PlatformSearchDialog() {
   const { open, setOpen } = useStudioSearch();
   const router = useRouter();
   const [query, setQuery] = useState("");
   const sources = usePlatformSearchSources(open);
   const items = useMemo(() => platformSearchIndex(sources), [sources]);
+  const askStatus = useAskStatus(open, "admin");
+  const ask = useAskFromSearch(askStatus, query, setQuery);
   const go = (href: string) => {
     setOpen(false);
     setQuery("");
@@ -275,12 +306,22 @@ function PlatformSearchDialog() {
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent showCloseButton={false} className="gap-0 overflow-hidden p-0 sm:max-w-xl" data-search-mode="search" data-platform-search>
         <DialogTitle className="sr-only">Search the platform admin</DialogTitle>
-        <DialogDescription className="sr-only">Search the platform admin&apos;s sections, workspaces, regulated firms and the studio&apos;s pages.</DialogDescription>
+        <DialogDescription className="sr-only">Search the platform admin&apos;s sections, workspaces, regulated firms and the studio&apos;s pages, or ask AI.</DialogDescription>
         <Command shouldFilter={false} loop className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground">
-          <CommandInput value={query} onValueChange={setQuery} placeholder="Search sections, workspaces, regulated firms…" />
+          <CommandInput value={query} onValueChange={setQuery} placeholder="Search sections, workspaces, regulated firms… or ask AI" />
           <CommandList className="max-h-[min(60vh,26rem)]">
-            <SearchResults items={items} query={query} groups={PLATFORM_SEARCH_GROUPS} search={searchPlatform} empty="Nothing in the platform admin matches that." onSelect={(i) => go(i.href)} />
+            <SearchResults
+              items={items}
+              query={query}
+              askStatus={askStatus}
+              groups={PLATFORM_SEARCH_GROUPS}
+              search={searchPlatform}
+              empty="Nothing in the platform admin matches that. Type a question to ask AI."
+              onSelect={(i) => go(i.href)}
+              onAsk={ask}
+            />
           </CommandList>
+          <SearchKeys />
         </Command>
       </DialogContent>
     </Dialog>
@@ -288,77 +329,30 @@ function PlatformSearchDialog() {
 }
 
 function StudioSearchDialog() {
-  const { open, setOpen, mode, setMode } = useStudioSearch();
+  const { open, setOpen } = useStudioSearch();
   const router = useRouter();
   const [query, setQuery] = useState("");
   const sources = useSearchSources(open);
   const items = useMemo(() => searchIndex(sources), [sources]);
-  const askStatus = useAskStatus(open);
-
-  // The conversation lives here, so it outlasts the modal closing.
-  // Failures come back as a sentence, never raw JSON (lib/ask-client.ts).
-  const transport = useMemo(() => new DefaultChatTransport<UIMessage>({ api: "/api/ask", fetch: askFetch, prepareSendMessagesRequest: withoutReasoning }), []);
-  const chat = useChat<UIMessage>({ id: "studio-ask-ai", transport });
-  const pendingQuestion = useRef<string | null>(null);
-
-  const close = useCallback(() => setOpen(false), [setOpen]);
+  const askStatus = useAskStatus(open, "studio");
+  const ask = useAskFromSearch(askStatus, query, setQuery);
   const go = (href: string) => {
-    close();
+    setOpen(false);
     setQuery("");
     router.push(href);
   };
-  const ask = () => {
-    if (askStatus === "disabled") return;
-    const q = query.trim();
-    pendingQuestion.current = q || null;
-    setQuery("");
-    setMode("ai");
-  };
-  // The question typed in search is sent once the conversation is showing.
-  useEffect(() => {
-    if (mode !== "ai" || !pendingQuestion.current) return;
-    const text = pendingQuestion.current;
-    pendingQuestion.current = null;
-    void chat.sendMessage({ text });
-  }, [mode, chat]);
-
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        setOpen(o);
-        if (!o) setMode("search");
-      }}
-    >
-      <DialogContent
-        showCloseButton={false}
-        className={cn("gap-0 overflow-hidden p-0 sm:max-w-xl", mode === "ai" && "h-[min(42rem,85vh)] sm:max-w-3xl")}
-        data-search-mode={mode}
-      >
-        <DialogTitle className="sr-only">{mode === "ai" ? "Ask AI" : "Search the studio"}</DialogTitle>
-        <DialogDescription className="sr-only">
-          {mode === "ai" ? "Ask about your apps, builds, workspaces and compliance." : "Search pages, apps, members and audit actions, or ask AI."}
-        </DialogDescription>
-        {mode === "search" ? (
-          <Command shouldFilter={false} loop className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground">
-            <CommandInput value={query} onValueChange={setQuery} placeholder="Search apps, pages, members… or ask AI" />
-            <CommandList className="max-h-[min(60vh,26rem)]">
-              <SearchResults items={items} query={query} askStatus={askStatus} onSelect={(i) => go(i.href)} onAsk={ask} />
-            </CommandList>
-          </Command>
-        ) : (
-          <AskAiPanel
-            chat={chat}
-            status={askStatus}
-            onBack={() => setMode("search")}
-            onClose={close}
-            onNavigate={(href) => {
-              close();
-              setMode("search");
-              router.push(href);
-            }}
-          />
-        )}
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent showCloseButton={false} className="gap-0 overflow-hidden p-0 sm:max-w-xl" data-search-mode="search">
+        <DialogTitle className="sr-only">Search the studio</DialogTitle>
+        <DialogDescription className="sr-only">Search pages, apps, members and audit actions, or ask AI.</DialogDescription>
+        <Command shouldFilter={false} loop className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground">
+          <CommandInput value={query} onValueChange={setQuery} placeholder="Search apps, pages, members… or ask AI" />
+          <CommandList className="max-h-[min(60vh,26rem)]">
+            <SearchResults items={items} query={query} askStatus={askStatus} empty="Nothing in the studio matches that. Type a question to ask AI." onSelect={(i) => go(i.href)} onAsk={ask} />
+          </CommandList>
+          <SearchKeys />
+        </Command>
       </DialogContent>
     </Dialog>
   );

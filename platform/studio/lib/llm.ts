@@ -49,6 +49,12 @@ export function askModel(env: Env = process.env): string {
   return env.CHAT_MODEL?.trim() || "claude-opus-5-5";
 }
 
+// The models a question is tried on, in order: the first that answers is the answer's. The second is the one
+// requests already fall back to (CHAT_FALLBACK_MODEL), so no setting is new.
+export function askModels(env: Env = process.env): string[] {
+  return [...new Set([askModel(env), env.CHAT_FALLBACK_MODEL?.trim() || "claude-opus-4-8"])];
+}
+
 export function createLlm(env: Env = process.env): Llm {
   const apiKey = env.ANTHROPIC_API_KEY?.trim();
   if (apiKey) {

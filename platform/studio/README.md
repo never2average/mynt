@@ -91,7 +91,7 @@ Pages are under `app/(studio)` (Studio's shell: sidebar and header) and `app/(pl
 | Settings | `/settings` | `components/workspace-view.tsx`, `components/members-view.tsx`, `components/repositories.tsx`, `components/workspace-settings.tsx`, `lib/workspace-tabs.ts`, `lib/workspaces.ts` | `app/api/workspaces/[workspaceId]`, `app/api/invitations`, `app/api/repositories` |
 | Platform admin | `/platform`, `/platform/<section>`, `/platform/<section>/<id>` | `app/(platform)/layout.tsx`, `components/platform-shell.tsx`, `components/platform-view.tsx`, `components/admin-*.tsx`, `lib/admin.ts`, `lib/admin-members.ts`, `lib/admin-audit.ts`, `lib/admin-risks.ts`, `lib/admin-server.ts` | `app/api/admin/*` |
 | Docs | `/docs`, `/connect` | `app/docs/`, `components/docs/`, `components/connect-guide.tsx`, `lib/docs.ts`, `lib/docs-source.ts` | `app/docs/search-index` |
-| Search and Ask AI | the header | `components/studio-search.tsx`, `components/ask-ai.tsx`, `lib/studio-search.ts`, `lib/ask.ts` | `app/api/ask` |
+| Search and Ask AI | the header (Studio's and the platform admin's) | `components/studio-search.tsx`, `components/ask-ai.tsx`, `lib/studio-search.ts`, `lib/ask.ts`, `lib/ask-answer.ts`, `lib/ask-server.ts`, `lib/admin-ask.ts` | `app/api/ask`, `app/api/admin/ask` |
 | Sign-in | `/api/auth/*`, `/signin-error`, `/signed-out` | `proxy.ts`, `lib/page-gate.ts`, `lib/session.ts`, `lib/session-store.ts`, `lib/tokens.ts` | `app/api/auth/{login,callback,logout}` |
 
 Old addresses and where they go are in `lib/redirects.ts` (applied by `proxy.ts` and `next.config.ts`), `lib/licences-tabs.ts` and `lib/studio-search.ts`:
@@ -180,7 +180,7 @@ Mynt's tools are called only through the `STUDIO_TOOLS` allow-list in `lib/studi
 - `undeploy_app`, `vm_access`, `app_run` and admin tools are never on it.
 - Builds start without `cap_usd`: the allow-list refuses it, and Mynt applies its own caps. Studio has no spending-cap control anywhere. Costs are shown as measured, never against a cap.
 - The platform admin has a separate list, `ADMIN_TOOLS`. The only names on both lists are the vendor reads and the risk tools, whose admin entries take nothing but Mynt's own register.
-- Ask AI and the assistants built on it are offered only the read tools listed in `lib/ask.ts`.
+- Ask AI and the assistants built on it are offered only the read tools listed in `lib/ask.ts`; the platform admin's only those in `lib/admin-ask.ts`. Tests fail if a name on either list isn't a read.
 
 **Refusals.** Mynt's refusals reach the page in Mynt's own words, cleaned and capped. Only an empty message, or one that looks like a stack trace or names server files, becomes a generic line. Ask AI and Earn's assistant show a sentence for a failed request, never raw JSON.
 
@@ -245,11 +245,15 @@ Starting a build takes a lock per user and app (130 seconds, longer than listing
 
 ### Ask AI and Earn's assistant
 
-`components/ask-ai.tsx`, `lib/ask.ts`, `app/api/ask`, `components/earn-assistant.tsx`, `app/api/earn`.
+`components/ask-ai.tsx`, `lib/ask.ts`, `lib/ask-answer.ts`, `lib/ask-server.ts`, `lib/admin-ask.ts`, `app/api/ask`, `app/api/admin/ask`, `components/earn-assistant.tsx`, `app/api/earn`.
 
-- Ask AI reads the user's Mynt data through Mynt's tools as the signed-in user, never an app key.
-- Limits per question: 4,000 output tokens per step, 8 steps, 8 reads per step and 24 per question (4 at a time), 8,000 characters of each reply to the model, a 64 KB request body, and 20 questions per user per hour.
-- Questions and answers are never logged. The model's summarized thinking is streamed as reasoning parts and never logged or kept.
+- Ask AI is one question and one short answer. A question typed in search (a few words, or one ending in "?") is offered to Ask AI first; the answer opens in its own dialog, where the question can be edited and asked again. There are no follow-ups, and nothing is kept beyond the visit.
+- It reads the user's Mynt data through Mynt's tools as the signed-in user, never an app key. Each read is a numbered source, shown as the page that holds that data; the model cites sources by number, and the citations and sources are the answer's only links.
+- The route streams server-sent events: `sources` as reads run, `delta` as text is written, `reset` when what was written is dropped, then `done` with the cleaned answer (links and headings removed, citations of unknown sources dropped), the model, and a reason when there is no answer (`rate_limited`, `signed_out`, `unavailable`).
+- The first model that answers is the answer's: `CHAT_MODEL`, then `CHAT_FALLBACK_MODEL`. No setting is new.
+- The platform admin's Ask AI (`/api/admin/ask`, Mynt admins only, 404 for anyone else) is the same, with its own instructions and the reads in `ADMIN_ASK_TOOLS`, each through the Admin area's allow-list. It reads no workspace.
+- Limits per question: 400 characters asked, 4,000 output tokens per step, 8 steps, 8 reads per step and 24 per question (4 at a time), 8,000 characters of each reply to the model, a 64 KB request body, and 20 questions per user per hour, one at a time. Studio's and the platform admin's are counted apart.
+- Questions and answers are never logged. The model's thinking is not shown, logged or kept.
 - Earn's assistant is the same stack with its own hourly count (20) and instructions (`EARN_SYSTEM_PROMPT`). It reads only `list_pools`, `list_pools_with_health`, `list_product_health`, `list_my_positions`, `list_withdrawals` and `get_product`, and is never offered a write tool.
 - Earn's panel tools are answered by Studio, not Mynt: `show_pools` puts matching pools in the panel (only pools the user can see), and `draft_commitment` and `draft_withdrawal` put a draft there, checked on the server against the pool's current terms and the user's position. A draft is only a card; the user's click sends it, with an idempotency key.
 

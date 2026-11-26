@@ -512,11 +512,15 @@ Mynt admins also find the platform admin's sections there.
 
 ### Ask AI
 
-**Ask AI** switches the search modal to a conversation that answers from your Mynt data. It reads through Mynt's tools as you, never with an app key, and only with read tools.
+Type a question in search and **Ask AI** is the first result: a few words, or one word ending in a question mark, of at least 6 characters. Enter closes the search and opens the answer in its own dialog.
 
+- The answer is short (about 120 words), written from your Mynt data only, and streams in as it is written. It reads through Mynt's tools as you, never with an app key, and only with read tools.
+- Each statement cites its source by number. The sources are listed under the answer: the reads the answer was made from, each shown as the Studio page that holds that data. A citation or a source opens its page and closes the dialog. Nothing else in an answer is a link.
+- The question sits in a field at the top of the dialog. Edit it and press Enter to ask again. Each question is answered on its own; there are no follow-ups.
+- A question already answered in this visit is shown again without asking twice. Nothing is kept after you leave the page.
 - Questions and answers are never logged.
-- You may ask 20 questions an hour.
-- Only links to Studio pages in an answer are clickable.
+- You may ask 20 questions an hour, one at a time. Past that it says the AI summary is unavailable and why.
+- The answer comes from the first model that answers: the configured model, then the fallback model. When neither answers it says the AI summary is unavailable.
 - With no model configured it says "AI is not configured", and search keeps working.
 
-Its slash commands are `/new`, `/apps`, `/builds`, `/licences`, `/coverage` and `/audits`.
+The platform admin's search has its own Ask AI, for Mynt admins. See [Search and Ask AI](platform-admin.md#search-and-ask-ai).

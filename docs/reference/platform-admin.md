@@ -21,7 +21,7 @@ The platform admin has its own layout, not Studio's.
 
 - Its sidebar is titled "Mynt platform admin" and lists eight sections, each at its own address. There is no workspace switcher and there are no app folders.
 - The labelled Back to Studio at the foot of the sidebar returns to Studio.
-- The header has the section's name, a search field (Cmd+K) that searches the platform admin, a Docs button and the theme switcher. On the Overview it also has Invite person. There is no scope tag.
+- The header has the section's name, a search field (Cmd+K, "Search or ask AI…") that searches the platform admin and asks its Ask AI, a Docs button and the theme switcher. On the Overview it also has Invite person. There is no scope tag.
 
 | Section | Address |
 | --- | --- |
@@ -219,6 +219,34 @@ The signals come from `ops_status`, so they show what it reports and no more:
 Drifted products are not available until `ops_status` counts them across firms.
 
 The register's routes are `GET /api/admin/risks?area=<area>` and `POST /api/admin/risks`. One risk's are `GET` and `POST /api/admin/risks/<riskId>`.
+
+### Search and Ask AI
+
+The header's search field (or Cmd+K, Ctrl+K) searches the platform admin's sections, every workspace and regulated firm by name, and Studio's pages. Arrow keys and Enter move and open.
+
+Type a question and **Ask AI** is the first result, as in Studio's search. It opens a short answer in its own dialog, with numbered citations and its sources under it. Each source is the platform admin section that holds the data, and opens it.
+
+It answers a Mynt admin's questions across all workspaces and firms: what needs attention in production, workspaces and their members, regulated firms with their onboarding and licence reviews, vendors with their services and onboarding, the audit trail, risks and risk models, and the platform's settings.
+
+- **It is read-only.** It never changes anything. When something needs doing it names where to do it, for example "Regulated firms → Licences → Verify licence".
+- **It answers only from what Mynt returns.** When Mynt doesn't measure something it says so, and never shows it as 0.
+- **It never shows a secret.** Settings come back as names and non-secret values, e-signature as whether a key is set, and people as names, emails and roles.
+- **Only Mynt admins reach it.** `/api/admin/ask` is a 404 for anyone else. Mynt checks the admin role again on every read.
+- **Its limits are Studio's**, counted apart: 20 questions an hour, one at a time. Questions and answers are never logged.
+- With no model configured it says "AI is not configured", and search keeps working.
+
+It calls Mynt as the signed-in admin through these reads only (`ADMIN_ASK_TOOLS` in `platform/studio/lib/admin-ask.ts`), each with the Admin area's strict arguments:
+
+| Area | Reads |
+|---|---|
+| Production | `ops_status` |
+| Workspaces | `list_all_workspaces`, `admin_get_workspace` |
+| People | `list_whitelist` |
+| Regulated firms | `list_entities`, `list_license_reviews`, `get_regulated_firm_onboarding` |
+| Vendors | `list_service_types`, `list_vendor_offerings`, `get_vendor_onboarding` |
+| Audit trail | `audit_log` |
+| Risks | `admin_list_risks`, `list_risks` (Mynt's own register), `get_risk`, `list_risk_models`, `admin_list_product_risk_models` |
+| Settings | `get_platform_settings`, `get_risk_grading`, `get_esign_settings`, `list_enclave_releases` |
 
 ### What the platform admin reads
 
