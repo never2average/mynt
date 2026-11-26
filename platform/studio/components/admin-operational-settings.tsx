@@ -115,7 +115,6 @@ export function OperationalSettingsView({ settings, editable = true, onChanged =
         importable={false}
         onExport={() => downloadCsv("operational-settings.csv", csvOf(SETTING_CSV_HEAD, rows.map(settingCsvRow)))}
         exportDisabled={!rows.length}
-        note="The server's environment, where it sets a setting, overrides what's set in Mynt; what's set in Mynt overrides Mynt's default. A change applies from the next use, without a restart."
         page={paged.page}
         pages={paged.pages}
         total={rows.length}

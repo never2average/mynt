@@ -118,7 +118,7 @@ describe("the tab is one table", () => {
     expect(tableHead()).toEqual(["Rule", "Applies to", "Inherent", "Residual", "Level"]);
     expect([...root.querySelectorAll("[data-toolbar] button")].map((b) => b.textContent!.trim())).toEqual(["Filters", "Export CSV", "Version history", "Edit bands"]);
     for (const b of document.querySelectorAll("button")) expect(b.textContent!.trim()).not.toBe("");
-    expect(root.querySelector("[data-list-note]")!.textContent).toMatch(/^In force: Version 3\. Inherent score = likelihood × impact; .*Reduce: take a share off the inherent score\. Residual = inherent × \(1 − the control's reduction\).*A risk whose control isn't assessed stands at its inherent score; .*override.* is never derived again\.$/);
+    expect(root.querySelector("[data-list-note]")).toBeNull(); // no description under the toolbar
     // 4 bands, 4 method steps and the 25 scores: 33 rows, paged 25 at a time.
     expect(root.querySelector("[data-pager]")!.textContent).toContain("33 rows · Page 1 of 2");
   });
@@ -213,7 +213,7 @@ describe("the tab is one table", () => {
 
   it("never changed: Mynt's defaults are in force, and the history says so in words", () => {
     render(<RiskGradingView data={data({ ...REPLY, version: 0, history: [] })} sheet="history" />);
-    expect(document.querySelector("[data-list-note]")!.textContent).toMatch(/^In force: Mynt's defaults \(never changed\)\./);
+    expect(document.querySelector("[data-list-note]")).toBeNull(); // no description under the toolbar
     expect(historyRows()).toEqual([["No versions yet: these are Mynt's defaults. The first change keeps them as version 1."]]);
     expect(grading.gradingFrom({ version: 1 })).toBeNull();
     expect(grading.gradingFrom({ ...REPLY, grading: { ...DEFAULTS, inherent_bands: BANDS.slice(0, 3) } })).toBeNull();

@@ -132,11 +132,8 @@ export function EsignSettingsView({
         onSearch={setQuery}
         searchLabel="Search the e-signature settings"
         importable={false}
-        note={
-          status.vaultReady
-            ? "Program agreements between apps and the licence providers sponsoring their products are signed through this service. Mynt keeps the signed copies. The API key is a row of the Key vault too."
-            : "This server's vault key (MYNT_VAULT_KEY) isn't set, so it can't keep the API key. Ask whoever runs the server to set it."
-        }
+        // No description under the toolbar; only the warning when the key can't be kept here.
+        note={status.vaultReady ? undefined : "This server's vault key (MYNT_VAULT_KEY) isn't set, so it can't keep the API key. Ask whoever runs the server to set it."}
         page={paged.page}
         pages={paged.pages}
         total={rows.length}
