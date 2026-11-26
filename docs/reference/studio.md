@@ -77,7 +77,7 @@ On every page outside an app or a product, a sticky header shows the page's name
 
 | Control | What it does |
 |---|---|
-| **Search or ask AI** | Opens search (also Cmd+K or Ctrl+K). See [Docs and search](#docs-and-search) |
+| **Search...** | Opens search (also Cmd+K or Ctrl+K). See [Docs and search](#docs-and-search) |
 | The GitHub control | Your linked GitHub username, or **Link GitHub** |
 | The wallet control | Your linked wallet, or **Link wallet** |
 | **Build** | Opens the Build page |
@@ -506,13 +506,16 @@ The **Docs** button in every header opens `/docs`: Mynt's documentation, built f
 
 ### Search
 
-The header's search field (or Cmd+K, Ctrl+K) opens a modal that searches Studio's pages, the workspace's apps by name or stage, an app's tabs, your financial products, members and audit actions. Arrow keys and Enter move and open.
+The header's search box ("Search...", with its ⌘K key; an icon button named Search on a phone) opens the command bar. So does Cmd+K, or Ctrl+K.
 
-Mynt admins also find the platform admin's sections there.
+- With nothing typed it lists Studio's pages, the workspace's apps and your financial products, each under its section's heading, and a **Members** and an **Audit actions** entry that open their own lists.
+- Typing finds any of them, and also what sits under them: an app's tabs (shown as "the app › the tab"), members and audit actions.
+- Arrow keys move, Enter opens, Esc closes (or steps back out of a list). The bar's foot says so.
+- Mynt admins also find the platform admin's sections there.
 
 ### Ask AI
 
-Type a question in search and **Ask AI** is the first result: a few words, or one word ending in a question mark, of at least 6 characters. Enter closes the search and opens the answer in its own dialog.
+Type a question in the command bar and **Ask AI** is the first result: a few words, or one word ending in a question mark, of at least 6 characters. Enter closes the bar and opens the answer in its own dialog.
 
 - The answer is short (about 120 words), written from your Mynt data only, and streams in as it is written. It reads through Mynt's tools as you, never with an app key, and only with read tools.
 - Each statement cites its source by number. The sources are listed under the answer: the reads the answer was made from, each shown as the Studio page that holds that data. A citation or a source opens its page and closes the dialog. Nothing else in an answer is a link.
@@ -521,6 +524,6 @@ Type a question in search and **Ask AI** is the first result: a few words, or on
 - Questions and answers are never logged.
 - You may ask 20 questions an hour, one at a time. Past that it says the AI summary is unavailable and why.
 - The answer comes from the first model that answers: the configured model, then the fallback model. When neither answers it says the AI summary is unavailable.
-- With no model configured it says "AI is not configured", and search keeps working.
+- With no model configured the bar has no Ask AI entry, and search keeps working.
 
 The platform admin's search has its own Ask AI, for Mynt admins. See [Search and Ask AI](platform-admin.md#search-and-ask-ai).

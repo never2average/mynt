@@ -233,3 +233,53 @@ html:has(#nd-docs-layout):not(:has([data-docs-in-shell])) body {
     display: block;
   }
 }
+
+/* The search (the Cmd+K bar, its header button and the Ask AI dialog; components/kbar, components/search-input.tsx)
+   draws with its own colours, radius and shadow, in light and dark. They are set on what the search draws only
+   (components/kbar/ui.tsx SEARCH_SCOPE); nothing else in Studio reads them. */
+.search-port {
+  --background: oklch(0.9911 0 0);
+  --foreground: oklch(0.2046 0 0);
+  --popover: oklch(0.9911 0 0);
+  --popover-foreground: oklch(0.4386 0 0);
+  --primary: oklch(0.406 0.161 272.2);
+  --primary-foreground: oklch(0.985 0.006 272.2);
+  --muted: oklch(0.9461 0 0);
+  --muted-foreground: oklch(0.2435 0 0);
+  --accent: oklch(0.9461 0 0);
+  --accent-foreground: oklch(0.2435 0 0);
+  --destructive: oklch(0.5 0.1927 32.7272);
+  --border: oklch(0.9037 0 0);
+  --input: oklch(0.9731 0 0);
+  --ring: oklch(0.5 0.129 272.2);
+  --radius: 0.5rem;
+}
+.dark .search-port {
+  --background: oklch(0.2046 0 0);
+  --foreground: oklch(0.9461 0 0);
+  --popover: oklch(0.2393 0 0);
+  --popover-foreground: oklch(0.9288 0 0);
+  --primary: oklch(0.756 0.145 272.2);
+  --primary-foreground: oklch(0.205 0.006 272.2);
+  --muted: oklch(0.2393 0 0);
+  --muted-foreground: oklch(0.7155 0 0);
+  --accent: oklch(0.3132 0 0);
+  --accent-foreground: oklch(0.9851 0 0);
+  --destructive: oklch(0.76 0.15 25.33);
+  --border: oklch(0.2809 0 0);
+  --input: oklch(0.2603 0 0);
+  --ring: oklch(0.606 0.113 272.2);
+}
+/* Colours set on an ancestor are computed there: what the search draws takes its own (a utility still wins). */
+@layer base {
+  .search-port {
+    color: var(--foreground);
+  }
+  .search-port,
+  .search-port * {
+    border-color: var(--border);
+  }
+}
+.search-port .shadow-lg {
+  --tw-shadow: 0px 1px 3px 0px hsl(0 0% 0% / 0.17), 0px 4px 6px -1px hsl(0 0% 0% / 0.17);
+}

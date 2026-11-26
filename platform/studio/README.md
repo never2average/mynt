@@ -91,7 +91,7 @@ Pages are under `app/(studio)` (Studio's shell: sidebar and header) and `app/(pl
 | Settings | `/settings` | `components/workspace-view.tsx`, `components/members-view.tsx`, `components/repositories.tsx`, `components/workspace-settings.tsx`, `lib/workspace-tabs.ts`, `lib/workspaces.ts` | `app/api/workspaces/[workspaceId]`, `app/api/invitations`, `app/api/repositories` |
 | Platform admin | `/platform`, `/platform/<section>`, `/platform/<section>/<id>` | `app/(platform)/layout.tsx`, `components/platform-shell.tsx`, `components/platform-view.tsx`, `components/admin-*.tsx`, `lib/admin.ts`, `lib/admin-members.ts`, `lib/admin-audit.ts`, `lib/admin-risks.ts`, `lib/admin-server.ts` | `app/api/admin/*` |
 | Docs | `/docs`, `/connect` | `app/docs/`, `components/docs/`, `components/connect-guide.tsx`, `lib/docs.ts`, `lib/docs-source.ts` | `app/docs/search-index` |
-| Search and Ask AI | the header (Studio's and the platform admin's) | `components/studio-search.tsx`, `components/ask-ai.tsx`, `lib/studio-search.ts`, `lib/ask.ts`, `lib/ask-answer.ts`, `lib/ask-server.ts`, `lib/admin-ask.ts` | `app/api/ask`, `app/api/admin/ask` |
+| Search and Ask AI | the header (Studio's and the platform admin's) | `components/search-input.tsx`, `components/kbar/`, `lib/studio-search.ts`, `lib/ask.ts`, `lib/ask-answer.ts`, `lib/ask-server.ts`, `lib/admin-ask.ts` | `app/api/ask`, `app/api/admin/ask` |
 | Sign-in | `/api/auth/*`, `/signin-error`, `/signed-out` | `proxy.ts`, `lib/page-gate.ts`, `lib/session.ts`, `lib/session-store.ts`, `lib/tokens.ts` | `app/api/auth/{login,callback,logout}` |
 
 Old addresses and where they go are in `lib/redirects.ts` (applied by `proxy.ts` and `next.config.ts`), `lib/licences-tabs.ts` and `lib/studio-search.ts`:
@@ -245,7 +245,11 @@ Starting a build takes a lock per user and app (130 seconds, longer than listing
 
 ### Ask AI and Earn's assistant
 
-`components/ask-ai.tsx`, `lib/ask.ts`, `lib/ask-answer.ts`, `lib/ask-server.ts`, `lib/admin-ask.ts`, `app/api/ask`, `app/api/admin/ask`, `components/earn-assistant.tsx`, `app/api/earn`.
+`components/kbar/ask-ai.tsx`, `lib/ask.ts`, `lib/ask-answer.ts`, `lib/ask-server.ts`, `lib/admin-ask.ts`, `app/api/ask`, `app/api/admin/ask`, `components/earn-assistant.tsx`, `app/api/earn`.
+
+- The search is a command bar ([kbar](https://github.com/timc1/kbar), MIT) with [Tabler icons](https://github.com/tabler/tabler-icons) (MIT): `components/search-input.tsx` is the header's box, `components/kbar/` the bar, its result rows, its Ask AI entry and dialog. Its actions are built from `lib/studio-search.ts` (`components/kbar/actions.ts`) and loaded when it opens (`components/kbar/sources.ts`).
+- The search has its own primitives (`components/kbar/ui.tsx`: button, text field, dialog, key cap, spinner) and its own colours, radius and shadow, set only on what it draws (`.search-port` in `app/globals.css`). The rest of Studio keeps `components/ui` and its own tokens. `test/search-ui.test.tsx` pins its class strings and markup.
+- With no model configured the bar has no Ask AI entry.
 
 - Ask AI is one question and one short answer. A question typed in search (a few words, or one ending in "?") is offered to Ask AI first; the answer opens in its own dialog, where the question can be edited and asked again. There are no follow-ups, and nothing is kept beyond the visit.
 - It reads the user's Mynt data through Mynt's tools as the signed-in user, never an app key. Each read is a numbered source, shown as the page that holds that data; the model cites sources by number, and the citations and sources are the answer's only links.

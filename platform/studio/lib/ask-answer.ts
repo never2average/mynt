@@ -1,7 +1,7 @@
 // Ask AI's answer, as the browser and the server share it: one question, one short answer from Mynt's own data with
 // numbered citations and the sources under it. The sources are the reads the answer was made from, each shown as the
 // page that holds that data (a studio page, or a platform admin section). Pure functions only: the dialog
-// (components/ask-ai.tsx) and the routes (app/api/ask, app/api/admin/ask through lib/ask-server.ts) both import this.
+// (components/kbar/ask-ai.tsx) and the routes (app/api/ask, app/api/admin/ask through lib/ask-server.ts) both import this.
 
 export type AskArea = "studio" | "admin";
 export interface AskSource { n: number; title: string; heading: string | null; href: string }

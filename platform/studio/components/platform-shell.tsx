@@ -15,7 +15,8 @@ import { ArrowLeft, Building2, Gauge, History, Layers, ShieldAlert, ShieldCheck,
 import { InvitePersonButton } from "@/components/admin-members"
 import { DocsButton } from "@/components/connect-agent"
 import { NavUser } from "@/components/nav-user"
-import { PlatformSearchProvider, SearchTrigger } from "@/components/studio-search"
+import KBar from "@/components/kbar"
+import SearchInput from "@/components/search-input"
 import { ThemeSwitcher } from "@/components/theme-switcher"
 import { Separator } from "@/components/ui/separator"
 import {
@@ -107,9 +108,9 @@ export function PlatformSidebarView({ pathname, account, ...props }: { pathname:
 }
 
 // The header beside it: the sidebar's toggle, the section's name, then its actions (the Overview's Invite person), the
-// studio header's search field (Cmd+K; here it searches the platform admin, components/studio-search.tsx), the labelled
+// studio header's search field (Cmd+K; here it searches the platform admin, components/kbar), the labelled
 // Docs button (/docs) and the theme switcher. No scope tag (everything here is across Mynt) and no second Back to Studio
-// (the sidebar's foot has it). The search field is always labelled, never an icon alone.
+// (the sidebar's foot has it). The search is a box from tablet width up and an icon button named Search on a phone.
 export function PlatformHeader({ title, actions = null }: { title: string; actions?: React.ReactNode }) {
   return (
     <header className="sticky top-0 z-20 flex h-(--header-height) shrink-0 items-center gap-2 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80" data-platform-header>
@@ -119,7 +120,7 @@ export function PlatformHeader({ title, actions = null }: { title: string; actio
         <h1 className="truncate text-base font-medium">{title}</h1>
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {actions}
-          <SearchTrigger />
+          <SearchInput />
           <DocsButton />
           <ThemeSwitcher />
         </div>
@@ -142,7 +143,7 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
     }
   }, [])
   return (
-    <PlatformSearchProvider>
+    <KBar area="admin">
       <SidebarProvider className="h-full min-h-0" style={{ "--sidebar-width": "16rem", "--header-height": "3rem" } as React.CSSProperties} data-platform-shell>
         <PlatformSidebarView variant="inset" pathname={pathname} account={account} />
         <SidebarInset className="min-h-0 overflow-hidden">
@@ -150,6 +151,6 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
           <div className="flex min-h-0 flex-1 flex-col">{children}</div>
         </SidebarInset>
       </SidebarProvider>
-    </PlatformSearchProvider>
+    </KBar>
   )
 }

@@ -179,7 +179,8 @@ describe("the theme", () => {
     expect(new Set(active)).toEqual(new Set(["bg-sidebar-accent", "text-sidebar-accent-foreground", "font-medium"]));
     expect(sidebar).not.toMatch(/data-\[active=true\]:[\w-]*(primary|ring|mint)/);
     // Text in the accent colour uses the link token, never mint on white.
-    for (const f of ["components/ask-ai-markdown.tsx", "components/ui/button.tsx", "components/studio-search.tsx", "components/ask-ai.tsx"])
+    // (The search, components/kbar, draws with its own primary, set on what it draws only: app/globals.css .search-port.)
+    for (const f of ["components/ask-ai-markdown.tsx", "components/ui/button.tsx"])
       expect(readFileSync(join(root, f), "utf8"), f).not.toMatch(/\btext-primary\b(?!-)/);
     // Semantic colours stay: destructive red, the coverage map's blues.
     expect(themes.light.destructive).toMatch(/^oklch\(0\.577 0\.245 27/);
@@ -196,7 +197,7 @@ describe("the theme", () => {
 describe("no logo in the UI", () => {
   it("has no wordmark or logo component: the app icon is the only brand mark", () => {
     expect(existsSync(join(root, "components/brand"))).toBe(false);
-    for (const f of ["components/app-sidebar.tsx", "components/chat-welcome.tsx", "components/ask-ai.tsx", "app/signed-out/page.tsx", "app/signin-error/page.tsx", "app/opengraph-image.tsx"]) {
+    for (const f of ["components/app-sidebar.tsx", "components/chat-welcome.tsx", "components/kbar/ask-ai.tsx", "components/kbar/index.tsx", "components/search-input.tsx", "app/signed-out/page.tsx", "app/signin-error/page.tsx", "app/opengraph-image.tsx"]) {
       const code = readFileSync(join(root, f), "utf8");
       expect(code, f).not.toMatch(/MyntLogo|MyntMark|>mynt</);
     }

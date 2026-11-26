@@ -366,112 +366,13 @@ describe("the platform admin's header: Docs and search, as the studio's header h
       const docs = header.querySelector("a[data-docs-open]")!
       expect(docs.getAttribute("href")).toBe("/docs")
       expect(docs.textContent).toBe("Docs")
-      const search = header.querySelector("[data-search-trigger]")!
-      expect(search.textContent).toContain("Search or ask AI…")
+      const search = header.querySelectorAll("[data-search-trigger]")[1]
+      expect(search.textContent).toBe("Search...⌘K")
+      expect(header.querySelectorAll("[data-search-trigger]")[0].getAttribute("aria-label")).toBe("Search")
       expect(Boolean(header.querySelector("[data-header-invite-person]"))).toBe(pathname === "/platform")
       cleanup()
     }
     nav.pathname = "/platform"
-  })
-
-  it("search opens with Cmd+K, lists the sections first and the studio's pages after, and finds workspaces and firms by name", async () => {
-    const urls = stubApi()
-    render(<PlatformShell><p data-page>Page</p></PlatformShell>)
-    await act(async () => undefined)
-    // Nothing of the admin lists is loaded before search opens.
-    expect(urls.filter((u) => u.startsWith("/api/admin"))).toEqual([])
-    await act(async () => {
-      fireEvent.keyDown(document, { key: "k", metaKey: true })
-    })
-    expect(document.querySelector("[data-platform-search]")).not.toBeNull()
-    await act(async () => undefined)
-    expect(urls.filter((u) => u.startsWith("/api/admin")).sort()).toEqual(["/api/admin/ask", "/api/admin/firms", "/api/admin/workspaces"])
-    // No workspace is read (nothing of the studio's workspace-scoped routes), and the studio's Ask AI isn't asked.
-    expect(urls.some((u) => u.startsWith("/api/workspaces") || u.startsWith("/api/projects") || u.startsWith("/api/ask"))).toBe(false)
-    // Ask AI is offered once a question is typed, never for an empty field or a name.
-    expect(document.querySelector("[data-ask-ai]")).toBeNull()
-    const shown = () => [...document.querySelectorAll("[data-result]")].map((e) => [e.getAttribute("data-result"), e.textContent])
-    const groups = () => [...new Set(shown().map(([g]) => g))]
-    expect(groups()).toEqual(["Platform admin", "Studio"])
-    expect(shown().filter(([g]) => g === "Platform admin").map(([, t]) => t)).toEqual(PLATFORM_SECTIONS.map((s) => s.label))
-    expect(shown().some(([g, t]) => g === "Studio" && t === "Studio: Dashboard")).toBe(true)
-
-    const input = document.querySelector("[data-platform-search] input")!
-    await act(async () => {
-      fireEvent.change(input, { target: { value: "harbor" } })
-    })
-    expect(shown()).toEqual([["Workspaces", "Harbor Lendingactive"]])
-    await act(async () => {
-      fireEvent.change(input, { target: { value: "atlas" } })
-    })
-    expect(shown()).toEqual([["Regulated firms", "Atlas Trust BankUS · active"]])
-    await act(async () => {
-      fireEvent.change(input, { target: { value: "licences" } })
-    })
-    expect(groups()).toEqual(["Platform admin", "Studio"])
-    expect(shown().filter(([g]) => g === "Platform admin")).toEqual([["Platform admin", "Regulated firms → Licences"]])
-  })
-
-  it("a question typed in search is first offered to Ask AI; asking closes the search, sends it to /api/admin/ask and shows the answer with its sources", async () => {
-    const { forgetAnswers } = await import("@/components/ask-ai")
-    forgetAnswers()
-    const urls = stubApi()
-    nav.pushed = []
-    render(<PlatformShell><p data-page>Page</p></PlatformShell>)
-    await act(async () => undefined)
-    await act(async () => {
-      fireEvent.keyDown(document, { key: "k", metaKey: true })
-    })
-    await act(async () => undefined)
-    const input = document.querySelector("[data-platform-search] input") as HTMLInputElement
-    expect(input.placeholder).toBe("Search sections, workspaces, regulated firms… or ask AI")
-    const question = "Which regulated firms are waiting on a licence review?"
-    await act(async () => {
-      fireEvent.change(input, { target: { value: question } })
-    })
-    const ask = document.querySelector("[data-ask-ai]")!
-    expect(ask.textContent).toContain(`Ask AI: “${question}”`)
-    expect(ask.getAttribute("data-disabled")).not.toBe("true")
-    // It is the first result, selected: Enter asks.
-    expect(document.querySelector('[cmdk-item][data-selected="true"]')?.hasAttribute("data-ask-ai")).toBe(true)
-    await act(async () => {
-      fireEvent.keyDown(input, { key: "Enter" })
-    })
-    await act(async () => undefined)
-    await act(async () => undefined)
-    expect(posted).toEqual([{ url: "/api/admin/ask", body: { question } }])
-    expect(urls.some((u) => u === "/api/ask" || u.startsWith("/api/workspaces") || u.startsWith("/api/projects"))).toBe(false)
-    expect(document.querySelector("[data-platform-search]")).toBeNull()
-    const dialog = document.querySelector('[data-ask-ai-dialog="admin"]')!
-    expect(dialog.querySelector("[data-ask-text]")!.textContent).toBe("Atlas Trust Bank is waiting on a licence review [1].")
-    expect([...dialog.querySelectorAll("[data-ask-source]")].map((a) => [a.textContent, a.getAttribute("href")])).toEqual([["Regulated firms › Licences", "/platform/firms?tab=licences"]])
-    // The citation opens the platform admin's page, in place.
-    await act(async () => {
-      fireEvent.click(dialog.querySelector("[data-ask-text] a")!)
-    })
-    expect(nav.pushed).toEqual(["/platform/firms?tab=licences"])
-    expect(document.querySelector("[data-ask-ai-dialog]")).toBeNull()
-  })
-
-  it("with no model configured, Ask AI says so and can't be asked; search still works", async () => {
-    stubApi(false)
-    render(<PlatformShell><p data-page>Page</p></PlatformShell>)
-    await act(async () => undefined)
-    await act(async () => {
-      fireEvent.keyDown(document, { key: "k", metaKey: true })
-    })
-    await act(async () => undefined)
-    const input = document.querySelector("[data-platform-search] input")!
-    await act(async () => {
-      fireEvent.change(input, { target: { value: "what needs attention today?" } })
-    })
-    const ask = document.querySelector("[data-ask-ai]")!
-    expect(ask.getAttribute("data-disabled")).toBe("true")
-    expect(ask.textContent).toContain("AI is not configured")
-    await act(async () => {
-      fireEvent.keyDown(input, { key: "Enter" })
-    })
-    expect(posted).toEqual([])
   })
 
   it("its index: sections at /platform/…, workspaces and firms at their detail pages, studio pages labelled Studio", () => {

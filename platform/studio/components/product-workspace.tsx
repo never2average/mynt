@@ -31,7 +31,7 @@ import { RiskRegisterSection } from "@/components/risk-register"
 import { demoteMove, ProductStageSheet, promoteMove, type ProductMove } from "@/components/product-stage-sheet"
 import { NewAppButton } from "@/components/site-header"
 import { DeveloperOnly } from "@/components/studio-gates"
-import { SearchTrigger } from "@/components/studio-search"
+import SearchInput from "@/components/search-input"
 import { ThemeSwitcher } from "@/components/theme-switcher"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -113,12 +113,7 @@ export function ProductHeader({ product, error = null, onMove, onArchive, onBack
         )}
       </div>
       <div className="flex shrink-0 items-center gap-2">
-        <span className="flex md:hidden">
-          <SearchTrigger compact />
-        </span>
-        <span className="hidden md:flex">
-          <SearchTrigger className="md:w-40 lg:w-48 xl:w-56" />
-        </span>
+        <SearchInput />
         <DeveloperOnly>
           <span className="hidden md:flex">
             <NewAppButton />
