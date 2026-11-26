@@ -1,6 +1,6 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { askToolDefs, type AskTool } from "@/lib/ask";
-import { answerQuestion, askJson as json, readQuestion } from "@/lib/ask-server";
+import { answerQuestion, askJson as json, readAsk } from "@/lib/ask-server";
 import { askConfigured } from "@/lib/llm";
 import { NotAllowedError } from "@/lib/mynt-client";
 import { currentSession, fromOwnOrigin } from "@/lib/session";
@@ -28,8 +28,8 @@ export async function POST(req: Request) {
   const session = await currentSession();
   if (!session?.tokens) return json({ error: "auth_required" }, 401);
   if (!askConfigured()) return json({ error: "not_configured", message: "AI is not configured." }, 503);
-  const question = await readQuestion(req);
-  if (typeof question !== "string") return question;
+  const asked = await readAsk(req);
+  if (asked instanceof Response) return asked;
 
   let mynt: Client;
   try {
@@ -52,7 +52,7 @@ export async function POST(req: Request) {
     area: "studio",
     bucket: "ask",
     what: "Ask AI",
-    question,
+    asked,
     session,
     mynt,
     prepare: async () => {

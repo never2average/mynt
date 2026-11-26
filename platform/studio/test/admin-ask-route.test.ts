@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "@/lib/session-store";
 import { ADMIN_ASK_SYSTEM_PROMPT, ADMIN_ASK_TOOLS, isAdminAskTool } from "@/lib/admin-ask";
 import { askToolDefs } from "@/lib/ask";
-import { ADMIN_ASK_SOURCES, sourceOf } from "@/lib/ask-answer";
+import { ASK_READS, sourcesOf } from "@/lib/ask-sources";
 import { ADMIN_TOOLS, STUDIO_TOOLS } from "@/lib/studio-tools";
 
 // The platform admin's Ask AI (app/api/admin/ask): a fake Mynt, a fake model and a fake sign-in.
@@ -71,7 +71,7 @@ vi.mock("@/lib/mynt-client", () => {
     callMyntTool: async (_c: unknown, name: string, args: Record<string, unknown>) => {
       fake.calls.push({ name, args });
       if (name === "whoami") return { isError: false, text: JSON.stringify({ id: "u1", effective_roles: fake.roles }) };
-      if (name === "list_license_reviews") return { isError: false, text: JSON.stringify({ reviews: [{ firm: "Atlas Trust Bank", status: "pending" }] }) };
+      if (name === "list_license_reviews") return { isError: false, text: JSON.stringify([{ entity: "Atlas Trust Bank", entity_id: FIRM, status: "pending", api_key: "mynt_live_abcdefghijklmnop" }]) };
       if (name === "ops_status") return { isError: false, text: JSON.stringify({ attention: [] }) };
       if (name === "admin_get_workspace" || name === "get_regulated_firm_onboarding" || name === "list_risks") return { isError: false, text: "{}" };
       return { isError: true, text: JSON.stringify({ error: `unexpected ${name}` }) };
@@ -165,7 +165,7 @@ describe("the platform admin's Ask AI tools", () => {
       expect(t, t).toMatch(/^(ops_status|audit_log|(admin_)?(list|get)_[a-z_]+)$/);
       expect(t, t).not.toMatch(/^(set_|add_|update_|remove_|delete_|register_|invite_|revoke_|approve_|decline_|review_|run_|announce_|withdraw_|retire_|validate_|suspend_|archive_)/);
       expect(WRITES.test(t), t).toBe(false);
-      expect(Object.keys(ADMIN_ASK_SOURCES), t).toContain(t);
+      expect(Object.keys(ASK_READS.admin), t).toContain(t);
     }
     // Every admin tool that changes something, and the key vault's list, is refused.
     const writes = Object.keys(ADMIN_TOOLS).filter((t) => WRITES.test(t));
@@ -175,11 +175,11 @@ describe("the platform admin's Ask AI tools", () => {
   });
 
   it("each read is shown as the platform admin section that holds it", () => {
-    for (const t of ADMIN_ASK_TOOLS) expect(sourceOf("admin", t, {}).href, t).toMatch(/^\/platform(\/|\?|$)/);
-    expect(sourceOf("admin", "admin_get_workspace", { workspace_id: WS }).href).toBe(`/platform/workspaces/${WS}`);
-    expect(sourceOf("admin", "admin_get_workspace", { workspace_id: "../x" }).href).toBe("/platform/workspaces");
-    expect(sourceOf("admin", "get_regulated_firm_onboarding", { entity_id: FIRM }).href).toBe(`/platform/firms/${FIRM}`);
-    expect(sourceOf("admin", "list_license_reviews", {})).toEqual({ title: "Regulated firms", heading: "Licences", href: "/platform/firms?tab=licences" });
+    for (const t of ADMIN_ASK_TOOLS) expect(sourcesOf("admin", t, {}, {})[0].href, t).toMatch(/^\/platform(\/|\?|$)/);
+    expect(sourcesOf("admin", "admin_get_workspace", { workspace_id: WS }, { workspace: { name: "Harbor Lending" } })).toEqual([{ title: "Workspaces › Harbor Lending", href: `/platform/workspaces/${WS}` }]);
+    expect(sourcesOf("admin", "admin_get_workspace", { workspace_id: "../x" }, {})[0].href).toBe("/platform/workspaces");
+    expect(sourcesOf("admin", "get_regulated_firm_onboarding", { entity_id: FIRM }, {})[0].href).toBe(`/platform/firms/${FIRM}`);
+    expect(sourcesOf("admin", "list_license_reviews", {}, [])).toEqual([{ title: "Regulated firms › Licences", href: "/platform/firms?tab=licences" }]);
   });
 
   it("its instructions: across Mynt, from tool results only, read-only, no secrets, where to act", () => {
@@ -225,14 +225,19 @@ describe("/api/admin/ask", () => {
   });
 
   it("answers an admin from Mynt's reads, with the platform's instructions and its sources, and no workspace anywhere", async () => {
-    fake.steps = [{ text: "Checking.", tool: { name: "list_license_reviews", input: { status: "pending" } } }, { text: "Atlas Trust Bank is waiting on a licence review [1]." }];
+    fake.steps = [{ text: "Checking.", tool: { name: "list_license_reviews", input: { status: "pending" } } }, { text: "Atlas Trust Bank is waiting on a licence review [2]." }];
     const res = await ask("Which regulated firms are waiting on a licence review?");
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/event-stream");
     const out = await chunks(res);
-    expect(out.map((c) => c.type)).toEqual(["delta", "reset", "sources", "delta", "done"]);
-    expect(out[2].sources).toEqual([{ n: 1, title: "Regulated firms", heading: "Licences", href: "/platform/firms?tab=licences" }]);
-    expect(out.at(-1)).toMatchObject({ type: "done", answer: "Atlas Trust Bank is waiting on a licence review [1].", model: "claude-opus-5-5", reason: null });
+    expect(out.map((c) => c.type)).toEqual(["delta", "reset", "tool_start", "sources", "tool_end", "delta", "done"]);
+    expect(out[2]).toEqual({ type: "tool_start", id: "s1", tool: "list_license_reviews", label: "Read licence reviews", args: "status: pending" });
+    expect((out[3].sources as { n: number; title: string; href: string; tool: string }[]).map(({ n, title, href, tool }) => ({ n, title, href, tool }))).toEqual([
+      { n: 1, title: "Regulated firms › Licences", href: "/platform/firms?tab=licences", tool: "list_license_reviews" },
+      { n: 2, title: "Regulated firms › Atlas Trust Bank › Licences › pending", href: `/platform/firms/${FIRM}`, tool: "list_license_reviews" },
+    ]);
+    expect(out[4]).toMatchObject({ type: "tool_end", id: "s1", ok: true, summary: "1 licence" });
+    expect(out.at(-1)).toMatchObject({ type: "done", answer: "Atlas Trust Bank is waiting on a licence review [2].", model: "claude-opus-5-5", reason: null, uncited: false });
     // Only the pinned reads are offered, with the platform's own instructions.
     expect(fake.requests[0].tools.map((t) => t.name).sort()).toEqual([...PINNED].sort());
     expect(fake.requests[0].system[0].text).toBe(ADMIN_ASK_SYSTEM_PROMPT);
@@ -241,9 +246,12 @@ describe("/api/admin/ask", () => {
     expect(fake.calls.filter((c) => c.name !== "whoami")).toEqual([{ name: "list_license_reviews", args: { status: "pending" } }]);
     expect(fake.calls.some((c) => /^list_workspaces$|^list_my_|workspace_members|get_workspace_/.test(c.name))).toBe(false);
     expect(JSON.stringify(fake.calls)).not.toContain("workspace_id");
-    expect(JSON.stringify(fake.requests[1].messages)).toContain("Source [1] (Regulated firms, Licences):");
-    // The browser sees the source, never Mynt's reply.
-    expect(JSON.stringify(out)).not.toContain("reviews");
+    expect(JSON.stringify(fake.requests[1].messages)).toContain("[2] Regulated firms › Atlas Trust Bank › Licences › pending");
+    // What looks like a secret never reaches the browser or the model, whatever a reply holds.
+    expect(out[4].result).toContain("Atlas Trust Bank");
+    expect(out[4].result).toContain("[hidden]");
+    expect(JSON.stringify(out)).not.toContain("mynt_live_");
+    expect(JSON.stringify(fake.requests[1].messages)).not.toContain("mynt_live_");
   });
 
   it("never runs a write, a studio tool or anything off the list, whatever the model asks for", async () => {
@@ -272,7 +280,9 @@ describe("/api/admin/ask", () => {
     const out = await chunks(await ask("Any risk reviews overdue?"));
     expect(fake.calls.filter((c) => c.name === "list_risks")).toEqual([{ name: "list_risks", args: { subject_type: "platform", subject_id: "mynt" } }]);
     expect(JSON.stringify(fake.requests[1].messages)).toContain("Not sent to Mynt");
-    expect(out.find((c) => c.type === "sources")!.sources).toEqual([{ n: 1, title: "Risk register", heading: "Mynt's own risks", href: "/platform/risk-register" }]);
+    expect((out.find((c) => c.type === "sources")!.sources as { n: number; title: string; href: string }[]).map(({ n, title, href }) => ({ n, title, href }))).toEqual([{ n: 1, title: "Risk register › Mynt's own risks", href: "/platform/risk-register" }]);
+    // The refused call is a step that failed, with why; the one that ran is done.
+    expect(out.filter((c) => c.type === "tool_end").map((c) => [c.ok, c.summary])).toEqual([[false, "Failed"], [true, "0 risks"]]);
   });
 
   it("falls back to the next model when one fails, and says so when none answers", async () => {
