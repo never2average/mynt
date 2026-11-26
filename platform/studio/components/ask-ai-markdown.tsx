@@ -2,7 +2,7 @@
 
 // Ask AI's answers: the studio's markdown (components/assistant-ui/markdown-text.tsx), except
 // that a link to a studio page (a same-origin relative path, lib/studio-search.ts isStudioPath)
-// is a real link, which the answer follows in place (components/ask-ai.tsx AskAiDialog). Any other link is its text only, and images
+// is a real link, which the answer follows in place (components/kbar/markdown.tsx is the search answer's own). Any other link is its text only, and images
 // are their alt text: an answer can't send the browser, or a request, anywhere else.
 import "@assistant-ui/react-markdown/styles/dot.css";
 

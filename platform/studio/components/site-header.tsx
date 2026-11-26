@@ -6,7 +6,7 @@
 import Link from "next/link"
 import { Plus } from "lucide-react"
 
-import { SearchTrigger } from "@/components/studio-search"
+import SearchInput from "@/components/search-input"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { SidebarTrigger } from "@/components/ui/sidebar"
@@ -44,12 +44,7 @@ export function SiteHeader({ title, children }: { title: string; children?: Reac
           {children}
           {/* As the app's top bar has them: labelled Search and New app where there's room, icons
               below md; GitHub and the wallet from md up (the page's title keeps its room on a phone). */}
-          <span className="hidden md:flex">
-            <SearchTrigger />
-          </span>
-          <span className="flex md:hidden">
-            <SearchTrigger compact />
-          </span>
+          <SearchInput />
           <DeveloperOnly>
             <span className="hidden md:flex">
               <GithubControl />

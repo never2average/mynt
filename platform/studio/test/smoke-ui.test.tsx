@@ -111,7 +111,7 @@ describe("workspaces in requests", () => {
     expect(withWorkspace("/api/projects", { id: "w1" })).toBe("/api/projects?workspace=w1");
     expect(withWorkspace("/api/audit?class=financial", { id: "w 1" })).toBe("/api/audit?class=financial&workspace=w%201");
     expect([isRealWorkspaceId("personal"), isRealWorkspaceId("w1"), isRealWorkspaceId("../x")]).toEqual([false, true, false]);
-    for (const f of ["lib/use-compliance.ts", "components/app-sidebar.tsx", "components/studio-search.tsx", "app/(studio)/page.tsx", "app/(studio)/audits/page.tsx"])
+    for (const f of ["lib/use-compliance.ts", "components/app-sidebar.tsx", "components/kbar/sources.ts", "app/(studio)/page.tsx", "app/(studio)/audits/page.tsx"])
       expect(readFileSync(join(root, f), "utf8"), f).not.toMatch(/workspace=\$\{/);
   });
 

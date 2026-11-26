@@ -16,7 +16,7 @@ import { useCallback } from "react";
 import { AppSidebar } from "@/components/app-sidebar";
 import { SiteHeader } from "@/components/site-header";
 import { CreateWorkspace, DeveloperGate, pageGateFor } from "@/components/studio-gates";
-import { StudioSearchProvider } from "@/components/studio-search";
+import KBar from "@/components/kbar";
 import { useWorkspace, WorkspaceProvider } from "@/components/workspace-context";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -62,7 +62,7 @@ export function StudioShell({ title: fixedTitle, children }: { title?: string; c
   const access = useStudioAccess();
   return (
     <WorkspaceProvider enabled={access?.developer === true}>
-      <StudioSearchProvider>
+      <KBar>
         <SidebarProvider
           className="h-full min-h-0"
           style={{ "--sidebar-width": "16rem", "--header-height": "3rem" } as React.CSSProperties}
@@ -75,7 +75,7 @@ export function StudioShell({ title: fixedTitle, children }: { title?: string; c
             </div>
           </SidebarInset>
         </SidebarProvider>
-      </StudioSearchProvider>
+      </KBar>
     </WorkspaceProvider>
   );
 }

@@ -21,7 +21,7 @@ The platform admin has its own layout, not Studio's.
 
 - Its sidebar is titled "Mynt platform admin" and lists eight sections, each at its own address. There is no workspace switcher and there are no app folders.
 - The labelled Back to Studio at the foot of the sidebar returns to Studio.
-- The header has the section's name, a search field (Cmd+K, "Search or ask AI…") that searches the platform admin and asks its Ask AI, a Docs button and the theme switcher. On the Overview it also has Invite person. There is no scope tag.
+- The header has the section's name, a search box ("Search...", Cmd+K) that opens the command bar, which searches the platform admin and asks its Ask AI, a Docs button and the theme switcher. On the Overview it also has Invite person. There is no scope tag.
 
 | Section | Address |
 | --- | --- |
@@ -222,7 +222,7 @@ The register's routes are `GET /api/admin/risks?area=<area>` and `POST /api/admi
 
 ### Search and Ask AI
 
-The header's search field (or Cmd+K, Ctrl+K) searches the platform admin's sections, every workspace and regulated firm by name, and Studio's pages. Arrow keys and Enter move and open.
+The header's search box (or Cmd+K, Ctrl+K) opens the command bar, as in Studio. With nothing typed it lists the platform admin's sections, then Studio's pages. Typing also finds every workspace and regulated firm by name, each shown under its section ("Workspaces › the workspace"), and the Licences tab under Regulated firms. Arrow keys move, Enter opens, Esc closes.
 
 Type a question and **Ask AI** is the first result, as in Studio's search. It opens a short answer in its own dialog, with numbered citations and its sources under it. Each source is the platform admin section that holds the data, and opens it.
 
@@ -233,7 +233,7 @@ It answers a Mynt admin's questions across all workspaces and firms: what needs 
 - **It never shows a secret.** Settings come back as names and non-secret values, e-signature as whether a key is set, and people as names, emails and roles.
 - **Only Mynt admins reach it.** `/api/admin/ask` is a 404 for anyone else. Mynt checks the admin role again on every read.
 - **Its limits are Studio's**, counted apart: 20 questions an hour, one at a time. Questions and answers are never logged.
-- With no model configured it says "AI is not configured", and search keeps working.
+- With no model configured the bar has no Ask AI entry, and search keeps working.
 
 It calls Mynt as the signed-in admin through these reads only (`ADMIN_ASK_TOOLS` in `platform/studio/lib/admin-ask.ts`), each with the Admin area's strict arguments:
 

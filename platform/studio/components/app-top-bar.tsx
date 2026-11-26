@@ -32,7 +32,7 @@ import { DocsButton } from "@/components/connect-agent";
 import { ThemeSwitcher } from "@/components/theme-switcher";
 import { WalletControl } from "@/components/wallet-control";
 import { NewAppButton } from "@/components/site-header";
-import { SearchTrigger } from "@/components/studio-search";
+import SearchInput from "@/components/search-input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -124,12 +124,7 @@ export function AppTopBar({ appId = null, appName, stage, backLabel, onBack, pre
 
       {/* As the page header has them: labelled Search and New app where there's room, icons below md. */}
       <div className="flex shrink-0 items-center gap-2">
-        <span className="flex md:hidden">
-          <SearchTrigger compact />
-        </span>
-        <span className="hidden md:flex">
-          <SearchTrigger className="md:w-40 lg:w-48 xl:w-64" />
-        </span>
+        <SearchInput />
         <DeveloperOnly>
           {!isMobile && <GithubControl />}
           {!isMobile && <WalletControl compact />}
