@@ -132,7 +132,9 @@ Engineering notes that hold for every section:
 - Each change calls an admin tool through its own allow-list, `ADMIN_TOOLS` in `lib/studio-tools.ts`, called only through `callAdminTool` for an admin's session.
 - The members tables are `WorkspaceMembersTable` and `FirmMembersTable` in `components/admin-members.tsx`. The members routes take an `action`. For a workspace: `invite`, `change_role`, `remove` (with `confirm: true`) or `revoke_invite`. For a firm: `invite`, `change_role` (`firmRoleChange` in `lib/admin-members.ts`) or `remove` (with the email typed again).
 - The seven risk-area tabs are `components/risk-area-tabs.tsx`, from `RISK_AREAS` in `lib/risk-register.ts`; the tab is `?tab=<area>`.
-- Every section of a Risk register tab is a table: the register is `AdminList` over `AdminTable`, Across apps and products is `ListLayout` over `AdminTable`, and each signal is an `AdminTable` with its own columns (`areaSignalsFrom` in `lib/admin-risks.ts`). `AdminTable`'s `unavailable` gives the one row "Not available." with why.
+- A Risk register tab is one table filling the page: `AdminList` over one `AdminTable`. `registerItemsFrom` in `lib/admin-risks.ts` turns Mynt's register, the apps' and products' risks and the area's signals (`areaSignalsFrom`) into its rows, each with its source in words. A part Mynt can't answer, or a signal it doesn't measure, is one row with the status "Not available" and the reason in Detail.
+- A Risk models tab is one table too. On the Regulated product risk tab it also holds the products' own models, with Source and Type columns.
+- `AdminTable`'s `opens` says which rows a click opens, for a table whose rows come from several sources. Its `unavailable` gives a whole table the one row "Not available." with why.
 - `audit_log` takes no filters and no cursor, so the Audit trails section searches, filters and pages its newest 500 entries in the browser.
 - A Mynt without a section's tool makes the section say it "isn't available yet" instead of failing.
 

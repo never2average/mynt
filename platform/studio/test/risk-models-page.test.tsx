@@ -6,8 +6,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 // The platform admin's Risk models (/platform/risk-models): seven risk-area tabs, each a list of Mynt's own models in
 // that area (status in words, owner, version, last validated, next validation due with "overdue" in words) with a
 // labelled Add risk model; a model's page (/platform/risk-models/<id>) has its metadata card with Edit model, Record
-// validation and Retire model (each a sheet posting to its route), then Definition, Validations and Versions. The
-// Regulated product risk tab also lists financial products' own risk models, read-only, linked to their firm.
+// validation and Retire model (each a sheet posting to its route), then Definition, Validations and Versions. Each
+// tab is ONE table; the Regulated product risk tab's also holds financial products' own risk models, read-only, with
+// a Source column linked to their firm.
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/platform/risk-models",
@@ -44,6 +45,8 @@ const fetcher = () => {
 const click = async (sel: string) => act(async () => void fireEvent.click(document.querySelector(sel)!));
 const submit = (sel: string) => act(async () => void fireEvent.submit(document.querySelector(sel)!));
 const change = (sel: string, value: string) => fireEvent.change(document.querySelector(sel)!, { target: { value } });
+const heads = (sel: string) => [...document.querySelectorAll(`${sel} thead th`)].map((th) => th.textContent);
+const bodyRows = (sel: string) => [...document.querySelectorAll(`${sel} tbody tr`)].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent));
 
 const MYNT_MODEL = {
   id: M1,
@@ -124,7 +127,7 @@ describe("the list", () => {
     const html = renderToStaticMarkup(<RiskModelsAreaView data={data()} />);
     for (const s of ["Pool liquidity coverage", "Active: in use", "Draft: not yet in use", "Boss", "No owner", "Version 2", "2026-06-01: Passed with findings", "Never validated", "2026-09-01 (overdue)", "1 model is overdue for validation.", "data-add-risk-model", "Add risk model</button>", `data-open-model="${M1}"`, "Open</button>", "Export CSV", "Search financial risk models"]) expect(html).toContain(s);
     // Only the Regulated product risk tab lists products' own models.
-    expect(html).not.toContain("data-product-risk-models");
+    expect(html).not.toContain("data-model-source");
   });
 
   it("a row opens the model's page; the status filter narrows the table", async () => {
@@ -137,43 +140,87 @@ describe("the list", () => {
     expect(document.querySelectorAll("[data-row]")).toHaveLength(1);
   });
 
-  it("the Regulated product risk tab also lists products' own risk models, read-only, linked to their firm", () => {
+  it("every tab is exactly one table under one toolbar, filling the page: no section headings, no second table", () => {
     const rows = models.productModelsFrom({ models: [{ product: { id: "fd", name: "Fixed deposit" }, firm: { id: FIRM, name: "Builder Inc" }, model: { id: "pd", name: "PD scorecard", purpose: "fraud_score" } }] });
-    const html = renderToStaticMarkup(<RiskModelsAreaView data={data("regulated_product", rows)} />);
-    for (const s of ["Product risk models", "Fixed deposit", "Builder Inc", "PD scorecard", "Fraud score", `href="/platform/firms/${FIRM}?tab=products"`]) expect(html).toContain(s);
-    const none = renderToStaticMarkup(<RiskModelsAreaView data={data("regulated_product", { available: false, reason: "Reading financial products' own risk models comes with Mynt's next update." })} />);
-    expect(none).toContain("Not available. Reading financial products");
+    for (const area of ["financial", "compliance", "third_party", "operations", "business_process", "technology", "regulated_product"] as const) {
+      const view = render(<RiskModelsView area={area} onArea={() => undefined} body={<RiskModelsAreaView data={data(area, area === "regulated_product" ? rows : null)} />} />);
+      expect(document.querySelectorAll("table"), area).toHaveLength(1);
+      expect(document.querySelectorAll("[data-toolbar]"), area).toHaveLength(1);
+      expect(document.querySelectorAll("[data-pager]"), area).toHaveLength(1);
+      expect(document.querySelectorAll("h1, h2, h3, section"), area).toHaveLength(0);
+      expect(heads("[data-risk-models-area]"), area).toEqual(area === "regulated_product" ? ["Model", "Source", "Type", "Status", "Owner", "Version", "Last validated", "Next validation due", "Action"] : ["Model", "Status", "Owner", "Version", "Last validated", "Next validation due", "Action"]);
+      for (const sel of ["[data-platform-risk-models]", "[data-risk-models-area]", "[data-admin-list]"]) {
+        expect(document.querySelector(sel)!.className, `${area} ${sel}`).toContain("min-h-0");
+        expect(document.querySelector(sel)!.className, `${area} ${sel}`).toContain("flex-1");
+      }
+      expect(document.querySelector("[data-table-view]")!.className).toContain("overflow-auto");
+      expect([...document.querySelectorAll("[data-toolbar] button")].map((b) => b.textContent!.trim()), area).toEqual(["Filters", "Import", "Export CSV", "Add risk model"]);
+      for (const b of document.querySelectorAll("button, a")) expect(b.textContent!.trim(), b.outerHTML).not.toBe("");
+      view.unmount();
+    }
   });
 
-  it("Product risk models is a table with its own search and pager; what Mynt can't answer is one row under its headers", () => {
-    const heads = (sel: string) => [...document.querySelectorAll(`${sel} thead th`)].map((th) => th.textContent);
-    const bodyRows = (sel: string) => [...document.querySelectorAll(`${sel} tbody tr`)].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent));
-    const P = "[data-product-risk-models]";
+  it("the Regulated product risk tab's one table also holds products' own risk models, read-only, each with its source linked to its firm", async () => {
     const rows = models.productModelsFrom({
       models: [
-        { product: { id: "fd", name: "Fixed deposit" }, firm: { id: FIRM, name: "Builder Inc" }, model: { id: "pd", name: "PD scorecard", purpose: "fraud_score" } },
-        { product: { id: "loan", name: "Term loan" }, firm: { id: FIRM, name: "Builder Inc" }, model: { id: "lgd", name: "Loss model", purpose: "fraud_score" } },
+        { product: { id: "fd", name: "Fixed deposit" }, firm: { id: FIRM, name: "Builder Inc" }, model: { id: "pd", name: "PD scorecard", purpose: "fraud_score", version: "3" } },
+        { product: { id: "ref", name: "Reference loan" }, firm: null, model: { id: "lgd", name: "Loss model", purpose: "lgd" } },
       ],
     });
-    const view = render(<RiskModelsAreaView data={data("regulated_product", rows)} />);
-    expect(document.querySelectorAll(`${P} table`)).toHaveLength(1);
-    expect(heads(P)).toEqual(["Product", "Firm", "Model", "Type", "Version"]);
-    expect(bodyRows(P).map((r) => r.slice(0, 3))).toEqual([
-      ["Fixed deposit", "Builder Inc", "PD scorecard"],
-      ["Term loan", "Builder Inc", "Loss model"],
+    const opened: string[] = [];
+    render(<RiskModelsAreaView data={data("regulated_product", rows)} onOpen={(id) => opened.push(id)} />);
+    expect(document.querySelectorAll("table")).toHaveLength(1);
+    expect(bodyRows("[data-risk-models-area]")).toEqual([
+      ["Pool liquidity coverage", "Mynt model", "Not stated", "Active: in use", "Boss", "Version 2", "2026-06-01: Passed with findings", "2026-09-01 (overdue)", "Open"],
+      ["Treasury drawdown", "Mynt model", "Not stated", "Draft: not yet in use", "No owner", "Version 1", "Never validated", "Not set", "Open"],
+      ["PD scorecard", "Product: Fixed deposit (Builder Inc)", "Fraud score", "Declared in the product's definition", "Builder Inc", "3", "Not recorded", "Not recorded", "Open"],
+      ["Loss model", "Product: Reference loan (Mynt's reference product)", "Loss given default", "Declared in the product's definition", "Mynt's reference product", "Not stated", "Not recorded", "Not recorded", ""],
     ]);
-    expect(document.querySelector(`${P} [data-pager]`)!.textContent).toContain("2 rows · Page 1 of 1");
-    change(`${P} input[aria-label^="Search product risk models"]`, "loss");
-    expect(bodyRows(P).map((r) => r[2])).toEqual(["Loss model"]);
-    change(`${P} input[aria-label^="Search product risk models"]`, "nothing like it");
-    expect(bodyRows(P)).toEqual([["No product risk models match this search."]]);
-    view.unmount();
+    expect(document.querySelector("[data-pager]")!.textContent).toContain("4 rows · Page 1 of 1");
+    expect([...document.querySelectorAll("[data-risk-models-area] table a")].map((a) => [a.textContent!.trim(), a.getAttribute("href")])).toEqual([
+      ["Product: Fixed deposit (Builder Inc)", `/platform/firms/${FIRM}?tab=products`],
+      ["Open", `/platform/firms/${FIRM}?tab=products`],
+    ]);
+    expect(document.querySelector("[data-list-note]")!.textContent).toBe("1 model is overdue for validation. Product models are the ones financial products declare in their own definitions. Read-only: each product's firm keeps them.");
+    // A product's row opens no model page: only Mynt's own do.
+    await click('[data-row="product:fd:pd"]');
+    expect(opened).toEqual([]);
+    expect(document.querySelector('[data-row="product:fd:pd"]')!.className).not.toContain("cursor-pointer");
+    await click(`[data-row="${M1}"]`);
+    expect(opened).toEqual([M1]);
+    // Search covers the product and the type; Filters narrow by source and by status.
+    const names = () => bodyRows("[data-risk-models-area]").map((r) => r[0]);
+    change('input[aria-label^="Search regulated product risk models"]', "loss given");
+    expect(names()).toEqual(["Loss model"]);
+    change('input[aria-label^="Search regulated product risk models"]', "fixed deposit");
+    expect(names()).toEqual(["PD scorecard"]);
+    change('input[aria-label^="Search regulated product risk models"]', "nothing like it");
+    expect(names()).toEqual(["No models match this search and these filters."]);
+    change('input[aria-label^="Search regulated product risk models"]', "");
+    await click("[data-filters-menu-button]");
+    expect([...document.querySelectorAll("[data-facet-heading]")].map((h) => h.textContent)).toEqual(["Source", "Status"]);
+    expect([...document.querySelectorAll('[data-facet="source"] [data-chip]')].map((c) => c.textContent)).toEqual(["Mynt models", "Product models"]);
+    await click('[data-facet="source"] [data-chip="product"]');
+    expect(names()).toEqual(["PD scorecard", "Loss model"]);
+    await click('[data-facet="source"] [data-chip="product"]');
+    await click('[data-facet="status"] [data-chip="draft"]');
+    expect(names()).toEqual(["Treasury drawdown"]);
+  });
+
+  it("what Mynt can't answer is one row in the same table, Not available with why", () => {
     render(<RiskModelsAreaView data={{ ...data("regulated_product", { available: false, reason: "Reading financial products' own risk models comes with Mynt's next update." }), models: { available: false, reason: "Mynt didn't answer with its risk models." } }} />);
-    expect(heads(P)).toEqual(["Product", "Firm", "Model", "Type", "Version"]);
-    expect(bodyRows(P)).toEqual([["Not available. Reading financial products' own risk models comes with Mynt's next update."]]);
-    // Mynt's own models, when Mynt can't answer: the same table headers, one row with why.
-    expect(heads("[data-risk-models-area] > [data-table-view]")).toEqual(["Model", "Status", "Owner", "Version", "Last validated", "Next validation due"]);
-    expect(bodyRows("[data-risk-models-area] > [data-table-view]")).toEqual([["Not available. Mynt didn't answer with its risk models."]]);
+    expect(document.querySelectorAll("table")).toHaveLength(1);
+    expect(heads("[data-risk-models-area]")).toEqual(["Model", "Source", "Type", "Status", "Owner", "Version", "Last validated", "Next validation due", "Action"]);
+    expect(bodyRows("[data-risk-models-area]")).toEqual([
+      ["Not available. Mynt didn't answer with its risk models.", "Mynt model", "Not available", "Not available", "Not available", "Not available", "Not available", "Not available", ""],
+      ["Not available. Reading financial products' own risk models comes with Mynt's next update.", "Product models", "Not available", "Not available", "Not available", "Not available", "Not available", "Not available", ""],
+    ]);
+    expect(document.querySelector("[data-add-risk-model]")).toBeNull();
+    expect((document.querySelector("[data-export]") as HTMLButtonElement).disabled).toBe(true);
+    cleanup();
+    // Another tab has no Source column; Mynt's models it can't read are still one row with why, never an empty table.
+    render(<RiskModelsAreaView data={{ ...data("financial"), models: { available: false, reason: "Mynt didn't answer with its risk models." } }} />);
+    expect(bodyRows("[data-risk-models-area]")).toEqual([["Not available. Mynt didn't answer with its risk models.", "Not available", "Not available", "Not available", "Not available", "Not available", ""]]);
   });
 
   it("what Mynt can't answer is Not available, with why; an empty area says so in words", () => {

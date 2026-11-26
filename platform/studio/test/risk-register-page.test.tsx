@@ -4,12 +4,12 @@ import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { useState } from "react";
 
-// The platform admin's Risk register (/platform/risk-register): seven risk-area tabs; on each, every section is a
-// table. Mynt's own register in that area: the list toolbar (search, Filters for status, level and Unassigned, Import,
-// Export CSV, Add risk starting on the tab's area) over one table with a labelled Review risk on each row (each a
-// labelled button opening its sheet, posting to /api/admin/risks); the open risks across apps and products in that
-// area (read-only, linked, searched and paged); and that area's signals, each a table with its own columns. What Mynt
-// can't answer is one table row, "Not available." with why.
+// The platform admin's Risk register (/platform/risk-register): seven risk-area tabs; each is ONE table filling the
+// page under the list toolbar (search, Filters for source, status, level and Unassigned, Import, Export CSV, Add risk
+// starting on the tab's area). Its rows are the area's risk items from three sources, said in words: Mynt's own
+// register (a labelled Review risk on each row, opening its sheet, posting to /api/admin/risks), the open risks across
+// apps and products (read-only, linked), and the area's signals. A signal that is clear is one row saying so; what
+// Mynt can't answer is one row, "Not available", with why.
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/platform/risk-register",
@@ -61,11 +61,10 @@ const OPS = {
   backups: { offsite: "uploaded" },
 };
 const MITIGATION = "Rotate every key each quarter, keep them in the vault only, and page the on-call admin when one is read outside a deploy.";
-// Each section's table, by its column headers, and one table's rows as text.
+// The tab's table, by its column headers, and its rows as text.
 const heads = (root: ParentNode, sel: string) => [...root.querySelectorAll(`${sel} thead th`)].map((th) => th.textContent);
 const bodyRows = (root: ParentNode, sel: string) => [...root.querySelectorAll(`${sel} tbody tr`)].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent));
-const REGISTER = '[data-risk-register="platform"]';
-const CROSS = '[data-signal="cross-risks"]';
+const TABLE = "[data-risk-register-area]";
 const data = (area: (typeof RISK_AREAS)[number] = "technology"): Data => ({
   area,
   register: {
@@ -82,7 +81,7 @@ const data = (area: (typeof RISK_AREAS)[number] = "technology"): Data => ({
   cross: risks.crossRisksFrom(
     {
       risks: [
-        { id: "x1", subject_type: "app", subject_name: "Saver", workspace_id: WS, title: "Session hijack", category: "security", score: 16, status: "open" },
+        { id: "x1", subject_type: "app", subject_name: "Saver", workspace_id: WS, title: "Session hijack", category: "security", likelihood: 4, impact: 4, score: 16, owner: { user_id: USER, name: "Dana" }, mitigation: "Short sessions", status: "open", review_by: "2026-12-01" },
         { id: "x2", subject_type: "product", subject_name: "Fixed deposit", firm_id: FIRM, title: "Patch lag", category: "operational", risk_area: "technology", score: 9, status: "mitigating" },
         { id: "x3", subject_type: "product", subject_name: "Loan", firm_id: FIRM, title: "Rate shock", category: "credit", score: 9, status: "open" },
         { id: "x4", subject_type: "platform", subject_name: "Mynt platform", title: "Ours", category: "security", score: 9, status: "open" },
@@ -116,205 +115,142 @@ describe("the page", () => {
     expect(picked).toEqual(["technology"]);
   });
 
-  it("a tab: Mynt's own register in that area (labelled Add risk and Review risk), the risks across apps and products in that area linked to their pages, the area's signals", () => {
-    const html = renderToStaticMarkup(<RiskRegisterAreaView data={data("technology")} />);
-    for (const s of ["Mynt&#x27;s own register: technology risk", 'data-risk-register="platform"', "data-add-risk", "</svg> Add risk</button>", `data-review-risk="${R1}"`, "</svg> Review risk</button>", "Key leak", "1 risk is overdue for review.", "Across apps and products", "Session hijack", "16 (Critical)", "Patch lag", "Security events in the last 30 days", "Uploaded off-site"]) expect(html).toContain(s);
-    expect(html).toContain(`href="/platform/workspaces/${WS}"`);
-    expect(html).toContain(`href="/platform/firms/${FIRM}?tab=products"`);
-    // Another area's risk and Mynt's own aren't in the cross table.
-    expect(html).not.toContain("Rate shock");
-    expect(html).not.toContain(">Ours<");
-    // Status in words; no icon-only buttons.
-    expect(html).toContain("Open: not yet mitigated");
-    expect(html).toContain("Mitigating: work under way");
-    for (const b of html.match(/<button[^>]*>.*?<\/button>/g) ?? []) expect(b.replace(/<[^>]+>/g, "").trim(), b).not.toBe("");
+  it("every tab is exactly one table under one toolbar, filling the page: no stacked sections, no section headings, no second table", () => {
+    for (const area of RISK_AREAS) {
+      const view = render(<RiskRegisterView area={area} onArea={() => undefined} body={<RiskRegisterAreaView data={data(area)} />} />);
+      expect(document.querySelectorAll("table"), area).toHaveLength(1);
+      expect(document.querySelectorAll("[data-toolbar]"), area).toHaveLength(1);
+      expect(document.querySelectorAll("[data-pager]"), area).toHaveLength(1);
+      expect(document.querySelectorAll("h1, h2, h3, section"), area).toHaveLength(0);
+      expect(document.querySelector("[data-signal]"), area).toBeNull();
+      expect(heads(document, TABLE), area).toEqual(["Risk", "Source", "Category", "Score", "Owner", "Status", "Review by / When", "Detail", "Action"]);
+      // The table takes the height the tabs and the toolbar leave, and it is what scrolls; its header stays in view.
+      for (const sel of ["[data-platform-risk-register]", "[data-risk-register-area]", "[data-admin-list]"]) {
+        expect(document.querySelector(sel)!.className, `${area} ${sel}`).toContain("min-h-0");
+        expect(document.querySelector(sel)!.className, `${area} ${sel}`).toContain("flex-1");
+      }
+      expect(document.querySelector("[data-table-view]")!.className).toContain("flex-1");
+      expect(document.querySelector("[data-table-view]")!.className).toContain("overflow-auto");
+      expect(document.querySelector("thead")!.className).toContain("sticky");
+      view.unmount();
+    }
   });
 
-  it("the register is one table under the list toolbar: search, Filters, Import (off, with why), Export CSV and Add risk", () => {
+  it("the one toolbar row: search, Filters, Import (off, with why), Export CSV and Add risk, every button labelled", () => {
     render(<RiskRegisterAreaView data={data("technology")} />);
-    expect(heads(document, REGISTER)).toEqual(["Risk", "Category", "Likelihood", "Impact", "Score", "Owner", "Status", "Review by", "Mitigation", "Action"]);
-    expect(document.querySelectorAll(`${REGISTER} table`)).toHaveLength(1);
-    expect(bodyRows(document, REGISTER)).toEqual([
-      ["Key leak", "Security", "2: Unlikely", "5: Severe", "10 (High)", "No owner", "Open: not yet mitigated", "2026-01-01 (overdue)", MITIGATION, " Review risk"],
-      ["Laptop theft", "Security", "1: Rare", "3: Moderate", "3 (Low)", "Boss", "Mitigating: work under way", "Not set", "None recorded", " Review risk"],
-    ]);
-    // The mitigation is cut short in its cell (the whole of it is the cell's title, and in the review sheet).
-    const cell = document.querySelector(`[data-row="${R1}"] [data-risk-mitigation]`)!;
-    expect(cell.className).toContain("truncate");
-    expect(cell.getAttribute("title")).toBe(MITIGATION);
-    // One toolbar row, in the list kit's order; every button labelled.
-    const bar = document.querySelector(`${REGISTER} [data-toolbar]`)!;
-    expect(bar.querySelector("input")!.getAttribute("aria-label")).toBe("Search technology risk by risk, category, owner or mitigation");
+    const bar = document.querySelector("[data-toolbar]")!;
+    expect(bar.querySelector("input")!.getAttribute("aria-label")).toBe("Search technology risk by risk, source or detail");
     expect([...bar.querySelectorAll("button")].map((b) => b.textContent!.trim())).toEqual(["Filters", "Import", "Export CSV", "Add risk"]);
     expect((bar.querySelector("[data-import]") as HTMLButtonElement).disabled).toBe(true);
     expect(bar.querySelector("[data-import]")!.getAttribute("title")).toBe("Importing a CSV comes with Mynt's next update.");
     expect((bar.querySelector("[data-export]") as HTMLButtonElement).disabled).toBe(false);
-    expect(document.querySelector(`${REGISTER} [data-pager]`)!.textContent).toContain("2 rows · Page 1 of 1");
-    // No chips as content, and no cards: chips are only the Filters popover's controls (closed here).
+    expect(document.querySelector("[data-list-note]")!.textContent).toBe("1 risk on Mynt's register is overdue for review. 1 risk has no area yet: choose Unassigned in Filters to see it.");
+    // No chips as content: chips are only the Filters popover's controls (closed here). No icon-only buttons or links.
     expect(document.querySelector("[data-chip]")).toBeNull();
-    expect(document.querySelector("[data-register-filters]")).toBeNull();
-    expect(document.querySelector(`${REGISTER} [data-list-note]`)!.textContent).toBe("1 risk is overdue for review. 1 risk has no area yet: choose Unassigned in Filters to see it.");
+    for (const b of document.querySelectorAll("button, a")) expect(b.textContent!.trim(), b.outerHTML).not.toBe("");
   });
 
-  it("the register's search and its Filters (status, level, Unassigned) narrow the table; a row's Review risk opens its sheet with the whole mitigation", async () => {
-    function Harness() {
-      const [filter, setFilter] = useState<"area" | "unassigned">("area");
-      return <RiskRegisterAreaView data={data("technology")} filter={filter} onFilter={setFilter} />;
-    }
-    render(<Harness />);
-    const titles = () => bodyRows(document, REGISTER).map((r) => r[0]);
-    change(`${REGISTER} [data-toolbar] input`, "laptop");
-    expect(titles()).toEqual(["Laptop theft"]);
-    change(`${REGISTER} [data-toolbar] input`, "no such risk");
-    expect(titles()).toEqual(["No risks match this search and these filters."]);
-    change(`${REGISTER} [data-toolbar] input`, "");
-    await click(`${REGISTER} [data-filters-menu-button]`);
-    expect([...document.querySelectorAll("[data-facet-heading]")].map((h) => h.textContent)).toEqual(["Status", "Level", "Risk area"]);
-    expect([...document.querySelectorAll('[data-facet="level"] [data-chip]')].map((c) => c.textContent)).toEqual(["Critical", "High", "Medium", "Low"]);
-    expect([...document.querySelectorAll('[data-facet="area"] [data-chip]')].map((c) => c.textContent)).toEqual(["Unassigned (no area yet)"]);
-    await click('[data-facet="level"] [data-chip="high"]');
-    expect(titles()).toEqual(["Key leak"]);
-    await click('[data-facet="level"] [data-chip="high"]');
-    await click('[data-facet="status"] [data-chip="mitigating"]');
-    expect(titles()).toEqual(["Laptop theft"]);
-    await click("[data-filters-clear]");
-    expect(titles()).toEqual(["Key leak", "Laptop theft"]);
-    // Unassigned: the risks with no area yet, in the same table.
-    await click('[data-facet="area"] [data-chip="unassigned"]');
-    expect(titles()).toEqual(["Something else"]);
-    expect(document.body.textContent).toContain("Mynt's own register: unassigned risks");
-    await click('[data-facet="area"] [data-chip="unassigned"]');
-    expect(titles()).toEqual(["Key leak", "Laptop theft"]);
-    await click(`[data-review-risk="${R1}"]`);
-    expect((document.querySelector('[data-review-risk-sheet] [data-risk-field="mitigation"]') as HTMLTextAreaElement).value).toBe(MITIGATION);
-  });
-
-  it("Export CSV writes the rows shown, the mitigation in full", async () => {
-    const blobs: Blob[] = [];
-    const create = vi.fn((b: Blob) => (blobs.push(b), "blob:x"));
-    Object.assign(URL, { createObjectURL: create, revokeObjectURL: vi.fn() });
-    const clicked = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+  it("the table's rows come from all three sources: Mynt's register by score, then apps' and products' by score, then the signals, what needs attention first", () => {
     render(<RiskRegisterAreaView data={data("technology")} />);
-    await click(`${REGISTER} [data-export]`);
-    expect(clicked).toHaveBeenCalledTimes(1);
-    const csv = await new Promise<string>((done) => {
-      const reader = new FileReader();
-      reader.onload = () => done(String(reader.result));
-      reader.readAsText(blobs[0]);
-    });
-    expect(csv.split("\r\n")[0]).toBe("Risk,Category,Risk area,Likelihood,Impact,Score,Level,Owner,Status,Review by,Overdue,Mitigation");
-    expect(csv).toContain(`Key leak,Security,Technology risk,2,5,10,High,No owner,Open: not yet mitigated,2026-01-01,Yes,"${MITIGATION}"`);
-    clicked.mockRestore();
-  });
-
-  it("Across apps and products is a table with its own search and pager: the subject linked, who keeps it, the risk, its score and level, status, review by", () => {
-    render(<RiskRegisterAreaView data={data("technology")} />);
-    expect(heads(document, CROSS)).toEqual(["Subject", "Workspace / firm", "Risk", "Score", "Status", "Review by"]);
-    expect(bodyRows(document, CROSS)).toEqual([
-      ["App: Saver", "The app's workspace", "Session hijack", "16 (Critical)", "Open: not yet mitigated", "Not set"],
-      ["Financial product: Fixed deposit", "The product's firm", "Patch lag", "9 (Medium)", "Mitigating: work under way", "Not set"],
+    expect(bodyRows(document, TABLE)).toEqual([
+      ["Key leak", "Mynt", "Security", "2 × 5 = 10 (High)", "Not assigned", "Open: not yet mitigated", "2026-01-01 (overdue)", MITIGATION, " Review risk"],
+      ["Laptop theft", "Mynt", "Security", "1 × 3 = 3 (Low)", "Boss", "Mitigating: work under way", "Not set", "None recorded", " Review risk"],
+      ["Session hijack", "App: Saver", "Security", "4 × 4 = 16 (Critical)", "Dana", "Open: not yet mitigated", "2026-12-01", "Short sessions", " Open"],
+      ["Patch lag", "Product: Fixed deposit", "Operational", "9 (Medium)", "Not assigned", "Mitigating: work under way", "Not set", "None recorded", " Open"],
+      ["Server backups: the last run's result isn't recorded", "Signal: Backup", "Backup", "Not scored", "Mynt", "Needs attention", "Not recorded", "Last run: Not recorded. Result: Not recorded. Off-site: Uploaded off-site. Last success: Not recorded. Last restore test: Not recorded.", ""],
+      ["No security events in the last 30 days among the newest audit entries.", "Signal: Security event", "Security event", "Not scored", "Mynt", "Clear", "Not recorded", "Audit trail entries of the security class: build audits, the mainnet gate, secrets revealed or rotated, machine access, people cut off.", ""],
     ]);
-    expect([...document.querySelectorAll(`${CROSS} a`)].map((a) => [a.textContent, a.getAttribute("href")])).toEqual([
+    expect(document.querySelector("[data-pager]")!.textContent).toContain("6 rows · Page 1 of 1");
+    // Another area's risk and Mynt's own on admin_list_risks aren't app or product rows.
+    expect(document.body.textContent).not.toContain("Rate shock");
+    expect(document.body.textContent).not.toContain("Ours");
+    // An app's or a product's risk links its subject (in Source, and its labelled Open) to its workspace's or firm's page.
+    expect([...document.querySelectorAll(`${TABLE} a`)].map((a) => [a.textContent!.trim(), a.getAttribute("href")])).toEqual([
       ["Saver", `/platform/workspaces/${WS}`],
+      ["Open", `/platform/workspaces/${WS}`],
       ["Fixed deposit", `/platform/firms/${FIRM}?tab=products`],
+      ["Open", `/platform/firms/${FIRM}?tab=products`],
     ]);
-    expect(document.querySelector(`${CROSS} [data-pager]`)!.textContent).toContain("2 rows · Page 1 of 1");
-    // Read-only: a search and a pager, no action on it.
-    expect([...document.querySelectorAll(`${CROSS} button`)].map((b) => b.textContent!.trim())).toEqual(["Previous", "Next"]);
-    change(`${CROSS} input[aria-label^="Search"]`, "patch");
-    expect(bodyRows(document, CROSS).map((r) => r[2])).toEqual(["Patch lag"]);
-    change(`${CROSS} input[aria-label^="Search"]`, "nothing like it");
-    expect(bodyRows(document, CROSS)).toEqual([["No risks match this search."]]);
+    // The detail is cut short in its cell: the whole of it is the cell's title (and the review sheet's, and the CSV's).
+    const cell = document.querySelector(`[data-row="mynt:${R1}"] [data-risk-detail]`)!;
+    expect(cell.className).toContain("truncate");
+    expect(cell.getAttribute("title")).toBe(MITIGATION);
+    // Status is in words on every row, and each row says its source.
+    expect([...document.querySelectorAll("[data-risk-source]")].map((s) => s.getAttribute("data-risk-source"))).toEqual(["mynt", "mynt", "subjects", "subjects", "signals", "signals"]);
+    expect([...document.querySelectorAll("[data-risk-status]")].map((s) => s.getAttribute("data-risk-status"))).toEqual(["open", "mitigating", "open", "mitigating", "needs_attention", "clear"]);
   });
 
-  it("the cross table pages 25 rows at a time", async () => {
-    const many = { risks: Array.from({ length: 30 }, (_, i) => ({ id: `m${i}`, subject_type: "app", subject_name: `App ${i}`, workspace_id: WS, title: `Risk ${i}`, category: "security", score: 4, status: "open" })) };
-    render(<RiskRegisterAreaView data={{ ...data("technology"), cross: risks.crossRisksFrom(many, "technology") }} />);
-    expect(bodyRows(document, CROSS)).toHaveLength(25);
-    expect(document.querySelector(`${CROSS} [data-pager]`)!.textContent).toContain("30 rows · Page 1 of 2");
-    await act(async () => void fireEvent.click([...document.querySelectorAll(`${CROSS} [data-pager] button`)].find((b) => b.textContent === "Next")!));
-    expect(bodyRows(document, CROSS)).toHaveLength(5);
-  });
-
-  it("each area's signals, each a table with its own columns", () => {
-    const specs = (area: (typeof RISK_AREAS)[number]) => risks.areaSignalsFrom(area, OPS, []).map((s) => [s.title, [...s.columns]]);
-    expect(specs("financial")).toEqual([["Liquidity and treasury pools", ["Area", "What needs attention"]]]);
-    expect(specs("compliance")).toEqual([
-      ["Apps missing a program agreement", ["App", "Missing agreements"]],
-      ["Overdue oversight audits", ["Overdue audits", "Apps flagged"]],
-    ]);
-    expect(specs("third_party")).toEqual([["Vendor conformance", ["Service", "Last conformance", "Result"]]]);
-    expect(specs("operations")).toEqual([["Agents and hosting", ["Area", "Item", "Since"]]]);
-    expect(specs("business_process")).toEqual([
-      ["Covenants", ["Area", "What needs attention"]],
-      ["Drifted products", ["Product", "Detail"]],
-    ]);
-    expect(specs("technology")).toEqual([
-      ["Security events in the last 30 days", ["When", "Action", "Actor", "Target"]],
-      ["Backups", ["Last run", "Result", "Off-site", "Last success", "Last restore test"]],
-    ]);
-    expect(specs("regulated_product")).toEqual([
-      ["Covenants", ["Area", "What needs attention"]],
-      ["Product health", ["Area", "What needs attention"]],
-      ["Drifted products", ["Product", "Detail"]],
-    ]);
-    // Every signal of every area renders as a table whose headers are its columns.
-    for (const area of RISK_AREAS) {
-      const view = render(<RiskRegisterAreaView data={data(area)} />);
-      for (const spec of risks.areaSignalsFrom(area, OPS, [])) {
-        expect(document.querySelectorAll(`[data-signal="${spec.id}"] table`), `${area} ${spec.id}`).toHaveLength(1);
-        expect(heads(document, `[data-signal="${spec.id}"]`), `${area} ${spec.id}`).toEqual([...spec.columns]);
-      }
-      view.unmount();
-    }
-  });
-
-  it("the signals' rows: what ops_status and the audit log say, in columns", () => {
-    const rowsOf = (area: (typeof RISK_AREAS)[number], id: string, ops: unknown = OPS, entries: Parameters<typeof risks.areaSignalsFrom>[2] = []) => {
+  it("each area's signals are rows: Source 'Signal: <name>', what needs attention, when it was seen, its detail", () => {
+    const signalRows = (area: (typeof RISK_AREAS)[number], ops: unknown = OPS, entries: Parameters<typeof risks.areaSignalsFrom>[2] = []) => {
       const view = render(<RiskRegisterAreaView data={{ ...data(area), signals: risks.areaSignalsFrom(area, ops, entries, new Date("2026-11-25T00:00:00.000Z")) }} />);
-      const rows = bodyRows(document, `[data-signal="${id}"]`);
+      const rows = bodyRows(document, TABLE)
+        .filter((r) => r[1].startsWith("Signal: "))
+        .map((r) => [r[0], r[1], r[2], r[5], r[6]]);
+      expect(document.querySelectorAll("table")).toHaveLength(1);
       view.unmount();
       return rows;
     };
-    expect(rowsOf("financial", "pools")).toEqual([["Liquidity pools", "1 open over_withdrawal flag(s) on real money: list_pool_flags, then resolve_pool_flag"]]);
-    expect(rowsOf("third_party", "vendors")).toEqual([["Fast KYC", "2026-11-20 10:00", "Failed"]]);
+    expect(signalRows("financial")).toEqual([["1 open over_withdrawal flag(s) on real money: list_pool_flags, then resolve_pool_flag", "Signal: Pool flag", "Liquidity pools", "Needs attention", "Not recorded"]]);
+    expect(signalRows("third_party")).toEqual([["Fast KYC: conformance run failed", "Signal: Vendor conformance", "Vendor conformance", "Needs attention", "2026-11-20 10:00"]]);
     // Operations: the line when ops_status has no list behind it, a row per run or app when it has.
-    expect(rowsOf("operations", "operations")).toEqual([["Hosting", "1 app(s) stopped", "Not recorded"]]);
+    expect(signalRows("operations")).toEqual([["1 app(s) stopped", "Signal: Agent/hosting failure", "Hosting", "Needs attention", "Not recorded"]]);
     const detailed = {
       ...OPS,
       attention: ["builds: 1 failed in the last 24h", "hosting: 1 app(s) stopped", "sandbox provider: the account's allowance is used up"],
       agents: { builds: { failures: [{ id: "b1", status: "failed", error: "tests failed", created_at: "2026-11-24T08:00:00.000Z" }], stuck: [{ id: "b2", status: "running", created_at: "2026-11-24T06:30:00.000Z" }] } },
       hosting: { failed_tenants: [], stopped_apps: [{ app_id: "saver", error: "", updated_at: "2026-11-23T12:00:00.000Z" }], stuck_deploys: [] },
     };
-    expect(rowsOf("operations", "operations", detailed)).toEqual([
-      ["Builds", "Run b1 failed: tests failed", "2026-11-24 08:00"],
-      ["Builds", "Run b2 still running (running)", "2026-11-24 06:30"],
-      ["Hosting", "App saver stopped", "2026-11-23 12:00"],
-      ["Sandbox provider", "the account's allowance is used up", "Not recorded"],
+    expect(signalRows("operations", detailed)).toEqual([
+      ["Run b1 failed: tests failed", "Signal: Agent/hosting failure", "Builds", "Needs attention", "2026-11-24 08:00"],
+      ["Run b2 still running (running)", "Signal: Agent/hosting failure", "Builds", "Needs attention", "2026-11-24 06:30"],
+      ["App saver stopped", "Signal: Agent/hosting failure", "Hosting", "Needs attention", "2026-11-23 12:00"],
+      ["The account's allowance is used up", "Signal: Agent/hosting failure", "Sandbox provider", "Needs attention", "Not recorded"],
     ]);
-    // Compliance: apps missing agreements, and overdue audits, each its own table.
+    // Compliance: apps missing agreements and overdue audits; measured and nothing there is one row, Clear, in words.
     const comp = { ...OPS, apps: { production_without_program_agreements: [{ app_id: "a1", app_name: "Saver", missing: 2 }] }, agreement_audits: { overdue: 3, apps_flagged: 2 } };
-    expect(rowsOf("compliance", "agreements", comp)).toEqual([["Saver", "2 signed program agreements missing"]]);
-    expect(rowsOf("compliance", "audits", comp)).toEqual([["3", "2"]]);
-    // Measured and nothing there: one row saying so in words, never an empty table or a 0.
-    expect(rowsOf("compliance", "agreements")).toEqual([["Every production app has its program agreements."]]);
-    expect(rowsOf("compliance", "audits")).toEqual([["No oversight audit is overdue."]]);
-    // Technology: security events from the audit log, and the backups as one row.
+    expect(signalRows("compliance", comp)).toEqual([
+      ["Saver: in production without its program agreements", "Signal: Missing program agreement", "Program agreement", "Needs attention", "Not recorded"],
+      ["3 oversight audits are overdue", "Signal: Overdue agreement audit", "Oversight audit", "Needs attention", "Not recorded"],
+    ]);
+    expect(signalRows("compliance")).toEqual([
+      ["Every production app has its program agreements.", "Signal: Missing program agreement", "Missing program agreement", "Clear", "Not recorded"],
+      ["No oversight audit is overdue.", "Signal: Overdue agreement audit", "Overdue agreement audit", "Clear", "Not recorded"],
+    ]);
+    const compItems = risks.areaSignalsFrom("compliance", comp, []).flatMap(risks.signalItems);
+    expect(compItems.map((i) => i.detail)).toEqual([expect.stringMatching(/^2 signed program agreements missing\. Production apps without/), expect.stringMatching(/^Apps flagged: 2\. Oversight audits/)]);
+    // Technology: a security event from the audit log, and the backups as one row (clear when the last run succeeded
+    // and nothing failed; needing attention, saying what, otherwise).
     const entry = { id: "e1", at: "2026-11-20T09:00:00.000Z", action: "reveal_secret", class: "security", actor: { id: USER, name: "Boss", email: null }, target: "app-1" } as unknown as NonNullable<Parameters<typeof risks.areaSignalsFrom>[2]>[number];
-    const events = rowsOf("technology", "security", OPS, [entry]);
-    expect(events).toHaveLength(1);
-    expect(events[0]).toHaveLength(4);
-    expect(events[0][3]).toBe("app-1");
-    const backups = { last_run_at: "2026-11-24T02:00:00.000Z", ok: true, last_success_at: "2026-11-24T02:00:00.000Z", offsite: "local_only", bytes: 10, local: "x", error: null, last_verify: { at: "2026-11-22T03:00:00.000Z", ok: false, tables: {}, error: "row counts differ" } };
-    expect(rowsOf("technology", "backups", { ...OPS, backups })).toEqual([["2026-11-24 02:00", "Succeeded", "On this server only", "2026-11-24 02:00", "Failed: row counts differ"]]);
-    expect(rowsOf("technology", "backups")).toEqual([["Not recorded", "Not recorded", "Uploaded off-site", "Not recorded", "Not recorded"]]);
-    // A server with no backup status file: not available, with why.
-    expect(rowsOf("technology", "backups", { ...OPS, backups: { status: "no status file" } })).toEqual([["Not available. No backup has run on this server: there is no backup status file to read."]]);
-    // Drifted products aren't counted across firms: the table says so, under its own headers.
-    expect(rowsOf("business_process", "drift")).toEqual([["Not available. Mynt's operations status doesn't count drifted products across firms yet; each app's Security & risk tab shows its own."]]);
+    const good = { last_run_at: "2026-11-24T02:00:00.000Z", ok: true, last_success_at: "2026-11-24T02:00:00.000Z", offsite: "uploaded", last_verify: { at: "2026-11-22T03:00:00.000Z", ok: true } };
+    const tech = signalRows("technology", { ...OPS, backups: good }, [entry]);
+    expect(tech).toHaveLength(2);
+    expect(tech[0].slice(1, 4)).toEqual(["Signal: Security event", "Security event", "Needs attention"]);
+    expect(tech[1]).toEqual(["Server backups: the last run succeeded", "Signal: Backup", "Backup", "Clear", "2026-11-24 02:00"]);
+    const event = risks.areaSignalsFrom("technology", OPS, [entry], new Date("2026-11-25T00:00:00.000Z")).flatMap(risks.signalItems)[0];
+    expect(event.detail).toMatch(/^Actor: .*\. Target: app-1\.$/);
+    expect(event.when).not.toBe("Not recorded");
+    const bad = { ...good, offsite: "local_only", last_verify: { at: "2026-11-22T03:00:00.000Z", ok: false, error: "row counts differ" } };
+    expect(signalRows("technology", { ...OPS, backups: bad }).find((r) => r[1] === "Signal: Backup")).toEqual(["Server backups: the last restore test failed", "Signal: Backup", "Backup", "Needs attention", "2026-11-24 02:00"]);
+    // A signal Mynt doesn't measure is ONE row, Not available, its detail the reason.
+    expect(signalRows("technology", { ...OPS, backups: { status: "no status file" } }).find((r) => r[1] === "Signal: Backup")).toEqual(["Backups", "Signal: Backup", "Backup", "Not available", "Not recorded"]);
+    expect(risks.areaSignalsFrom("technology", { ...OPS, backups: { status: "no status file" } }, []).flatMap(risks.signalItems)[1].detail).toBe("No backup has run on this server: there is no backup status file to read.");
+    const bp = render(<RiskRegisterAreaView data={data("business_process")} />);
+    expect(bodyRows(document, TABLE).filter((r) => r[1] === "Signal: Drifted product")).toEqual([
+      ["Drifted products", "Signal: Drifted product", "Drifted product", "Not scored", "Mynt", "Not available", "Not recorded", "Mynt's operations status doesn't count drifted products across firms yet; each app's Security & risk tab shows its own.", ""],
+    ]);
+    bp.unmount();
+    // Every signal of every area is in the table, never left out; signals come needs-attention first, then clear, then not available.
+    for (const area of RISK_AREAS) {
+      const items = risks.registerItemsFrom(data(area));
+      for (const spec of risks.areaSignalsFrom(area, OPS, [])) expect(items.filter((i) => i.sourceWords === `Signal: ${risks.signalName(spec)}`).length, `${area} ${spec.id}`).toBeGreaterThanOrEqual(1);
+      const order = items.filter((i) => i.source === "signals").map((i) => ["needs_attention", "clear", "not_available"].indexOf(i.status));
+      expect(order, area).toEqual([...order].sort((a, b) => a - b));
+      const sources = items.map((i) => i.source).filter((s, n, list) => s !== list[n - 1]);
+      expect(["mynt,subjects,signals", "mynt,signals"], area).toContain(sources.join(","));
+    }
   });
 
-  it("what Mynt can't answer is one table row, Not available with why, under the table's headers: never a 0 or an empty table", () => {
+  it("what Mynt can't answer is one row per part, Not available with why in Detail: never a 0, never left out, still one table", () => {
     for (const area of RISK_AREAS) {
       const none: Data = {
         area,
@@ -324,24 +260,145 @@ describe("the page", () => {
         signals: risks.areaSignalsFrom(area, null, null),
       };
       const html = renderToStaticMarkup(<RiskRegisterAreaView data={none} />);
-      expect(html.match(/Not available\./g)!.length, area).toBe(2 + none.signals.length);
       expect(html).not.toContain("data-add-risk");
       expect(html).not.toMatch(/\(0\)/);
       const view = render(<RiskRegisterAreaView data={none} />);
-      // Every section is still a table with its headers, and each has exactly the one row with the reason.
-      expect(heads(document, REGISTER)).toEqual(["Risk", "Category", "Likelihood", "Impact", "Score", "Owner", "Status", "Review by", "Mitigation"]);
-      expect(bodyRows(document, REGISTER)).toEqual([["Not available. Mynt's own risk register comes with Mynt's next update."]]);
-      expect(heads(document, CROSS)).toEqual(["Subject", "Workspace / firm", "Risk", "Score", "Status", "Review by"]);
-      expect(bodyRows(document, CROSS)).toEqual([["Not available. Risks across apps and products come with Mynt's next update."]]);
-      for (const spec of none.signals) {
-        expect(heads(document, `[data-signal="${spec.id}"]`)).toEqual([...spec.columns]);
-        expect(bodyRows(document, `[data-signal="${spec.id}"]`), `${area} ${spec.id}`).toEqual([["Not available. This Mynt has no operations status (ops_status) to read."]].map((r) => (spec.id === "security" ? ["Not available. This Mynt has no audit log to read."] : spec.id === "drift" ? ["Not available. Mynt's operations status doesn't count drifted products across firms yet; each app's Security & risk tab shows its own."] : r)));
-        expect(document.querySelectorAll(`[data-signal="${spec.id}"] tbody tr[data-not-available] td[colspan="${spec.columns.length}"]`)).toHaveLength(1);
-      }
-      expect((document.querySelector(`${REGISTER} [data-export]`) as HTMLButtonElement).disabled).toBe(true);
+      expect(document.querySelectorAll("table")).toHaveLength(1);
+      const rows = bodyRows(document, TABLE);
+      expect(rows, area).toHaveLength(2 + none.signals.length);
+      expect(rows[0]).toEqual(["Mynt's own register", "Mynt", "Risk register", "Not available", "Mynt", "Not available", "Not recorded", "Mynt's own risk register comes with Mynt's next update.", ""]);
+      expect(rows[1]).toEqual(["Open risks across apps and products", "Apps and products", "Risk register", "Not available", "Their workspaces and firms", "Not available", "Not recorded", "Risks across apps and products come with Mynt's next update.", ""]);
+      none.signals.forEach((spec, n) => {
+        const reason = spec.id === "security" ? "This Mynt has no audit log to read." : spec.id === "drift" ? "Mynt's operations status doesn't count drifted products across firms yet; each app's Security & risk tab shows its own." : "This Mynt has no operations status (ops_status) to read.";
+        expect(rows[2 + n], `${area} ${spec.id}`).toEqual([spec.title, `Signal: ${risks.signalName(spec)}`, risks.signalName(spec), "Not scored", "Mynt", "Not available", "Not recorded", reason, ""]);
+      });
+      for (const r of rows) for (const c of r) expect(c).not.toBe("0");
       view.unmount();
     }
     expect(risks.areaSignalsFrom("technology", OPS, null)[0].signal).toMatchObject({ available: false, reason: "This Mynt has no audit log to read." });
+  });
+
+  it("search covers the risk, its source and its detail; Filters narrow by source, status and level; Unassigned shows Mynt's risks with no area yet", async () => {
+    function Harness() {
+      const [filter, setFilter] = useState<"area" | "unassigned">("area");
+      return <RiskRegisterAreaView data={data("technology")} filter={filter} onFilter={setFilter} />;
+    }
+    render(<Harness />);
+    const titles = () => bodyRows(document, TABLE).map((r) => r[0]);
+    const ALL = ["Key leak", "Laptop theft", "Session hijack", "Patch lag", "Server backups: the last run's result isn't recorded", "No security events in the last 30 days among the newest audit entries."];
+    expect(titles()).toEqual(ALL);
+    const search = (q: string) => change("[data-toolbar] input", q);
+    search("laptop");
+    expect(titles()).toEqual(["Laptop theft"]);
+    search("saver"); // the source
+    expect(titles()).toEqual(["Session hijack"]);
+    search("signal: backup");
+    expect(titles()).toEqual(["Server backups: the last run's result isn't recorded"]);
+    search("on-call admin"); // the detail, past where its cell cuts it short
+    expect(titles()).toEqual(["Key leak"]);
+    search("no such risk");
+    expect(titles()).toEqual(["No risks match this search and these filters."]);
+    search("");
+    await click("[data-filters-menu-button]");
+    expect([...document.querySelectorAll("[data-facet-heading]")].map((h) => h.textContent)).toEqual(["Source", "Status", "Level", "Risk area"]);
+    expect([...document.querySelectorAll('[data-facet="source"] [data-chip]')].map((c) => c.textContent)).toEqual(["Mynt", "Apps and products", "Signals"]);
+    expect([...document.querySelectorAll('[data-facet="status"] [data-chip]')].map((c) => c.textContent)).toEqual(["Open: not yet mitigated", "Mitigating: work under way", "Accepted: living with it", "Closed", "Needs attention", "Clear", "Not available"]);
+    expect([...document.querySelectorAll('[data-facet="level"] [data-chip]')].map((c) => c.textContent)).toEqual(["Critical", "High", "Medium", "Low"]);
+    expect([...document.querySelectorAll('[data-facet="area"] [data-chip]')].map((c) => c.textContent)).toEqual(["Unassigned (no area yet)"]);
+    // Source.
+    await click('[data-facet="source"] [data-chip="mynt"]');
+    expect(titles()).toEqual(ALL.slice(0, 2));
+    await click('[data-facet="source"] [data-chip="subjects"]');
+    expect(titles()).toEqual(ALL.slice(0, 4));
+    await click('[data-facet="source"] [data-chip="mynt"]');
+    expect(titles()).toEqual(ALL.slice(2, 4));
+    await click('[data-facet="source"] [data-chip="subjects"]');
+    await click('[data-facet="source"] [data-chip="signals"]');
+    expect(titles()).toEqual(ALL.slice(4));
+    await click('[data-facet="source"] [data-chip="signals"]');
+    // Level: a signal has no score, so no level.
+    await click('[data-facet="level"] [data-chip="high"]');
+    expect(titles()).toEqual(["Key leak"]);
+    await click('[data-facet="level"] [data-chip="critical"]');
+    expect(titles()).toEqual(["Key leak", "Session hijack"]);
+    await click("[data-filters-clear]");
+    expect(titles()).toEqual(ALL);
+    // Status.
+    await click('[data-facet="status"] [data-chip="mitigating"]');
+    expect(titles()).toEqual(["Laptop theft", "Patch lag"]);
+    await click('[data-facet="status"] [data-chip="mitigating"]');
+    await click('[data-facet="status"] [data-chip="needs_attention"]');
+    expect(titles()).toEqual([ALL[4]]);
+    await click('[data-facet="status"] [data-chip="clear"]');
+    expect(titles()).toEqual(ALL.slice(4));
+    await click("[data-filters-clear]");
+    // Unassigned: Mynt's risks with no area yet, in the same table.
+    await click('[data-facet="area"] [data-chip="unassigned"]');
+    expect(bodyRows(document, TABLE)).toEqual([["Something else", "Mynt", "Other", "1 × 2 = 2 (Low)", "Not assigned", "Open: not yet mitigated", "Not set", "None recorded", " Review risk"]]);
+    expect(document.querySelectorAll("table")).toHaveLength(1);
+    expect(document.querySelector("[data-toolbar] input")!.getAttribute("aria-label")).toBe("Search unassigned risks by risk, source or detail");
+    await click('[data-facet="area"] [data-chip="unassigned"]');
+    expect(titles()).toEqual(ALL);
+  });
+
+  it("Review risk opens its sheet with the whole mitigation, from its button and from a click on a Mynt row; other rows open nothing", async () => {
+    render(<RiskRegisterAreaView data={data("technology")} />);
+    const sheet = () => document.querySelector('[data-review-risk-sheet] [data-risk-field="mitigation"]') as HTMLTextAreaElement | null;
+    await click('[data-row^="signal:backups"]');
+    await click('[data-row="subject:x2"]');
+    expect(sheet()).toBeNull();
+    expect(document.querySelector('[data-row^="signal:backups"]')!.className).not.toContain("cursor-pointer");
+    expect(document.querySelector(`[data-row="mynt:${R1}"]`)!.className).toContain("cursor-pointer");
+    await click(`[data-review-risk="${R1}"]`);
+    expect(sheet()!.value).toBe(MITIGATION);
+    cleanup();
+    render(<RiskRegisterAreaView data={data("technology")} />);
+    await click(`[data-row="mynt:${R3}"]`);
+    expect(sheet()!.value).toBe("");
+    expect(document.querySelector(`[data-review-risk-form="${R3}"]`)).not.toBeNull();
+    // Read-only (not an admin who keeps it): no Add risk, no Review risk.
+    cleanup();
+    const d = data("technology");
+    render(<RiskRegisterAreaView data={{ ...d, register: { ...d.register, canManage: false } as Data["register"] }} />);
+    expect(document.querySelector("[data-add-risk]")).toBeNull();
+    expect(document.querySelector("[data-review-risk]")).toBeNull();
+    expect(document.querySelector("[data-list-note]")!.textContent).toContain("Read-only: Mynt's admins keep Mynt's register.");
+  });
+
+  it("Export CSV writes the rows shown, from every source, the detail in full", async () => {
+    const blobs: Blob[] = [];
+    const create = vi.fn((b: Blob) => (blobs.push(b), "blob:x"));
+    Object.assign(URL, { createObjectURL: create, revokeObjectURL: vi.fn() });
+    const clicked = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    render(<RiskRegisterAreaView data={data("technology")} />);
+    await click("[data-export]");
+    expect(clicked).toHaveBeenCalledTimes(1);
+    const csv = await new Promise<string>((done) => {
+      const reader = new FileReader();
+      reader.onload = () => done(String(reader.result));
+      reader.readAsText(blobs[0]);
+    });
+    const lines = csv.split("\r\n");
+    expect(lines[0]).toBe("Risk,Source,Category,Risk area,Likelihood,Impact,Score,Level,Owner,Status,Review by / When,Overdue,Detail");
+    expect(lines.filter(Boolean)).toHaveLength(7);
+    expect(lines[1]).toBe(`Key leak,Mynt,Security,Technology risk,2,5,10,High,Not assigned,Open: not yet mitigated,2026-01-01,Yes,"${MITIGATION}"`);
+    expect(lines[3]).toBe("Session hijack,App: Saver,Security,Technology risk,4,4,16,Critical,Dana,Open: not yet mitigated,2026-12-01,No,Short sessions");
+    expect(lines[4]).toBe("Patch lag,Product: Fixed deposit,Operational,Technology risk,Not recorded,Not recorded,9,Medium,Not assigned,Mitigating: work under way,Not set,No,None recorded");
+    expect(lines[5]).toBe("Server backups: the last run's result isn't recorded,Signal: Backup,Backup,Technology risk,Not scored,Not scored,Not scored,Not scored,Mynt,Needs attention,Not recorded,Not applicable,Last run: Not recorded. Result: Not recorded. Off-site: Uploaded off-site. Last success: Not recorded. Last restore test: Not recorded.");
+    clicked.mockRestore();
+  });
+
+  it("the table pages 25 rows at a time, across its sources", async () => {
+    const many = { risks: Array.from({ length: 30 }, (_, i) => ({ id: `m${i}`, subject_type: "app", subject_name: `App ${i}`, workspace_id: WS, title: `Risk ${i}`, category: "security", score: 4, status: "open" })) };
+    render(<RiskRegisterAreaView data={{ ...data("technology"), cross: risks.crossRisksFrom(many, "technology") }} />);
+    expect(bodyRows(document, TABLE)).toHaveLength(25);
+    expect(document.querySelector("[data-pager]")!.textContent).toContain("34 rows · Page 1 of 2");
+    expect(bodyRows(document, TABLE)[0][0]).toBe("Key leak");
+    await act(async () => void fireEvent.click([...document.querySelectorAll("[data-pager] button")].find((b) => b.textContent === "Next")!));
+    const last = bodyRows(document, TABLE);
+    expect(last).toHaveLength(9);
+    expect(last.slice(-2).map((r) => r[1])).toEqual(["Signal: Backup", "Signal: Security event"]);
+    expect(document.querySelectorAll("table")).toHaveLength(1);
   });
 });
 
