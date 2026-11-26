@@ -5,10 +5,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { Session } from "@/lib/session-store";
 import { ADMIN_TOOLS, parseAdminCall } from "@/lib/studio-tools";
 
-// Platform settings → Risk grading: the likelihood × impact heat map as a real table (each cell its score and its
-// level in words), the bands, the residual method and the version history, each a table; Edit grading and Restore
-// this version as labelled buttons opening sheets; and the route behind them (Mynt admins only, own origin, strict
-// bodies, set_risk_grading).
+// Platform settings → Risk grading: ONE table filling the tab under one toolbar. Its rows are the level bands, the
+// residual method's steps and the likelihood × impact heat map (25 rows, each its score and its level in words);
+// Edit bands, Version history (every version a row, in a sheet) and Restore this version are labelled buttons
+// opening sheets; and the route behind them (Mynt admins only, own origin, strict bodies, set_risk_grading).
 
 const fake = {
   session: undefined as Session | undefined,
@@ -30,7 +30,7 @@ vi.mock("@/lib/tokens", () => ({
   }),
 }));
 
-const { RiskGradingView, HeatMapTable, changeOf } = await import("@/components/admin-risk-grading");
+const { RiskGradingView, gradingRows, changeOf } = await import("@/components/admin-risk-grading");
 const grading = await import("@/lib/risk-grading");
 const route = await import("@/app/api/admin/risk-grading/route");
 
@@ -87,8 +87,11 @@ const fetcher = () => {
 const click = async (sel: string) => act(async () => void fireEvent.click(document.querySelector(sel)!));
 const submit = (sel: string) => act(async () => void fireEvent.submit(document.querySelector(sel)!));
 const change = (sel: string, value: string) => fireEvent.change(document.querySelector(sel)!, { target: { value } });
-const heads = (id: string) => [...document.querySelectorAll(`[data-grading-table="${id}"] thead th`)].map((th) => th.textContent);
-const rows = (id: string) => [...document.querySelectorAll(`[data-grading-table="${id}"] tbody tr`)].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent!.trim()));
+const cellsOf = (root: string) => [...document.querySelectorAll(`${root} tbody tr`)].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent!.trim()));
+const tableHead = () => [...document.querySelectorAll("[data-risk-grading] thead th")].map((th) => th.textContent);
+const tableRows = () => cellsOf("[data-risk-grading]");
+const historyHead = () => [...document.querySelectorAll("[data-grading-history] thead th")].map((th) => th.textContent);
+const historyRows = () => cellsOf("[data-grading-history]");
 const session = (roles: string[]) => ({ id: "s", createdAt: 0, lastSeen: 0, tokens: { access_token: "t", token_type: "Bearer" }, roles, rolesAt: Date.now() }) as Session;
 const req = (body?: unknown) => new Request("http://studio.test/api/admin/risk-grading", body === undefined ? undefined : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
@@ -100,90 +103,106 @@ beforeEach(() => {
   fake.reply = { get_risk_grading: REPLY, set_risk_grading: { version: 4, residuals_changed: 2 } };
 });
 
-describe("the heat map", () => {
-  it("is a real 5×5 table: likelihood down the side (the likeliest first), impact across, every cell its score AND its level in words", () => {
-    render(<HeatMapTable data={data()} />);
-    const table = document.querySelector("table[data-heat-map]")!;
-    expect(table.querySelector("caption")!.textContent).toBe("Inherent score = likelihood × impact. Each cell shows the score and the level it falls in.");
-    expect([...table.querySelectorAll("thead th")].map((th) => th.textContent)).toEqual(["Likelihood ↓ · Impact →", "1: Negligible", "2: Minor", "3: Moderate", "4: Major", "5: Severe"]);
-    expect([...table.querySelectorAll("tbody th[scope=row]")].map((th) => th.textContent)).toEqual(["5: Almost certain", "4: Likely", "3: Possible", "2: Unlikely", "1: Rare"]);
-    const cells = [...table.querySelectorAll("tbody tr")].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent));
-    expect(cells).toEqual([
-      ["5 · Medium", "10 · High", "15 · Critical", "20 · Critical", "25 · Critical"],
-      ["4 · Low", "8 · Medium", "12 · High", "16 · Critical", "20 · Critical"],
-      ["3 · Low", "6 · Medium", "9 · Medium", "12 · High", "15 · Critical"],
-      ["2 · Low", "4 · Low", "6 · Medium", "8 · Medium", "10 · High"],
-      ["1 · Low", "2 · Low", "3 · Low", "4 · Low", "5 · Medium"],
+describe("the tab is one table", () => {
+  it("one toolbar and exactly one table filling the page: no cards, no stacked sections; Edit bands and Version history are labelled buttons", () => {
+    render(<RiskGradingView data={data()} />);
+    const root = document.querySelector("[data-risk-grading]")!;
+    expect(root.querySelectorAll("table")).toHaveLength(1);
+    expect(root.querySelectorAll("[data-toolbar]")).toHaveLength(1);
+    expect(root.querySelectorAll("section, [data-metadata-card], [data-slot=card], h2, h3, form")).toHaveLength(0);
+    expect(root.className).toContain("min-h-0");
+    expect(root.className).toContain("flex-1");
+    expect(root.querySelector("[data-table-view]")!.className).toContain("flex-1");
+    expect(root.querySelector("thead")!.className).toContain("sticky");
+    expect(root.querySelector("[data-pager]")).not.toBeNull();
+    expect(tableHead()).toEqual(["Rule", "Applies to", "Inherent", "Residual", "Level"]);
+    expect([...root.querySelectorAll("[data-toolbar] button")].map((b) => b.textContent!.trim())).toEqual(["Filters", "Export CSV", "Version history", "Edit bands"]);
+    for (const b of document.querySelectorAll("button")) expect(b.textContent!.trim()).not.toBe("");
+    expect(root.querySelector("[data-list-note]")!.textContent).toMatch(/^In force: Version 3\. Inherent score = likelihood × impact; .*Reduce: take a share off the inherent score\. Residual = inherent × \(1 − the control's reduction\).*A risk whose control isn't assessed stands at its inherent score; .*override.* is never derived again\.$/);
+    // 4 bands, 4 method steps and the 25 scores: 33 rows, paged 25 at a time.
+    expect(root.querySelector("[data-pager]")!.textContent).toContain("33 rows · Page 1 of 2");
+  });
+
+  it("the bands and the reduce method are rows: each level's bands, each control step's share with a worked example graded by the residual bands", () => {
+    const rows = gradingRows(data());
+    expect(rows.filter((r) => r.rule === "band").map((r) => [r.appliesTo, r.inherent, r.residual, r.levelName])).toEqual([
+      ["Level 1: Low", "1 to 4", "1 to 4", "Low"],
+      ["Level 2: Medium", "5 to 9", "5 to 9", "Medium"],
+      ["Level 3: High", "10 to 14", "10 to 14", "High"],
+      ["Level 4: Critical", "15 to 25", "15 to 25", "Critical"],
     ]);
-    // Coloured by level and labelled: every one of the 25 cells carries its level's name, and its colour follows the level.
-    const tds = [...table.querySelectorAll("td[data-heat-cell]")];
-    expect(tds).toHaveLength(25);
-    for (const td of tds) {
-      const level = td.getAttribute("data-level")!;
-      expect(td.textContent).toBe(`${td.getAttribute("data-score")} · ${DEFAULTS.levels[level as keyof typeof DEFAULTS.levels]}`);
-      expect(td.className).toMatch(/\bbg-/);
+    expect(rows.filter((r) => r.rule === "method").map((r) => [r.appliesTo, r.inherent, r.residual, r.levelName])).toEqual([
+      ["None control", "0% taken off", "Inherent 20 becomes 20", "Critical"],
+      ["Weak control", "25% taken off", "Inherent 20 becomes 15", "Critical"],
+      ["Partial control", "50% taken off", "Inherent 20 becomes 10", "High"],
+      ["Strong control", "75% taken off", "Inherent 20 becomes 5", "Medium"],
+    ]);
+    render(<RiskGradingView data={data()} />);
+    expect(tableRows().slice(0, 5)).toEqual([
+      ["Level band", "Level 1: Low", "1 to 4", "1 to 4", "Low"],
+      ["Level band", "Level 2: Medium", "5 to 9", "5 to 9", "Medium"],
+      ["Level band", "Level 3: High", "10 to 14", "10 to 14", "High"],
+      ["Level band", "Level 4: Critical", "15 to 25", "15 to 25", "Critical"],
+      ["Residual method", "None control", "0% taken off", "Inherent 20 becomes 20", "Critical"],
+    ]);
+  });
+
+  it("the heat map is 25 rows, the likeliest first: likelihood × impact, the score, and the level in words AND colour", () => {
+    const scores = gradingRows(data()).filter((r) => r.rule === "score");
+    expect(scores).toHaveLength(25);
+    expect(scores.slice(0, 5).map((r) => [r.appliesTo, r.inherent, r.levelName])).toEqual([
+      ["Likelihood 5: Almost certain × Impact 1: Negligible", "5", "Medium"],
+      ["Likelihood 5: Almost certain × Impact 2: Minor", "10", "High"],
+      ["Likelihood 5: Almost certain × Impact 3: Moderate", "15", "Critical"],
+      ["Likelihood 5: Almost certain × Impact 4: Major", "20", "Critical"],
+      ["Likelihood 5: Almost certain × Impact 5: Severe", "25", "Critical"],
+    ]);
+    expect(scores.at(-1)).toMatchObject({ appliesTo: "Likelihood 1: Rare × Impact 5: Severe", inherent: "5", levelName: "Medium" });
+    // Every score from 1×1 to 5×5, each graded by the inherent bands.
+    for (const r of scores) expect(r.levelName).toBe(DEFAULTS.levels[BANDS.find((b) => Number(r.inherent) >= b.from && Number(r.inherent) <= b.to)!.level as keyof typeof DEFAULTS.levels]);
+    // Coloured by level and labelled: each level's chip has its own colour and always its name.
+    render(<RiskGradingView data={data()} />);
+    const chips = [...document.querySelectorAll("[data-risk-grading] td [data-level]")];
+    expect(chips.length).toBe(25);
+    for (const c of chips) {
+      expect(c.textContent).toBe(DEFAULTS.levels[c.getAttribute("data-level") as keyof typeof DEFAULTS.levels]);
+      expect(c.className).toMatch(/\bbg-/);
     }
-    const colour = (level: string) => new Set(tds.filter((td) => td.getAttribute("data-level") === level).map((td) => td.className));
+    const colour = (level: string) => new Set(chips.filter((c) => c.getAttribute("data-level") === level).map((c) => c.className));
     for (const level of ["low", "medium", "high", "critical"]) expect(colour(level).size, level).toBe(1);
     expect(new Set(["low", "medium", "high", "critical"].map((l) => [...colour(l)][0])).size).toBe(4);
   });
 
   it("follows the bands and the level names in force", () => {
     const renamed = { ...REPLY, grading: { ...DEFAULTS, levels: { low: "Minor", medium: "Moderate", high: "Major", critical: "Severe" }, inherent_bands: [{ level: "low", from: 1, to: 2 }, { level: "medium", from: 3, to: 6 }, { level: "high", from: 7, to: 12 }, { level: "critical", from: 13, to: 25 }] } };
-    render(<HeatMapTable data={data(renamed)} />);
-    expect([...document.querySelectorAll('[data-heat-row="1"] td')].map((td) => td.textContent)).toEqual(["1 · Minor", "2 · Minor", "3 · Moderate", "4 · Moderate", "5 · Moderate"]);
-    expect(document.querySelector('[data-heat-cell="3x4"]')!.textContent).toBe("12 · Major");
-    expect(document.querySelector('[data-heat-cell="5x3"]')!.textContent).toBe("15 · Severe");
+    const rows = gradingRows(data(renamed));
+    const cell = (k: string) => rows.find((r) => r.key === `score-${k}`)!;
+    expect(["1x1", "1x2", "1x3", "1x4", "1x5"].map((k) => `${cell(k).inherent} · ${cell(k).levelName}`)).toEqual(["1 · Minor", "2 · Minor", "3 · Moderate", "4 · Moderate", "5 · Moderate"]);
+    expect(`${cell("3x4").inherent} · ${cell("3x4").levelName}`).toBe("12 · Major");
+    expect(`${cell("5x3").inherent} · ${cell("5x3").levelName}`).toBe("15 · Severe");
+    expect(rows[0].appliesTo).toBe("Level 1: Minor");
   });
-});
 
-describe("the section", () => {
-  it("four tables: the heat map, the bands, the residual method and the version history; Edit grading is a labelled button", () => {
+  it("the matrix method is rows too: the residual level per inherent level and control effectiveness, in words", () => {
+    const matrix = data({ ...REPLY, grading: { ...DEFAULTS, residual_method: "matrix" }, method_in_words: "Residual level = the matrix's cell." });
+    const rows = gradingRows(matrix).filter((r) => r.rule === "method");
+    expect(rows).toHaveLength(16);
+    expect(rows.filter((r) => r.inherent === "Critical").map((r) => [r.appliesTo, r.residual])).toEqual([
+      ["Critical risk with a none control", "Critical"],
+      ["Critical risk with a weak control", "Critical"],
+      ["Critical risk with a partial control", "High"],
+      ["Critical risk with a strong control", "Medium"],
+    ]);
+    expect(grading.deriveResidual(matrix.grading, 20, "partial")).toBe(14);
+  });
+
+  it("version history is a labelled button opening a sheet: every version a row, newest first, who, when and why, how many residual scores it moved; the one in force can't be restored onto itself", async () => {
     render(<RiskGradingView data={data()} />);
-    expect([...document.querySelectorAll("[data-grading-table]")].map((s) => [s.getAttribute("data-grading-table"), s.querySelector("h3")!.textContent])).toEqual([
-      ["heat-map", "Likelihood × impact"],
-      ["bands", "Levels and bands"],
-      ["method", "Residual method"],
-      ["history", "Version history"],
-    ]);
-    for (const s of document.querySelectorAll("[data-grading-table]")) expect(s.querySelectorAll("table"), s.getAttribute("data-grading-table")!).toHaveLength(1);
-    expect(document.querySelector("[data-grading-in-force]")!.textContent).toBe("In force: Version 3.");
-    expect(heads("bands")).toEqual(["Level", "Name", "Inherent band", "Residual band"]);
-    expect(rows("bands")).toEqual([
-      ["Level 1", "Low", "1 to 4", "1 to 4"],
-      ["Level 2", "Medium", "5 to 9", "5 to 9"],
-      ["Level 3", "High", "10 to 14", "10 to 14"],
-      ["Level 4", "Critical", "15 to 25", "15 to 25"],
-    ]);
-    // Reduce: each control step's share, with a worked example graded by the residual bands.
-    expect(heads("method")).toEqual(["Control effectiveness", "Share taken off", "Example: inherent 20 becomes"]);
-    expect(rows("method")).toEqual([
-      ["None", "0%", "20 (Critical)"],
-      ["Weak", "25%", "15 (Critical)"],
-      ["Partial", "50%", "10 (High)"],
-      ["Strong", "75%", "5 (Medium)"],
-    ]);
-    expect(document.querySelector('[data-grading-table="method"] p')!.textContent).toMatch(/^Reduce: take a share off the inherent score\. Residual = inherent × \(1 − the control's reduction\).*A risk whose control isn't assessed stands at its inherent score; .*override.* is never derived again\.$/);
-    expect(document.querySelector("[data-edit-grading]")!.textContent!.trim()).toBe("Edit grading");
-    for (const b of document.querySelectorAll("button")) expect(b.textContent!.trim()).not.toBe("");
-  });
-
-  it("the matrix method shows the residual level per inherent level and control effectiveness, in words", () => {
-    render(<RiskGradingView data={data({ ...REPLY, grading: { ...DEFAULTS, residual_method: "matrix" }, method_in_words: "Residual level = the matrix's cell." })} />);
-    expect(heads("method")).toEqual(["Inherent level", "None control", "Weak control", "Partial control", "Strong control"]);
-    expect(rows("method")).toEqual([
-      ["Low", "Low", "Low", "Low", "Low"],
-      ["Medium", "Medium", "Medium", "Low", "Low"],
-      ["High", "High", "High", "Medium", "Low"],
-      ["Critical", "Critical", "Critical", "High", "Medium"],
-    ]);
-    expect(grading.deriveResidual(data({ ...REPLY, grading: { ...DEFAULTS, residual_method: "matrix" } }).grading, 20, "partial")).toBe(14);
-  });
-
-  it("version history: every version kept, newest first, who, when and why, how many residual scores it moved; the one in force can't be restored onto itself", () => {
-    render(<RiskGradingView data={data()} />);
-    expect(heads("history")).toEqual(["Version", "When", "Who", "Why", "Residual scores moved", "Action"]);
-    expect(rows("history")).toEqual([
+    expect(document.querySelector("[data-grading-history]")).toBeNull();
+    await click("[data-grading-history-open]");
+    expect(document.querySelectorAll("[data-risk-grading] table")).toHaveLength(1);
+    expect(historyHead()).toEqual(["Version", "When", "Who", "Why", "Residual scores moved", "Action"]);
+    expect(historyRows()).toEqual([
       ["Version 3 (in force)", "2026-11-20 10:00", "Ada", "Back to the defaults (restored version 1)", "2", "In force"],
       ["Version 2", "2026-11-10 10:00", "Ada", "Partial controls count for less", "2", "Restore this version"],
       // Unmeasured is said, never a 0.
@@ -193,9 +212,9 @@ describe("the section", () => {
   });
 
   it("never changed: Mynt's defaults are in force, and the history says so in words", () => {
-    render(<RiskGradingView data={data({ ...REPLY, version: 0, history: [] })} />);
-    expect(document.querySelector("[data-grading-in-force]")!.textContent).toBe("In force: Mynt's defaults (never changed).");
-    expect(rows("history")).toEqual([["No versions yet: these are Mynt's defaults. The first change keeps them as version 1."]]);
+    render(<RiskGradingView data={data({ ...REPLY, version: 0, history: [] })} sheet="history" />);
+    expect(document.querySelector("[data-list-note]")!.textContent).toMatch(/^In force: Mynt's defaults \(never changed\)\./);
+    expect(historyRows()).toEqual([["No versions yet: these are Mynt's defaults. The first change keeps them as version 1."]]);
     expect(grading.gradingFrom({ version: 1 })).toBeNull();
     expect(grading.gradingFrom({ ...REPLY, grading: { ...DEFAULTS, inherent_bands: BANDS.slice(0, 3) } })).toBeNull();
   });
@@ -207,6 +226,8 @@ describe("Restore this version", () => {
     let changed = 0;
     render(<RiskGradingView data={data()} fetcher={f} onChanged={() => (changed += 1)} />);
     expect(document.querySelector('[data-admin-sheet="restore-grading"]')).toBeNull();
+    // Version history's sheet first, then the version's own labelled button.
+    await click("[data-grading-history-open]");
     await click('[data-restore-version="2"]');
     const sheet = document.querySelector('[data-admin-sheet="restore-grading"]')!;
     expect(sheet.textContent).toContain("Restore version 2: “Partial controls count for less”?");
@@ -229,7 +250,7 @@ describe("Restore this version", () => {
   });
 });
 
-describe("Edit grading", () => {
+describe("Edit bands", () => {
   it("the bands editor takes each band's end: the bands stay contiguous and cover 1 to 25 by construction; only what changed is sent", async () => {
     const { f, calls } = fetcher();
     render(<RiskGradingView data={data()} fetcher={f} />);
@@ -339,6 +360,6 @@ describe("the route", () => {
     expect(parseAdminCall("set_risk_grading", { restore_version: 2 })).toHaveProperty("error");
     expect(parseAdminCall("set_risk_grading", { note: "A reason", levels: { low: "Low", medium: "Medium", high: "High" } })).toHaveProperty("error");
     expect(parseAdminCall("set_risk_grading", { note: "A reason", matrix: { ...DEFAULTS.matrix, low: { none: "low", weak: "low", partial: "low", strong: "none" } } })).toHaveProperty("error");
-    expect(renderToStaticMarkup(<RiskGradingView data={data()} />)).toContain("data-heat-map");
+    expect(renderToStaticMarkup(<RiskGradingView data={data()} />)).toContain("Likelihood × impact");
   });
 });

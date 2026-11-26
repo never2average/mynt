@@ -1,4 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { PlatformKeyVault } from "./platform-keys.js";
+import type { OperationalSettings } from "./platform-settings.js";
 import type { EsignSource } from "./esign-settings.js";
 import type { WorkspaceSync } from "./workspace-sync.js";
 import type { LinkedAccountsService } from "./linked-accounts.js";
@@ -75,6 +77,8 @@ export interface AdminContext {
   esign?: EsignSource; // e-signature for program agreements: the live settings (esign-settings.ts), or a fixed one in tests
   confidential?: ConfidentialHost | null; // where the vault's keys, partners' sealed books and attesting keys live (confidential/)
   confidentialReleases?: ConfidentialReleases | null; // the confidential service's builds Mynt trusts
+  platformKeys?: PlatformKeyVault | null; // the platform key vault (platform-keys.ts); one over the store when not given
+  operationalSettings?: OperationalSettings | null; // the operational settings (platform-settings.ts); likewise
 }
 
 // Admin: everything is managed through Mynt itself, and every change is written to the audit log.

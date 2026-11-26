@@ -7,11 +7,10 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../dist/server.js";
 import { Store } from "../dist/store.js";
 import { BuildService, buildConfigFromEnv } from "../dist/builds.js";
-import { platformSettings } from "../dist/platform-admin.js";
 import { CATALOG, inProduction } from "./helpers.js";
 
 // The platform admin's reads (platform-admin.ts): every workspace, app and financial product across Mynt, paged and
-// read-only, for admins only; and the non-secret operational settings, never anything else from the environment.
+// read-only, for admins only. The operational settings are platform-settings.test.js's.
 
 const idleSandboxes = {
   async createSandbox() {
@@ -132,17 +131,10 @@ test("admins read every workspace, app and product across Mynt; nobody else has 
   assert.equal((await call(admin.client, "list_all_products", { query: "zzz-nothing" })).data.total, 0);
 });
 
-test("operational settings: only the allow-listed, non-secret keys, with their defaults and where each comes from", async () => {
-  const s = platformSettings({ BUILD_CAP_USD: "12", BUILD_AUDIT: "something", FREESTYLE_API_KEY: "secret-value", CLERK_SECRET_KEY: "x" });
-  const by = Object.fromEntries(s.map((x) => [x.key, x]));
-  assert.deepEqual(Object.keys(by), ["BUILD_CAP_USD", "BUILD_MONTHLY_CAP_USD", "BUILD_AUDIT", "BUILD_AUDIT_MODEL", "BUILD_AUDIT_CAP_USD", "BUILD_AUDIT_MINUTES", "BUILD_AUDIT_WORKFLOWS", "EXPLORE_CAP_USD", "FREESTYLE_USD_PER_HOUR"]);
-  assert.deepEqual([by.BUILD_CAP_USD.value, by.BUILD_CAP_USD.source], ["12", "environment"]);
-  assert.deepEqual([by.BUILD_MONTHLY_CAP_USD.value, by.BUILD_MONTHLY_CAP_USD.source], ["100", "default"]);
-  assert.equal(by.BUILD_AUDIT.value, "none", "anything but maxwell runs no audit, as builds.ts reads it");
-  assert.ok(!JSON.stringify(s).includes("secret-value"));
-
+test("operational settings: the admin's read still lists the nine settings first (platform-settings.test.js has the rest)", async () => {
   const { connect, call } = await setup();
   const admin = await connect("Ada", ["admin"]);
   const got = (await call(admin.client, "get_platform_settings")).data;
-  assert.equal(got.settings.length, 9);
+  assert.deepEqual(got.settings.slice(0, 9).map((s) => s.key), ["BUILD_CAP_USD", "BUILD_MONTHLY_CAP_USD", "BUILD_AUDIT", "BUILD_AUDIT_MODEL", "BUILD_AUDIT_CAP_USD", "BUILD_AUDIT_MINUTES", "BUILD_AUDIT_WORKFLOWS", "EXPLORE_CAP_USD", "FREESTYLE_USD_PER_HOUR"]);
+  assert.equal(got.settings.length, 15);
 });

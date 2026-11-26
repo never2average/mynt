@@ -90,4 +90,17 @@ export const AGREEMENT_ESIGN_TABLES = `
     set_by uuid REFERENCES ${T}.users(id),
     set_at timestamptz NOT NULL DEFAULT now()
   );
+  -- The table is the platform key vault (platform-keys.ts): one row per key, each of one type (key_type), one active
+  -- row per type. Replacing or removing a key retires its row and destroys its value (sealed becomes NULL; the row
+  -- keeps who, when and the fingerprint). name stays unique: the active row's slot, or retired:<id>.
+  ALTER TABLE ${T}.platform_secrets ALTER COLUMN sealed DROP NOT NULL;
+  ALTER TABLE ${T}.platform_secrets ADD COLUMN IF NOT EXISTS key_type text;
+  ALTER TABLE ${T}.platform_secrets ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'retired'));
+  ALTER TABLE ${T}.platform_secrets ADD COLUMN IF NOT EXISTS fingerprint text;
+  ALTER TABLE ${T}.platform_secrets ADD COLUMN IF NOT EXISTS validated_at timestamptz;
+  ALTER TABLE ${T}.platform_secrets ADD COLUMN IF NOT EXISTS last_used_at timestamptz;
+  ALTER TABLE ${T}.platform_secrets ADD COLUMN IF NOT EXISTS retired_at timestamptz;
+  ALTER TABLE ${T}.platform_secrets ADD COLUMN IF NOT EXISTS retired_by uuid REFERENCES ${T}.users(id);
+  ALTER TABLE ${T}.platform_secrets ADD COLUMN IF NOT EXISTS retired_reason text;
+  CREATE UNIQUE INDEX IF NOT EXISTS platform_secrets_one_active_per_type ON ${T}.platform_secrets (key_type) WHERE status = 'active' AND key_type IS NOT NULL;
 `;

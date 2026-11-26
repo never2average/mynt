@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { operationalSetting } from "./platform-settings.js";
 import type { AgentMeter } from "./agent-meter.js";
 import type { AgentRun } from "./agent-proxy.js";
 import { serialLoop } from "./worker.js";
@@ -77,8 +78,13 @@ export interface ReviewConfig extends AgentHostConfig {
 export function reviewConfigFromEnv(host: AgentHostConfig, env = process.env): ReviewConfig {
   return {
     ...host,
-    caseCapUsd: Number(env.REVIEW_CASE_CAP_USD ?? 3),
-    monthlyCapUsd: Number(env.REVIEW_MONTHLY_CAP_USD ?? 60),
+    // Operational settings (platform-settings.ts): read at each use, so an admin's change needs no restart.
+    get caseCapUsd() {
+      return Number(operationalSetting("REVIEW_CASE_CAP_USD", env) ?? 3);
+    },
+    get monthlyCapUsd() {
+      return Number(operationalSetting("REVIEW_MONTHLY_CAP_USD", env) ?? 60);
+    },
     autoOpen: env.REVIEW_AUTO_OPEN === "1",
     sandboxType: env.BUILD_SANDBOX_TYPE ?? "default",
   };

@@ -123,7 +123,7 @@ The platform admin is for Mynt admins, across all workspaces and firms. What its
 | Audit trails | `/platform/audit` | `components/admin-audit.tsx`, `lib/admin-audit.ts` | `GET /api/admin/audit?limit=` (1 to 500) |
 | Risk models | `/platform/risk-models` | `components/admin-risk-models.tsx`, `lib/risk-models.ts` | `GET` and `POST /api/admin/risk-models`, `GET` and `POST /api/admin/risk-models/<id>` |
 | Risk register | `/platform/risk-register` | `components/admin-risk-register.tsx`, `components/risk-register.tsx`, `lib/admin-risks.ts` | `GET /api/admin/risks?area=<area>`, `POST /api/admin/risks` |
-| Platform settings | `/platform/settings` | `components/admin-settings.tsx`, `components/esign-settings-view.tsx` | `/api/admin/settings`, `/api/admin/esign` |
+| Platform settings | `/platform/settings` (`?tab=keys`, `operational`, `esign`, `risk-grading`) | `components/admin-settings.tsx`, `components/admin-key-vault.tsx`, `components/admin-operational-settings.tsx`, `components/esign-settings-view.tsx`, `components/admin-risk-grading.tsx`, `lib/platform-settings.ts` | `/api/admin/keys`, `/api/admin/settings`, `/api/admin/esign`, `/api/admin/risk-grading` |
 
 Engineering notes that hold for every section:
 

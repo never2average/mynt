@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { operationalSetting } from "./platform-settings.js";
 import type { AgentMeter } from "./agent-meter.js";
 import type { AgentRun } from "./agent-proxy.js";
 import { serialLoop } from "./worker.js";
@@ -119,7 +120,7 @@ export interface BuildConfig {
 }
 
 // Each developer's build budget per calendar month (BUILD_MONTHLY_CAP_USD, default 100).
-export const monthlyBuildCapUsd = (env = process.env) => Number(env.BUILD_MONTHLY_CAP_USD ?? 100);
+export const monthlyBuildCapUsd = (env = process.env) => Number(operationalSetting("BUILD_MONTHLY_CAP_USD", env) ?? 100);
 
 // Each workspace's build budget per calendar month (BUILD_WORKSPACE_MONTHLY_CAP_USD); null when unset or not positive.
 export const workspaceBuildCapUsd = (env = process.env) => {
@@ -127,10 +128,17 @@ export const workspaceBuildCapUsd = (env = process.env) => {
   return env.BUILD_WORKSPACE_MONTHLY_CAP_USD && Number.isFinite(n) && n > 0 ? n : null;
 };
 
+// The caps and the audit's settings are operational settings (platform-settings.ts): read each time they're used, so
+// an admin's change applies to the next build without a restart. The environment still wins where it sets them.
 export function buildConfigFromEnv(env = process.env): BuildConfig {
+  const setting = (key: string) => operationalSetting(key, env);
   return {
-    capUsd: Number(env.BUILD_CAP_USD ?? 10),
-    monthlyCapUsd: monthlyBuildCapUsd(env),
+    get capUsd() {
+      return Number(setting("BUILD_CAP_USD") ?? 10);
+    },
+    get monthlyCapUsd() {
+      return monthlyBuildCapUsd(env);
+    },
     workspaceMonthlyCapUsd: workspaceBuildCapUsd(env),
     agentBackend: agentBackendFromEnv(env),
     model: env.BUILD_AGENT_MODEL ?? "claude-opus-5-5",
@@ -139,11 +147,21 @@ export function buildConfigFromEnv(env = process.env): BuildConfig {
     maxwellRepo: env.BUILD_MAXWELL_REPO ?? "https://github.com/OnFinance/Maxwell",
     publicUrl: (env.PUBLIC_URL ?? "").replace(/\/+$/, ""),
     audit: {
-      mode: env.BUILD_AUDIT === "maxwell" ? "maxwell" : "none",
-      model: env.BUILD_AUDIT_MODEL ?? "claude-sonnet-5-5",
-      capUsd: Number(env.BUILD_AUDIT_CAP_USD ?? 5),
-      minutes: Number(env.BUILD_AUDIT_MINUTES ?? 20),
-      workflows: (env.BUILD_AUDIT_WORKFLOWS ?? "execute-scr,probe-cicd-env").split(",").map((w) => w.trim()).filter(Boolean),
+      get mode() {
+        return setting("BUILD_AUDIT") === "maxwell" ? ("maxwell" as const) : ("none" as const);
+      },
+      get model() {
+        return setting("BUILD_AUDIT_MODEL") ?? "claude-sonnet-5-5";
+      },
+      get capUsd() {
+        return Number(setting("BUILD_AUDIT_CAP_USD") ?? 5);
+      },
+      get minutes() {
+        return Number(setting("BUILD_AUDIT_MINUTES") ?? 20);
+      },
+      get workflows() {
+        return (setting("BUILD_AUDIT_WORKFLOWS") ?? "execute-scr,probe-cicd-env").split(",").map((w) => w.trim()).filter(Boolean);
+      },
     },
     solanaSnapshot: env.SOLANA_BUILD_SNAPSHOT !== "off",
     solanaSnapshotMaxAgeDays: Number(env.SOLANA_BUILD_SNAPSHOT_MAX_AGE_DAYS ?? 7),

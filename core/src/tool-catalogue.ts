@@ -116,6 +116,8 @@ export const AREA_OF_REGISTRAR: Record<string, ToolAreaId> = {
   registerTakeRateAdminTools: "admin",
   registerOpsTools: "admin",
   registerPlatformAdminTools: "admin",
+  registerPlatformKeyTools: "admin",
+  registerPlatformSettingTools: "admin",
 };
 
 export type CatalogueTool = {
@@ -145,7 +147,7 @@ const READ_NAME = /^(list|get|search|whoami|describe|preview|explain|check|show|
 // tools a fully configured server has. Nothing is ever called (no request runs).
 function inertServices(): AdminContext {
   const inert = () => new Proxy({}, { get: (_t, k) => (k === "then" ? undefined : () => null) });
-  const keys = ["clerkAdmin", "identity", "workspaceSync", "builds", "bd", "desk", "review", "explore", "hosting", "modules", "solana", "gate", "productHealth", "covenants", "treasury", "esign"] as const;
+  const keys = ["clerkAdmin", "identity", "workspaceSync", "builds", "bd", "desk", "review", "explore", "hosting", "modules", "solana", "gate", "productHealth", "covenants", "treasury", "esign", "platformKeys", "operationalSettings"] as const;
   return Object.fromEntries(keys.map((k) => [k, inert()])) as AdminContext;
 }
 

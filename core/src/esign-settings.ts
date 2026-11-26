@@ -1,16 +1,16 @@
-import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ESIGN_ADAPTERS, ESIGN_ENV, ESIGN_PROVIDER_NAMES } from "./esign/adapters.js";
 import { ESignError, testModeFromEnv, type ESign } from "./esign/provider.js";
 import type { Store, User } from "./store.js";
-import { open as unseal, seal, vaultAvailable } from "./vault.js";
+import { PlatformKeyVault } from "./platform-keys.js";
 
 // E-signature set up from Mynt itself (Mynt Studio's Settings → E-signature, admins only), so nobody edits the
-// server's environment: an admin pastes the service's API key once; Mynt checks it with the service, seals it under
-// MYNT_VAULT_KEY in its own database (platform_secrets, one row per key, never returned or logged), registers the
-// webhook that sends it the service's events (reusing one already pointing at Mynt) and seals that webhook's id the
-// same way (it's the key the service signs its events with). Test mode and the provider are plain settings. The
+// server's environment: an admin pastes the service's API key once; Mynt checks it with the service, keeps it in the
+// platform key vault (platform-keys.ts: one row per key, sealed by the confidential host, never returned or logged),
+// registers the webhook that sends it the service's events (reusing one already pointing at Mynt) and keeps that
+// webhook's id the same way (it's the key the service signs its events with). Both are rows of the vault, so the
+// vault's own Set key and Remove key work on them too. Test mode and the provider are plain settings. The
 // environment still wins where it's set: ESIGN_PROVIDER, SIGNWELL_API_KEY, SIGNWELL_WEBHOOK_ID and ESIGN_TEST_MODE
 // override what's stored, so a deployment that set them keeps working.
 //
@@ -20,7 +20,6 @@ const T = "financial_products";
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string) => ({ ...json({ error }), isError: true });
 const SETTING = "esign";
-const secretName = (provider: string, what: "api_key" | "webhook_id") => `esign:${provider}:${what}`;
 export const ESIGN_WEBHOOK_PATH = "/esign/webhook";
 
 type Stored = { provider?: string; test_mode?: boolean; webhook_url?: string | null; webhook_registered_at?: string | null; webhook_reused?: boolean };
@@ -34,6 +33,7 @@ export interface EsignSettingsOptions {
   env?: NodeJS.ProcessEnv;
   fetch?: typeof fetch; // tests only: a fake of the service
   publicUrl?: string | null; // defaults to PUBLIC_URL
+  keys?: PlatformKeyVault; // the platform key vault the keys live in; one over the same environment when not given
 }
 
 export class EsignSettings {
@@ -41,10 +41,13 @@ export class EsignSettings {
   private constructor(
     private readonly store: Store,
     private readonly opts: EsignSettingsOptions,
+    readonly keys: PlatformKeyVault,
   ) {}
 
   static async open(store: Store, opts: EsignSettingsOptions = {}): Promise<EsignSettings> {
-    const s = new EsignSettings(store, opts);
+    const s = new EsignSettings(store, opts, opts.keys ?? (await PlatformKeyVault.open(store, { env: opts.env })));
+    // A key set or removed in the vault itself (set_platform_key) is in use from the next call.
+    s.keys.onChange((type) => (Object.values(ESIGN_ENV).some((n) => n.apiKey === type || n.webhookId === type) ? s.reload().catch(() => undefined) : undefined));
     await s.reload().catch((e) => console.error("esign settings: not loaded:", e instanceof ESignError ? e.code : (e as Error).name));
     return s;
   }
@@ -55,21 +58,6 @@ export class EsignSettings {
 
   private async stored(): Promise<Stored> {
     return (await this.store.getSetting<Stored>(SETTING)) ?? {};
-  }
-
-  private async secret(name: string): Promise<{ value: string; set_at: string; set_by: string | null; set_by_name: string | null } | null> {
-    const r = (await this.store.db.query(`SELECT s.sealed, s.set_at, s.set_by, u.name FROM ${T}.platform_secrets s LEFT JOIN ${T}.users u ON u.id = s.set_by WHERE s.name = $1`, [name])).rows[0];
-    if (!r) return null;
-    if (!vaultAvailable(false)) return null;
-    return { value: unseal(r.sealed as string, false), set_at: new Date(r.set_at as string).toISOString(), set_by: (r.set_by as string | null) ?? null, set_by_name: (r.name as string | null) ?? null };
-  }
-
-  private async putSecret(name: string, value: string, userId: string) {
-    await this.store.db.query(
-      `INSERT INTO ${T}.platform_secrets (id, name, sealed, set_by) VALUES ($1, $2, $3, $4)
-       ON CONFLICT (name) DO UPDATE SET sealed = EXCLUDED.sealed, set_by = EXCLUDED.set_by, set_at = now()`,
-      [randomUUID(), name, seal(value, false), userId],
-    );
   }
 
   private async putStored(next: Stored, userId: string) {
@@ -102,8 +90,8 @@ export class EsignSettings {
       return;
     }
     const envNames = ESIGN_ENV[adapter.name];
-    const apiKey = this.env[envNames.apiKey]?.trim() || (await this.secret(secretName(adapter.name, "api_key")))?.value || null;
-    const webhookId = this.env[envNames.webhookId]?.trim() || (await this.secret(secretName(adapter.name, "webhook_id")))?.value || null;
+    const apiKey = this.env[envNames.apiKey]?.trim() || (await this.keys.stored(envNames.apiKey)) || null;
+    const webhookId = this.env[envNames.webhookId]?.trim() || (await this.keys.stored(envNames.webhookId)) || null;
     const testMode = (this.env.ESIGN_TEST_MODE ?? "").trim() ? testModeFromEnv(this.env) : stored.test_mode !== false;
     this.current = apiKey ? { provider: adapter.provider({ apiKey, webhookId, fetch: this.opts.fetch }), testMode } : null;
   }
@@ -113,8 +101,8 @@ export class EsignSettings {
     const stored = await this.stored();
     const { name, source: providerSource } = await this.providerName(stored);
     const env = name ? ESIGN_ENV[name] : undefined;
-    const keyRow = name ? (await this.store.db.query(`SELECT s.set_at, u.name FROM ${T}.platform_secrets s LEFT JOIN ${T}.users u ON u.id = s.set_by WHERE s.name = $1`, [secretName(name, "api_key")])).rows[0] : undefined;
-    const hookRow = name ? (await this.store.db.query(`SELECT set_at FROM ${T}.platform_secrets WHERE name = $1`, [secretName(name, "webhook_id")])).rows[0] : undefined;
+    const keyRow = env ? await this.keys.row(env.apiKey) : null;
+    const hookRow = env ? await this.keys.row(env.webhookId) : null;
     const keyFromEnv = Boolean(env && this.env[env.apiKey]?.trim());
     const hookFromEnv = Boolean(env && this.env[env.webhookId]?.trim());
     const testFromEnv = Boolean((this.env.ESIGN_TEST_MODE ?? "").trim());
@@ -124,16 +112,16 @@ export class EsignSettings {
       provider: name,
       provider_source: providerSource,
       configured: this.current !== null,
-      vault_ready: vaultAvailable(false),
+      vault_ready: await this.keys.ready(),
       key: keyFromEnv
         ? { set: true, source: "environment" as const, set_at: null, set_by: null }
         : keyRow
-          ? { set: true, source: "studio" as const, set_at: new Date(keyRow.set_at as string).toISOString(), set_by: (keyRow.name as string | null) ?? null }
+          ? { set: true, source: "studio" as const, set_at: keyRow.set_at, set_by: keyRow.set_by }
           : { set: false, source: null, set_at: null, set_by: null },
       webhook: {
         registered: hookFromEnv || Boolean(hookRow),
         source: hookFromEnv ? ("environment" as const) : hookRow ? ("studio" as const) : null,
-        registered_at: hookRow ? new Date(hookRow.set_at as string).toISOString() : null,
+        registered_at: hookRow ? hookRow.set_at : null,
         reused_existing: hookRow ? stored.webhook_reused === true : null,
         callback_url: this.callbackUrl(),
         can_register: this.callbackUrl() !== null,
@@ -148,7 +136,7 @@ export class EsignSettings {
   async setKey(user: User, provider: string, apiKey: string): Promise<{ ok: true; webhook: { registered: boolean; reused?: boolean; reason?: string } } | { ok: false; error: string }> {
     const adapter = ESIGN_ADAPTERS[provider];
     if (!adapter) return { ok: false, error: `No e-signature adapter called '${provider}'` };
-    if (!vaultAvailable(false)) return { ok: false, error: "This server's vault key (MYNT_VAULT_KEY) isn't configured, so it can't keep the key" };
+    if (!(await this.keys.ready())) return { ok: false, error: "This server's vault key (MYNT_VAULT_KEY) isn't configured, so it can't keep the key" };
     try {
       await adapter.setup({ apiKey, fetch: this.opts.fetch }).validateKey();
     } catch (e) {
@@ -156,7 +144,8 @@ export class EsignSettings {
       await this.store.audit(user.id, "set_esign_api_key_refused", "esign", { provider, reason: code });
       return { ok: false, error: code === "not_authorised" ? "The e-signature service refused that key: check it and paste it again" : `Couldn't check the key with the e-signature service (${code}); try again shortly` };
     }
-    await this.putSecret(secretName(provider, "api_key"), apiKey, user.id);
+    const kept = await this.keys.set(user, ESIGN_ENV[adapter.name].apiKey, apiKey, { validated: true });
+    if (!kept.ok) return kept;
     const stored = await this.stored();
     await this.putStored({ ...stored, provider }, user.id);
     await this.store.audit(user.id, "set_esign_api_key", "esign", { provider });
@@ -171,13 +160,14 @@ export class EsignSettings {
     const name = (await this.providerName(stored)).name;
     const adapter = name ? ESIGN_ADAPTERS[name] : undefined;
     if (!adapter) return { registered: false, reason: "E-signature isn't configured on this deployment yet" };
-    const apiKey = keyGiven ?? (this.env[ESIGN_ENV[adapter.name].apiKey]?.trim() || (await this.secret(secretName(adapter.name, "api_key")))?.value);
+    const apiKey = keyGiven ?? (this.env[ESIGN_ENV[adapter.name].apiKey]?.trim() || (await this.keys.stored(ESIGN_ENV[adapter.name].apiKey)));
     if (!apiKey) return { registered: false, reason: "Set the e-signature service's API key first" };
     const url = this.callbackUrl();
     if (!url) return { registered: false, reason: "This server's public address (PUBLIC_URL) isn't an https address, so the service can't reach its webhook" };
     try {
       const hook = await adapter.setup({ apiKey, fetch: this.opts.fetch }).registerWebhook(url);
-      await this.putSecret(secretName(adapter.name, "webhook_id"), hook.id, user.id);
+      const kept = await this.keys.set(user, ESIGN_ENV[adapter.name].webhookId, hook.id, { validated: true });
+      if (!kept.ok) return { registered: false, reason: kept.error };
       await this.putStored({ ...(await this.stored()), webhook_url: url, webhook_registered_at: new Date().toISOString(), webhook_reused: hook.reused }, user.id);
       await this.store.audit(user.id, "register_esign_webhook", "esign", { provider: adapter.name, callback_url: url, reused: hook.reused });
       await this.reload();
@@ -197,18 +187,20 @@ export class EsignSettings {
     let webhookDeleted = false;
     let removed = false;
     if (adapter) {
-      const key = await this.secret(secretName(adapter.name, "api_key"));
-      const hook = await this.secret(secretName(adapter.name, "webhook_id"));
+      const names = ESIGN_ENV[adapter.name];
+      const key = await this.keys.stored(names.apiKey);
+      const hook = await this.keys.stored(names.webhookId);
       if (key && hook) {
         try {
-          await adapter.setup({ apiKey: key.value, fetch: this.opts.fetch }).deleteWebhook(hook.value);
+          await adapter.setup({ apiKey: key, fetch: this.opts.fetch }).deleteWebhook(hook);
           webhookDeleted = true;
         } catch {
           // the stored id goes either way; a hook left at the service can't reach a Mynt without its id
         }
       }
-      const r = await this.store.db.query(`DELETE FROM ${T}.platform_secrets WHERE name = ANY($1) RETURNING name`, [[secretName(adapter.name, "api_key"), secretName(adapter.name, "webhook_id")]]);
-      removed = r.rows.length > 0;
+      // Both rows are retired and their values destroyed (platform-keys.ts).
+      const gone = [await this.keys.remove(user, names.apiKey), await this.keys.remove(user, names.webhookId)];
+      removed = gone.some((g) => g.removed);
       await this.putStored({ ...stored, webhook_url: null, webhook_registered_at: null, webhook_reused: false }, user.id);
       await this.store.audit(user.id, "remove_esign_api_key", "esign", { provider: adapter.name, webhook_deleted: webhookDeleted });
     }
@@ -242,7 +234,7 @@ export function registerEsignAdminTools(server: McpServer, store: Store, user: U
     {
       title: "Set the e-signature API key",
       description:
-        "Admin: set the e-signature service's API key. Mynt checks it with the service, keeps it sealed (never shown again), then registers the service's webhook to this server (reusing one already pointing here). The server's environment, where it sets a key, still takes precedence. Audited without the key.",
+        "Admin: set the e-signature service's API key. Mynt checks it with the service, keeps it sealed in the platform key vault (never shown again; set_platform_key does the same), then registers the service's webhook to this server (reusing one already pointing here). The server's environment, where it sets a key, still takes precedence. Audited without the key.",
       inputSchema: { provider: z.enum(ESIGN_PROVIDER_NAMES), api_key: z.string().trim().min(8).max(500).regex(/^[\x21-\x7e]+$/, "The key as the service shows it, without spaces") },
     },
     async ({ provider, api_key }) => {

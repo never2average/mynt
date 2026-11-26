@@ -299,18 +299,18 @@ Every step is audited, in the obligations class: `upload_agreement_template`, `r
 
 ### Setting it up in Mynt Studio
 
-Nobody edits the server's environment. A Mynt admin opens **Platform admin → Platform settings** (`/platform/settings`; see [Platform settings](platform-admin.md#platform-settings)) and does the rest in its E-signature section. The old workspace **Settings → E-signature** address goes there.
+Nobody edits the server's environment. A Mynt admin opens **Platform admin → Platform settings** (`/platform/settings`; see [Platform settings](platform-admin.md#platform-settings)) and does the rest in its E-signature tab. The old workspace **Settings → E-signature** address goes there.
 
-1. **Save the key.** Pick the service (`signwell`), paste its API key into the password field and press **Check and save key**. Mynt checks the key with a cheap authenticated read of the key's own account. A key the service refuses isn't kept. An accepted key is sealed under `MYNT_VAULT_KEY` in Mynt's database (`platform_secrets`, one row per key). It is never returned, shown or logged: the section shows only "Key set on <date> by <admin>".
-2. **Mynt registers the webhook.** It registers the service's webhook to `<PUBLIC_URL>/esign/webhook`, reusing one already pointing there, and seals the webhook's id the same way. The service signs its events with that id (HMAC-SHA256 of the event's `type@time`). **Re-register webhook** does this again. Without an https `PUBLIC_URL` the key is kept, and the section says the webhook waits for one.
-3. **Choose the mode.** **Test mode** is a switch, on by default. On: documents are free and not legally binding, for trying the whole flow. Off: documents are legally binding and count towards the service's billing. Documents already made keep the mode they were made in.
-4. **Remove the key, when needed.** **Remove key** deletes the webhook at the service, then the stored key and webhook id. Program agreements are then signed by hand.
+1. **Save the key.** Press **Set key**, pick the service (`signwell`), paste its API key into the sheet's password field and press **Check and save key**. Mynt checks the key with a cheap authenticated read of the key's own account. A key the service refuses isn't kept. An accepted key is kept in the [platform key vault](platform-admin.md#the-key-vault): sealed by the confidential host in Mynt's database (`platform_secrets`, one row per key). It is never returned, shown or logged: the tab shows only "Key set on <date> by <admin>". The key is a row of the Key vault tab too, and **Set key** there does the same.
+2. **Mynt registers the webhook.** It registers the service's webhook to `<PUBLIC_URL>/esign/webhook`, reusing one already pointing there, and seals the webhook's id the same way. The service signs its events with that id (HMAC-SHA256 of the event's `type@time`). **Re-register webhook** does this again. Without an https `PUBLIC_URL` the key is kept, and the tab says the webhook waits for one.
+3. **Choose the mode.** **Change mode** opens a sheet with the **Test mode** switch, on by default. On: documents are free and not legally binding, for trying the whole flow. Off: documents are legally binding and count towards the service's billing. Documents already made keep the mode they were made in.
+4. **Remove the key, when needed.** **Remove key** (typed out to confirm) deletes the webhook at the service, then retires the stored key and webhook id and destroys their values. Program agreements are then signed by hand.
 
-The section shows whether e-signature is on, the key's line, the mode, whether the webhook is registered, and when Mynt last received an event.
+The tab is one table. Its rows are whether e-signature is on, the key's line, the mode, whether the webhook is registered, and when Mynt last received an event.
 
 ### E-signature admin tools
 
-The tools behind the section are `get_esign_settings`, `set_esign_api_key`, `register_esign_webhook`, `remove_esign_api_key` and `set_esign_test_mode`. They are for Mynt admins only and never return a secret.
+The tools behind the tab are `get_esign_settings`, `set_esign_api_key`, `register_esign_webhook`, `remove_esign_api_key` and `set_esign_test_mode`. They are for Mynt admins only and never return a secret.
 
 They are audited in the security class without any value: `set_esign_api_key`, `set_esign_api_key_refused`, `register_esign_webhook`, `register_esign_webhook_refused`, `remove_esign_api_key` and `set_esign_test_mode`.
 

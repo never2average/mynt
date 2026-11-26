@@ -19,6 +19,7 @@ import { SettingsTab } from "@/components/admin-settings"
 import { VendorsTab } from "@/components/admin-vendors"
 import { WorkspacesTab } from "@/components/admin-workspaces"
 import { adminHref, firmsHref, firmsTabOf, type AdminTab } from "@/lib/admin"
+import { settingsHref, settingsTabOf } from "@/lib/platform-settings"
 
 export function PlatformSection({ tab, id }: { tab: AdminTab; id: string | null }) {
   const router = useRouter()
@@ -29,6 +30,8 @@ export function PlatformSection({ tab, id }: { tab: AdminTab; id: string | null 
   const firmTab = FIRM_DETAIL_TABS.find((t) => t === query?.get("tab")) as FirmDetailTab | undefined
   // The Regulated firms section itself opens on the tab its address names (/platform/firms?tab=licences), Regulated firms otherwise.
   const firmsTab = firmsTabOf(query?.get("tab"))
+  // Platform settings opens on the tab its address names (/platform/settings?tab=operational), Key vault otherwise.
+  const settingsTab = settingsTabOf(query?.get("tab"))
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto" data-admin-page data-platform-section={tab}>
       <div className="@container/main flex min-h-0 w-full flex-1 flex-col gap-4 p-4 lg:gap-5 lg:p-6">
@@ -39,7 +42,7 @@ export function PlatformSection({ tab, id }: { tab: AdminTab; id: string | null 
         {tab === "audit" && <AuditTab id={id} onOpen={open("audit")} onBack={back("audit")} />}
         {tab === "risk-models" && <RiskModelsTab id={id} onOpen={open("risk-models")} onBack={back("risk-models")} />}
         {tab === "risk-register" && <RiskRegisterTab id={id} onOpen={open("risk-register")} onBack={back("risk-register")} />}
-        {tab === "settings" && <SettingsTab />}
+        {tab === "settings" && <SettingsTab tab={settingsTab} onTab={(t) => router.push(settingsHref(t))} />}
       </div>
     </div>
   )

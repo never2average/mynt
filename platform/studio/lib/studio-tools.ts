@@ -723,11 +723,18 @@ export const riskModelDefinition = {
   thresholds: z.array(z.object({ name: modelField, value: z.union([z.number(), z.string().trim().min(1).max(200)]), meaning: modelText.optional() }).strict()).max(50),
 };
 
+// A platform key's type or an operational setting's name: the name Mynt's server reads it by.
+const platformKeyType = z.string().regex(/^[A-Z][A-Z0-9_]{2,60}$/);
 export const ADMIN_TOOLS = {
   // Overview: what needs attention across Mynt.
   ops_status: z.object({ hours: z.number().int().min(1).max(720).optional() }).strict(),
-  // Platform settings: the operational settings (read-only) and e-signature (moved here from workspace Settings).
+  // Platform settings: the key vault for Mynt's own keys (a value goes in once and is never read back), the
+  // operational settings, and e-signature (moved here from workspace Settings).
+  list_platform_keys: z.object({}).strict(),
+  set_platform_key: z.object({ type: platformKeyType, value: z.string().min(8).max(8000) }).strict(),
+  remove_platform_key: z.object({ type: platformKeyType, confirm: z.literal(true) }).strict(),
   get_platform_settings: z.object({}).strict(),
+  set_platform_setting: z.object({ key: platformKeyType, value: z.string().trim().min(1).max(600).nullable() }).strict(),
   get_esign_settings: z.object({}).strict(),
   set_esign_api_key: z.object({ provider: z.enum(["signwell"]), api_key: z.string().trim().min(8).max(500).regex(/^[\x21-\x7e]+$/) }).strict(),
   register_esign_webhook: z.object({}).strict(),

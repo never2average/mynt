@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { operationalSetting } from "./platform-settings.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -45,9 +46,16 @@ export interface ExploreConfig {
 
 export function exploreConfigFromEnv(desk: DeskConfig, env = process.env): ExploreConfig {
   return {
-    capUsd: Number(env.EXPLORE_CAP_USD ?? 20),
-    maxIterations: Number(env.EXPLORE_MAX_ITERATIONS ?? 25),
-    maxMinutes: Number(env.EXPLORE_MAX_MINUTES ?? 60),
+    // Operational settings (platform-settings.ts): read at each use, so an admin's change needs no restart.
+    get capUsd() {
+      return Number(operationalSetting("EXPLORE_CAP_USD", env) ?? 20);
+    },
+    get maxIterations() {
+      return Number(operationalSetting("EXPLORE_MAX_ITERATIONS", env) ?? 25);
+    },
+    get maxMinutes() {
+      return Number(operationalSetting("EXPLORE_MAX_MINUTES", env) ?? 60);
+    },
     experimentTimeoutSeconds: Number(env.EXPLORE_EXPERIMENT_TIMEOUT_SECONDS ?? 120),
     sandboxType: desk.sandboxType,
   };

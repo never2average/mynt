@@ -88,7 +88,7 @@
       "id": "admin",
       "title": "Admin & governance",
       "summary": "Regions and the regulatory model, categories, take rates, invitations, oversight and operations.",
-      "tools": 53
+      "tools": 57
     }
   ],
   "roles": [
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Also holds the builder, vendor and licence-provider roles (except the licence-provider tools that act as a member of the firm itself), but not the liquidity-provider role.",
-      "tools": 426,
+      "tools": 430,
       "get_started": [
         {
           "tool": "define_region",
@@ -8537,7 +8537,7 @@
     {
       "name": "get_platform_settings",
       "title": "Operational settings",
-      "description": "Admin: the operational settings this server runs with that aren't secrets (build and audit spend caps, the build audit, the exploration cap, the hosted VM hour's price): each one's value in effect, its default, and whether the server's environment sets it. Read-only: they're changed on the server, never through a tool.",
+      "description": "Admin: the operational settings this server runs with that aren't secrets (build, audit, desk, review and exploration budgets and limits, the build audit, the hosted VM hour's price): each one's value in effect, its default, where the value comes from (the server's environment, which wins; what an admin set in Mynt; or Mynt's default), how a new value is checked, and what it's for. Change one with set_platform_setting.",
       "area": "admin",
       "roles": [
         "admin"
@@ -11098,6 +11098,27 @@
         "type": "object",
         "properties": {},
         "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "list_platform_keys",
+      "title": "The platform key vault",
+      "description": "Admin: every key Mynt's own server uses, one row per key type: what it's for, which part of Mynt uses it, where its value comes from (Key vault, Server environment or Not set; the server's environment overrides the vault), who set it and when, a short fingerprint (the first 8 hex characters of its SHA-256), when it was last checked with its provider and last used where known, and whether a change needs a restart. The keys that can only be set on the server are listed too, with why. Never a key's value. include_history adds each type's retired keys (who, when, why; their values are destroyed).",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "include_history": {
+            "type": "boolean"
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       }
     },
     {
@@ -13989,6 +14010,50 @@
       }
     },
     {
+      "name": "remove_platform_key",
+      "title": "Remove a platform key",
+      "description": "Admin: remove a key from the vault: its row is retired and its value destroyed. Whatever uses it stops (at once, or after a restart for keys read when the server starts) unless the server's environment sets the same key. Removing the e-signature API key also deletes its webhook at the service. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "FREESTYLE_API_KEY",
+              "BOAT_API_KEY",
+              "HOSTING_DO_TOKEN",
+              "ANTHROPIC_API_KEY",
+              "CLERK_SECRET_KEY",
+              "CLERK_WEBHOOK_SECRET",
+              "GITHUB_APP_PRIVATE_KEY",
+              "SOLANA_RPC_URL_DEVNET",
+              "SOLANA_RPC_URL_MAINNET",
+              "TURNKEY_API_PRIVATE_KEY",
+              "SIGNWELL_API_KEY",
+              "SIGNWELL_WEBHOOK_ID",
+              "MYNT_PSEUDONYM_SECRET"
+            ]
+          },
+          "confirm": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "type",
+          "confirm"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "remove_regulated_product_type",
       "title": "Remove a regulated product type",
       "description": "Admin: delete a product type from a region's catalogue. Refused while any regulator still supervises it.",
@@ -16293,7 +16358,7 @@
     {
       "name": "set_esign_api_key",
       "title": "Set the e-signature API key",
-      "description": "Admin: set the e-signature service's API key. Mynt checks it with the service, keeps it sealed (never shown again), then registers the service's webhook to this server (reusing one already pointing here). The server's environment, where it sets a key, still takes precedence. Audited without the key.",
+      "description": "Admin: set the e-signature service's API key. Mynt checks it with the service, keeps it sealed in the platform key vault (never shown again; set_platform_key does the same), then registers the service's webhook to this server (reusing one already pointing here). The server's environment, where it sets a key, still takes precedence. Audited without the key.",
       "area": "admin",
       "roles": [
         "admin"
@@ -16602,6 +16667,107 @@
           "source"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "set_platform_key",
+      "title": "Set or replace a platform key",
+      "description": "Admin: set one of Mynt's own keys (list_platform_keys names the types and how each is checked). The value is checked for its type's format (the e-signature API key is also checked with the service, and its webhook registered), sealed, and becomes the type's one active key: a key it replaces is retired and its value destroyed. The value is never shown again. Keys read where they're used apply at once; the others after the server restarts, and the answer says which. Where the server's environment sets the same key, the environment keeps winning. Audited without the value.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "FREESTYLE_API_KEY",
+              "BOAT_API_KEY",
+              "HOSTING_DO_TOKEN",
+              "ANTHROPIC_API_KEY",
+              "CLERK_SECRET_KEY",
+              "CLERK_WEBHOOK_SECRET",
+              "GITHUB_APP_PRIVATE_KEY",
+              "SOLANA_RPC_URL_DEVNET",
+              "SOLANA_RPC_URL_MAINNET",
+              "TURNKEY_API_PRIVATE_KEY",
+              "SIGNWELL_API_KEY",
+              "SIGNWELL_WEBHOOK_ID",
+              "MYNT_PSEUDONYM_SECRET"
+            ]
+          },
+          "value": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 8000,
+            "description": "The key, sent once. Never returned"
+          }
+        },
+        "required": [
+          "type",
+          "value"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "set_platform_setting",
+      "title": "Change an operational setting",
+      "description": "Admin: change one operational setting (get_platform_settings lists them and how each is checked). The value is checked against the setting's type and range first. It applies from the next use, without a restart. Where the server's environment sets the same setting, the environment keeps winning and the answer says so. value null puts the setting back to Mynt's default. Audited, old value to new.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "enum": [
+              "BUILD_CAP_USD",
+              "BUILD_MONTHLY_CAP_USD",
+              "BUILD_AUDIT",
+              "BUILD_AUDIT_MODEL",
+              "BUILD_AUDIT_CAP_USD",
+              "BUILD_AUDIT_MINUTES",
+              "BUILD_AUDIT_WORKFLOWS",
+              "EXPLORE_CAP_USD",
+              "FREESTYLE_USD_PER_HOUR",
+              "EXPLORE_MAX_ITERATIONS",
+              "EXPLORE_MAX_MINUTES",
+              "DESK_JOB_CAP_USD",
+              "DESK_MONTHLY_CAP_USD",
+              "REVIEW_CASE_CAP_USD",
+              "REVIEW_MONTHLY_CAP_USD"
+            ]
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 600
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The new value, as text; null for Mynt's default"
+          }
+        },
+        "required": [
+          "key",
+          "value"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       }
     },
     {
