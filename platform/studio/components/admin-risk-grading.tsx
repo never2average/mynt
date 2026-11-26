@@ -317,7 +317,6 @@ export function RiskGradingView({ data, onChanged = () => undefined, sheet = nul
         importable={false}
         onExport={() => downloadCsv(`risk-grading-version-${data.version}.csv`, csvOf(GRADING_CSV_HEAD, rows.map((r) => [GRADING_RULE_LABELS[r.rule], r.appliesTo, r.inherent, r.residual, r.levelName])))}
         exportDisabled={!rows.length}
-        note={`In force: ${versionWords(data.version)}. Inherent score = likelihood × impact; a score's level is the band it falls in. ${METHOD_LABELS[g.residual_method]}. ${data.methodWords} A risk whose control isn't assessed stands at its inherent score; one whose keeper set the residual themselves (an override) is never derived again.`}
         cta={
           <>
             <Button variant="outline" onClick={() => setHistory(true)} data-grading-history-open>

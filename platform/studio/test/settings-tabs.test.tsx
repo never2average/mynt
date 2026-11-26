@@ -451,7 +451,7 @@ describe("Operational settings", () => {
     ]);
     expect(document.querySelector('[data-operational-settings] tr[data-row="EXPLORE_CAP_USD"] button')).toBeNull();
     expect([...document.querySelectorAll("[data-operational-settings] [data-toolbar] button")].map((b) => b.textContent!.trim())).toEqual(["Filters", "Export CSV"]);
-    expect(document.querySelector("[data-list-note]")!.textContent).toContain("The server's environment, where it sets a setting, overrides what's set in Mynt");
+    expect(document.querySelector("[data-list-note]")).toBeNull(); // no description under the toolbar
     expect(lib.settingCsvRow(lib.settingsFrom(SETTINGS)![1])).toEqual(["BUILD_MONTHLY_CAP_USD", "250", "100", "Set in Mynt", "Each developer's build budget per calendar month", "Coding-agent builds", "A number from 1 to 50000"]);
     // An older Mynt that can't change them: the same table, without Change setting.
     cleanup();

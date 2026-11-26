@@ -182,11 +182,8 @@ export function KeyVaultView({ vault, onChanged = () => undefined, fetcher, open
         importable={false}
         onExport={() => downloadCsv("platform-keys.csv", csvOf(KEY_CSV_HEAD, rows.map(keyCsvRow)))}
         exportDisabled={!rows.length}
-        note={
-          vault.vaultReady
-            ? "A key the server's environment sets overrides the vault. Values are never shown: only who set a key, when, and its fingerprint (the first 8 characters of its SHA-256)."
-            : "This server can't seal keys yet: its vault key (MYNT_VAULT_KEY) isn't set. Ask whoever runs the server to set it; until then keys can only be set on the server."
-        }
+        // No description under the toolbar; only the warning when keys can't be set here at all.
+        note={vault.vaultReady ? undefined : "This server can't seal keys yet: its vault key (MYNT_VAULT_KEY) isn't set. Ask whoever runs the server to set it; until then keys can only be set on the server."}
         page={paged.page}
         pages={paged.pages}
         total={rows.length}
