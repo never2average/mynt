@@ -431,14 +431,36 @@ Settings such as the Supabase directory (`SUPABASE_DIR`, default `/opt/supabase`
 
 ## Settings by name
 
-Mynt has two kinds of settings.
+Mynt's settings are kept in three places.
 
 **Environment variables.** Secrets and infrastructure settings are read from the server's environment when it starts. They are referenced by name only: values live in the server's environment file, never in the repository, a command line, a log or a chat. `node dist/index.js --help` lists the main ones. The table below names every setting the server reads and links to the section that explains it.
 
-**Database settings.** Settings Mynt admins change while the server runs are stored in the database and set through admin tools or in Studio under Platform admin, Platform settings:
+**The platform key vault.** A Mynt admin can set the server's own keys from Mynt instead: Studio's Platform admin, Platform settings, Key vault, or `set_platform_key`. Each key is sealed by the confidential host and never returned. The keys it takes are listed in [The key vault](platform-admin.md#the-key-vault).
+
+**Operational settings.** The budgets, limits and the build audit can be changed from Mynt too, in Platform settings' Operational settings tab or with `set_platform_setting`. They are listed in [Operational settings](platform-admin.md#operational-settings).
+
+**Precedence.** For every key and every operational setting, the server's environment wins where it sets the name. Otherwise Mynt uses what an admin set in Mynt (the vault's key, or the stored setting). Otherwise a key is unset and a setting takes Mynt's default. So setting nothing in Mynt changes nothing, and the operator can always override or recover from the server. An empty variable doesn't count as set.
+
+**What takes effect when.** An operational setting applies from its next use. A key that is read where it's used (`SIGNWELL_API_KEY`, `SIGNWELL_WEBHOOK_ID`, `CLERK_WEBHOOK_SECRET`, `MYNT_PSEUDONYM_SECRET`) applies at once. Every other vault key is read when the server starts, so it applies after a restart, and its row says so.
+
+**Keys that must stay on the server.** These can't be set in the vault:
+
+| Setting | Why |
+|---|---|
+| `DATABASE_URL` | Mynt needs it to open the database the vault is kept in |
+| `MYNT_VAULT_KEY` | It is the key the vault is sealed with |
+| `CONFIDENTIAL_HOST`, `CONFIDENTIAL_HOST_URL`, `CONFIDENTIAL_HOST_CLIENT_CERT`, `CONFIDENTIAL_HOST_CLIENT_KEY`, `CONFIDENTIAL_HOST_KMS_KEY` | They are read before the vault opens; the certificate and key are files on the server's disk |
+| `GOOGLE_APPLICATION_CREDENTIALS` | It names a key file on the server's disk |
+| `FINANCIAL_PRODUCTS_TOKEN` | It says who is running the stdio command |
+
+Identifiers that go with a vault key but aren't secret stay in the environment too: `CLERK_PUBLISHABLE_KEY`, `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `TURNKEY_ORGANIZATION_ID` and `TURNKEY_API_PUBLIC_KEY`.
+
+**Database settings.** The other settings Mynt admins change while the server runs are stored in the database and set through admin tools or in Studio under Platform admin, Platform settings:
 
 | Setting | Changed with | Explained in |
 |---|---|---|
+| The platform's own keys | `set_platform_key`, `remove_platform_key`, or Platform settings' Key vault in Studio | [The key vault](platform-admin.md#the-key-vault) |
+| Operational settings (budgets, limits, the build audit) | `set_platform_setting`, or Platform settings' Operational settings in Studio | [Operational settings](platform-admin.md#operational-settings) |
 | E-signature (the provider's key, the webhook, test mode) | `set_esign_api_key`, `register_esign_webhook`, `set_esign_test_mode`, `remove_esign_api_key`, or Platform settings in Studio | [E-signature](agreements.md#e-signature) |
 | Public sign-up | `set_public_signup` | [Public sign-up](workspaces-and-sign-in.md#public-sign-up) |
 | The Mynt Ramp's firm | `set_mynt_ramp` | [The Mynt Ramp](vendors-and-marketplace.md#the-mynt-ramp) |

@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { platformSecret } from "./platform-keys.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { PRODUCT_LINES } from "./catalog.js";
@@ -21,7 +22,7 @@ export function requesterRef(secret: string, innovatorId: string, userId: string
 }
 
 // The pseudonym key. Without it innovators see no requests at all (fail closed).
-const pseudonymSecret = (env = process.env) => env.MYNT_PSEUDONYM_SECRET?.trim() || null;
+const pseudonymSecret = (env = process.env) => platformSecret("MYNT_PSEUDONYM_SECRET", env)?.trim() || null; // the environment's, else the key vault's
 
 // Contact and account details a person may type into a need by mistake. Innovators see the text,
 // so these are removed before it is stored.

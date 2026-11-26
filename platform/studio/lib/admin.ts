@@ -215,17 +215,8 @@ export function opsFrom(reply: unknown): Ops | null {
 
 // ---- Platform settings ----
 
-export type PlatformSetting = { key: string; value: string; default: string; source: "environment" | "default"; description: string }
-export function settingsFrom(reply: unknown): PlatformSetting[] | null {
-  if (!isObj(reply) || !Array.isArray(reply.settings)) return null
-  return reply.settings.filter(isObj).map((s) => ({
-    key: String(s.key ?? ""),
-    value: String(s.value ?? ""),
-    default: String(s.default ?? ""),
-    source: s.source === "environment" ? "environment" : "default",
-    description: String(s.description ?? ""),
-  }))
-}
+// The operational settings and the key vault are lib/platform-settings.ts's.
+export { settingsFrom, type PlatformSetting } from "./platform-settings"
 
 // ---- Workspaces and products across Mynt (list_all_workspaces, list_all_products; a workspace's apps from admin_get_workspace) ----
 

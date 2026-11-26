@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { operationalSetting } from "./platform-settings.js";
 import type { Db } from "./db.js";
 import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
 import { seal, open } from "./vault.js";
@@ -500,7 +501,7 @@ export class HostingService {
 
   // ---- what each hosted app's VM costs, over time (usage-meter.ts) ----
 
-  private usdPerHour = () => Number(process.env.FREESTYLE_USD_PER_HOUR ?? 0.2);
+  private usdPerHour = () => Number(operationalSetting("FREESTYLE_USD_PER_HOUR") ?? 0.2);
   private async sampleVm(appId: string, vmId: string, fromZero = false) {
     if (!isDirect(this.provider)) return;
     const { seconds } = fromZero ? { seconds: 0 } : await this.provider.usage(vmId);
@@ -783,7 +784,7 @@ export class HostingService {
   }
 
   // Machine time and its estimated cost, for the developer and admins.
-  async usage(tenant: Tenant, usdPerHour = Number(process.env.FREESTYLE_USD_PER_HOUR ?? 0.2)) {
+  async usage(tenant: Tenant, usdPerHour = Number(operationalSetting("FREESTYLE_USD_PER_HOUR") ?? 0.2)) {
     if (!isDirect(this.provider)) return null;
     let seconds = 0;
     const vms = await this.appVms(tenant.id);

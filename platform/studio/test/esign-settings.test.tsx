@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { Session } from "@/lib/session-store";
 import { esignStatusFrom, keyLine, webhookLine } from "@/lib/esign-settings";
 
-// Admin → Platform settings → E-signature (moved from workspace Settings): what the section shows (never a key or a webhook id), the route behind it (same
+// Admin → Platform settings → E-signature (moved from workspace Settings): what the tab's one table shows (never a key or a webhook id), the route behind it (same
 // origin, signed in, admins only (anyone else: 404, as for the whole Admin area), strict actions, the key passed to Mynt once and never echoed), and the frame
 // origins the studio learns from Mynt for the signing sheet and its Content-Security-Policy.
 
@@ -60,15 +60,18 @@ beforeEach(() => {
   frame.resetEsignFrameOrigins();
 });
 
-describe("the section", () => {
-  it("status in words, never a key; the actions labelled; what each mode means", () => {
+describe("the tab", () => {
+  it("status in words as rows of one table, never a key; the actions labelled; what each mode means", () => {
     const s = esignStatusFrom(STATUS)!;
     expect(keyLine(s)).toBe("Key set on 2026-11-23 10:00 by Ada");
     expect(webhookLine(s)).toBe("Registered on 2026-11-23 10:00");
     const html = renderToStaticMarkup(<EsignSettingsView status={s} onAction={() => undefined} />);
+    expect(html.match(/<table/g)).toHaveLength(1);
     expect(html).toContain("On, with SignWell");
-    expect(html).toContain('type="password"');
-    expect(html).toContain("Check and save key");
+    // Nothing is typed on the page itself: the key's password field is in the Set key sheet (test/settings-tabs.test.tsx).
+    expect(html).not.toContain('type="password"');
+    expect(html).toContain("Replace key");
+    expect(html).toContain("Change mode");
     expect(html).toContain("Re-register webhook");
     expect(html).toContain("Remove key");
     expect(html).toContain("not legally binding");
@@ -79,7 +82,9 @@ describe("the section", () => {
     expect(envHtml).not.toContain("data-esign-remove-key");
     expect(envHtml).toContain("legally binding and count towards");
     const off = esignStatusFrom({ ...STATUS, configured: false, key: { set: false }, webhook: { registered: false, can_register: false } })!;
-    expect(renderToStaticMarkup(<EsignSettingsView status={off} onAction={() => undefined} />)).toContain("Off: program agreements are signed by hand");
+    const offHtml = renderToStaticMarkup(<EsignSettingsView status={off} onAction={() => undefined} />);
+    expect(offHtml).toContain("Off: program agreements are signed by hand");
+    expect(offHtml).toContain("Set key");
     expect(webhookLine(off)).toContain("isn't https");
   });
 });

@@ -494,7 +494,7 @@ Each section is described in [The platform admin in Studio](platform-admin.md#th
 | --- | --- |
 | `/platform/risk-register/<id>` | One risk in full: Mynt's own, or an app's or a product's opened from the register's table (read-only). See [A risk's detail](risk.md#a-risks-detail) |
 | `/platform/risk-models/<id>` | One of Mynt's risk models, with its health in words and the risks linked to it |
-| `/platform/settings` | Platform settings, with [Risk grading](platform-admin.md#platform-settings): the heat map, the bands, the residual method and the version history |
+| `/platform/settings` | [Platform settings](platform-admin.md#platform-settings), four tabs that are each one table: Key vault, Operational settings, E-signature and Risk grading |
 
 ## Docs and search
 

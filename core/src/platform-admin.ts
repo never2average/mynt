@@ -83,30 +83,6 @@ const appSelect = (p: Awaited<ReturnType<typeof appParts>>) => `
   LEFT JOIN ${T}.workspaces w ON w.id = a.workspace_id
   LEFT JOIN ${T}.users u ON u.id = a.owner_id`;
 
-// The allow-listed operational settings (non-secret: prices, budgets, the build audit), as this server runs with them.
-// Only these keys are ever read, and only whether each is set in the environment and the value in effect.
-export const PLATFORM_SETTINGS: { key: string; default: string; kind: "usd" | "usd_per_hour" | "minutes" | "text" | "list"; description: string }[] = [
-  { key: "BUILD_CAP_USD", default: "10", kind: "usd", description: "Spend cap for one coding-agent build" },
-  { key: "BUILD_MONTHLY_CAP_USD", default: "100", kind: "usd", description: "Each developer's build budget per calendar month" },
-  { key: "BUILD_AUDIT", default: "none", kind: "text", description: "The security audit run on each build: maxwell, or none" },
-  { key: "BUILD_AUDIT_MODEL", default: "claude-sonnet-5-5", kind: "text", description: "The model the build audit runs on" },
-  { key: "BUILD_AUDIT_CAP_USD", default: "5", kind: "usd", description: "Spend cap for one build audit" },
-  { key: "BUILD_AUDIT_MINUTES", default: "20", kind: "minutes", description: "Time limit for one build audit" },
-  { key: "BUILD_AUDIT_WORKFLOWS", default: "execute-scr,probe-cicd-env", kind: "list", description: "The audit's workflows, in order" },
-  { key: "EXPLORE_CAP_USD", default: "20", kind: "usd", description: "Spend cap for one algorithm exploration" },
-  { key: "FREESTYLE_USD_PER_HOUR", default: "0.2", kind: "usd_per_hour", description: "What one hosted VM hour is priced at for spend caps and P&L" },
-];
-
-export function platformSettings(env: NodeJS.ProcessEnv = process.env) {
-  return PLATFORM_SETTINGS.map((s) => {
-    const raw = env[s.key];
-    const set = typeof raw === "string" && raw.trim() !== "";
-    // BUILD_AUDIT takes only maxwell; anything else runs none (builds.ts).
-    const value = s.key === "BUILD_AUDIT" ? (raw === "maxwell" ? "maxwell" : "none") : set ? raw!.trim().slice(0, 200) : s.default;
-    return { key: s.key, value, default: s.default, source: set ? ("environment" as const) : ("default" as const), kind: s.kind, description: s.description };
-  });
-}
-
 export function registerPlatformAdminTools(server: McpServer, db: Db) {
   server.registerTool(
     "list_all_workspaces",
@@ -284,17 +260,5 @@ export function registerPlatformAdminTools(server: McpServer, db: Db) {
         offset,
       });
     },
-  );
-
-  server.registerTool(
-    "get_platform_settings",
-    {
-      title: "Operational settings",
-      description:
-        "Admin: the operational settings this server runs with that aren't secrets (build and audit spend caps, the build audit, the exploration cap, the hosted VM hour's price): each one's value in effect, its default, and whether the server's environment sets it. Read-only: they're changed on the server, never through a tool.",
-      inputSchema: {},
-      annotations: { readOnlyHint: true },
-    },
-    async () => json({ settings: platformSettings() }),
   );
 }

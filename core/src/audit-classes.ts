@@ -35,6 +35,12 @@ const SECURITY = [
   "register_esign_webhook_refused",
   "remove_esign_api_key",
   "set_esign_test_mode",
+  // the platform key vault: Mynt's own keys set, replaced or removed by an admin, never their values (platform-keys.ts)
+  "set_platform_key",
+  "set_platform_key_refused",
+  "remove_platform_key",
+  // an operational setting changed, old value to new (platform-settings.ts)
+  "set_platform_setting",
   "rotate_partner_ledger_secret",
   // which builds of the confidential service Mynt trusts (confidential/governance.ts)
   "confidential_release_announced",
