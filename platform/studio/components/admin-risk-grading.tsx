@@ -1,22 +1,25 @@
 "use client"
 
 // Admin → Platform settings → Risk grading (lib/risk-grading.ts; GET and POST /api/admin/risk-grading): how every risk
-// on every register is graded. Four tables, read-only:
-// - the likelihood × impact heat map: a real 5×5 table, each cell its score and its level in words (coloured by level
-//   AND labelled: colour is never the only signal),
-// - the bands: each level's name and its inherent and residual score bands,
-// - the residual method: reduce (each control step's reduction, with a worked example) or matrix (the residual level
-//   per inherent level and control step), with the method in words,
-// - the version history, each kept version with who, when and why, and a labelled Restore this version.
-// Edit grading and Restore this version are labelled buttons opening a sheet; either makes a new version, and Mynt
-// derives the residual scores that aren't overridden again and says how many moved. Server-renderable.
-import { useCallback, useState } from "react"
+// on every register is graded, as ONE table filling the page under one toolbar (search, Filters, Export CSV, Version
+// history, Edit bands). Its rows are the grading's rules, each with what it applies to, the inherent and residual
+// side, and the level in words (coloured by level AND labelled: colour is never the only signal):
+// - Level band: each level's name and its inherent and residual score bands,
+// - Residual method: reduce (each control step's reduction, with a worked example) or matrix (the residual level per
+//   inherent level and control step),
+// - Likelihood × impact: the 5×5 heat map as 25 rows, the likeliest first: the score and the level it falls in.
+// Edit bands opens the sheet that changes the level names, the bands and the residual method; Version history opens
+// a sheet with every kept version as a row (who, when, why) and its labelled Restore this version. Either change
+// makes a new version, and Mynt derives the residual scores that aren't overridden again and says how many moved.
+import { useCallback, useMemo, useState } from "react"
 import { History, SlidersHorizontal } from "lucide-react"
 
-import { AdminNotReady, AdminSheet, AdminTable, Field, fieldClass, useAdminAction, useAdminData } from "@/components/admin-kit"
-import { Section } from "@/components/dashboard-panels"
+import { AdminList, AdminNotReady, AdminSheet, AdminTable, Field, fieldClass, useAdminAction, useAdminData } from "@/components/admin-kit"
+import { downloadCsv } from "@/components/licences-view"
+import { matches, usePaged } from "@/components/list-layout"
 import { Button } from "@/components/ui/button"
-import { bandsOf, bandWords, boundsOf, deriveResidual, METHOD_LABELS, percentWords, stepWords, versionWords, type Grading, type GradingChange, type GradingData, type GradingVersion } from "@/lib/risk-grading"
+import { csvOf } from "@/lib/admin"
+import { bandsOf, bandWords, boundsOf, deriveResidual, levelOf, METHOD_LABELS, percentWords, stepWords, versionWords, type Grading, type GradingChange, type GradingData, type GradingVersion } from "@/lib/risk-grading"
 import { CONTROL_STEPS, RISK_LEVELS_ASC, type ControlStep, type RiskLevelKey } from "@/lib/risk-register"
 import { IMPACT_WORDS, LIKELIHOOD_WORDS } from "@/components/risk-register"
 
@@ -30,43 +33,6 @@ const LEVEL_CLASS: Record<RiskLevelKey, string> = {
 }
 const whenOf = (iso: string | null) => (iso ? iso.replace("T", " ").slice(0, 16) : "Not recorded")
 const EXAMPLE = 20
-
-/** The 5×5 grid as a table: likelihood down the side (the likeliest first), impact across, each cell its score and level. */
-export function HeatMapTable({ data }: { data: GradingData }) {
-  return (
-    <div className="overflow-x-auto rounded-lg border">
-      <table className="w-full border-collapse text-sm" data-heat-map>
-        <caption className="caption-top px-3 py-2 text-left text-xs text-muted-foreground">Inherent score = likelihood × impact. Each cell shows the score and the level it falls in.</caption>
-        <thead>
-          <tr>
-            <th scope="col" className="border-b px-3 py-2 text-left font-medium">
-              Likelihood ↓ · Impact →
-            </th>
-            {[1, 2, 3, 4, 5].map((i) => (
-              <th key={i} scope="col" className="border-b px-3 py-2 text-left font-medium">
-                {i}: {IMPACT_WORDS[i]}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {data.heatMap.map((row) => (
-            <tr key={row.likelihood} data-heat-row={row.likelihood}>
-              <th scope="row" className="border-b px-3 py-2 text-left font-medium whitespace-nowrap">
-                {row.likelihood}: {LIKELIHOOD_WORDS[row.likelihood]}
-              </th>
-              {row.cells.map((c) => (
-                <td key={c.impact} className={`border-b px-3 py-2 tabular-nums ${LEVEL_CLASS[c.level]}`} data-heat-cell={`${row.likelihood}x${c.impact}`} data-score={c.score} data-level={c.level}>
-                  {c.score} · {c.levelName}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
-}
 
 type Draft = { names: Record<RiskLevelKey, string>; inherent: string[]; residual: string[]; method: Grading["residual_method"]; reduce: Record<ControlStep, string>; matrix: Grading["matrix"]; note: string }
 const draftOf = (g: Grading): Draft => ({
@@ -107,7 +73,7 @@ export function EditGradingSheet({ data, open, onClose, onDone, fetcher }: { dat
   const set = (p: Partial<Draft>) => setD((was) => ({ ...was, ...p }))
   const bound = (key: "inherent" | "residual", i: number, v: string) => set({ [key]: d[key].map((x, n) => (n === i ? v : x)) } as Partial<Draft>)
   return (
-    <AdminSheet open={open} title="Edit grading" description="The level names, the score bands and the residual method. Saving makes a new version; the old ones stay, and Mynt derives every residual score that isn't overridden again." onClose={onClose} error={problem ?? action.error} result={action.result} id="edit-grading">
+    <AdminSheet open={open} title="Edit bands" description="The level names, the score bands and the residual method. Saving makes a new version; the old ones stay, and Mynt derives every residual score that isn't overridden again." onClose={onClose} error={problem ?? action.error} result={action.result} id="edit-grading">
       {action.result === null && (
         <form
           className="flex flex-col gap-3"
@@ -233,129 +199,177 @@ export function RestoreGradingSheet({ version, onClose, onDone, fetcher }: { ver
   )
 }
 
-export const BANDS_HEAD = ["Level", "Name", "Inherent band", "Residual band"] as const
-export const REDUCE_HEAD = ["Control effectiveness", "Share taken off", `Example: inherent ${EXAMPLE} becomes`] as const
+export const GRADING_HEAD = ["Rule", "Applies to", "Inherent", "Residual", "Level"] as const
 export const HISTORY_HEAD = ["Version", "When", "Who", "Why", "Residual scores moved", "Action"] as const
+export const GRADING_RULES = ["band", "method", "score"] as const
+export type GradingRule = (typeof GRADING_RULES)[number]
+export const GRADING_RULE_LABELS: Record<GradingRule, string> = { band: "Level band", method: "Residual method", score: "Likelihood × impact" }
+export type GradingRow = { key: string; rule: GradingRule; appliesTo: string; inherent: string; residual: string; level: RiskLevelKey; levelName: string }
 
-/** The section's four tables, with Edit grading and each version's Restore this version. */
-export function RiskGradingView({ data, onChanged = () => undefined, sheet = null, fetcher }: { data: GradingData; onChanged?: () => void; sheet?: "edit" | { restore: number } | null; fetcher?: typeof fetch }) {
+/** The grading as the table's rows: the four bands, the residual method's steps, then the heat map's 25 cells (the likeliest first). */
+export function gradingRows(data: GradingData): GradingRow[] {
+  const g = data.grading
+  const name = (l: RiskLevelKey) => g.levels[l]
+  const bands: GradingRow[] = RISK_LEVELS_ASC.map((l, i) => ({ key: `band-${l}`, rule: "band", appliesTo: `Level ${i + 1}: ${name(l)}`, inherent: bandWords(g.inherent_bands[i]), residual: bandWords(g.residual_bands[i]), level: l, levelName: name(l) }))
+  const method: GradingRow[] =
+    g.residual_method === "reduce"
+      ? CONTROL_STEPS.map((s) => {
+          const r = deriveResidual(g, EXAMPLE, s)
+          const level = levelOf(g.residual_bands, r)
+          return { key: `method-${s}`, rule: "method", appliesTo: `${stepWords(s)} control`, inherent: `${percentWords(g.reduce[s])} taken off`, residual: `Inherent ${EXAMPLE} becomes ${r}`, level, levelName: name(level) }
+        })
+      : RISK_LEVELS_ASC.flatMap((l) =>
+          CONTROL_STEPS.map((s): GradingRow => ({ key: `method-${l}-${s}`, rule: "method", appliesTo: `${name(l)} risk with a ${stepWords(s).toLowerCase()} control`, inherent: name(l), residual: name(g.matrix[l][s]), level: g.matrix[l][s], levelName: name(g.matrix[l][s]) })),
+        )
+  const scores: GradingRow[] = data.heatMap.flatMap((row) =>
+    row.cells.map(
+      (c): GradingRow => ({
+        key: `score-${row.likelihood}x${c.impact}`,
+        rule: "score",
+        appliesTo: `Likelihood ${row.likelihood}: ${LIKELIHOOD_WORDS[row.likelihood]} × Impact ${c.impact}: ${IMPACT_WORDS[c.impact]}`,
+        inherent: String(c.score),
+        residual: "By the control's effectiveness",
+        level: c.level,
+        levelName: c.levelName,
+      }),
+    ),
+  )
+  return [...bands, ...method, ...scores]
+}
+
+/** Version history: every kept version as a row, with its labelled Restore this version. */
+export function GradingHistorySheet({ data, open, onClose, onRestore }: { data: GradingData; open: boolean; onClose: () => void; onRestore: (v: GradingVersion) => void }) {
+  return (
+    <AdminSheet
+      open={open}
+      title="Version history"
+      description="Every version of the grading that was in force: who changed it, when and why, and how many residual scores it moved. Restoring one makes a new version; none is ever lost."
+      onClose={onClose}
+      id="grading-history"
+    >
+      <div className="overflow-x-auto rounded-lg border" data-grading-history>
+        <AdminTable
+          head={HISTORY_HEAD}
+          rowKeys={data.history.map((v) => String(v.version))}
+          rows={data.history.map((v) => [
+            `Version ${v.version}${v.version === data.version ? " (in force)" : ""}`,
+            whenOf(v.at),
+            v.by ?? "Mynt",
+            <span key="w" className="block min-w-40 font-normal whitespace-normal">
+              {v.note ?? "No reason recorded"}
+              {v.restoredFrom !== null ? ` (restored version ${v.restoredFrom})` : ""}
+            </span>,
+            v.residualsChanged === null ? "Not recorded" : String(v.residualsChanged),
+            v.version === data.version || !v.grading ? (
+              v.version === data.version ? "In force" : "Can't be read"
+            ) : (
+              <span key="a" className="flex justify-end">
+                <Button size="sm" variant="outline" onClick={() => onRestore(v)} data-restore-version={v.version}>
+                  <History /> Restore this version
+                </Button>
+              </span>
+            ),
+          ])}
+          empty="No versions yet: these are Mynt's defaults. The first change keeps them as version 1."
+        />
+      </div>
+    </AdminSheet>
+  )
+}
+
+export const GRADING_CSV_HEAD = ["Rule", "Applies to", "Inherent", "Residual", "Level"]
+
+/** The Risk grading tab: one toolbar, one table; Edit bands, Version history and Restore this version in sheets. */
+export function RiskGradingView({ data, onChanged = () => undefined, sheet = null, fetcher }: { data: GradingData; onChanged?: () => void; sheet?: "edit" | "history" | { restore: number } | null; fetcher?: typeof fetch }) {
   const [editing, setEditing] = useState(sheet === "edit")
-  const [restoring, setRestoring] = useState<GradingVersion | null>(sheet && sheet !== "edit" ? (data.history.find((v) => v.version === sheet.restore) ?? null) : null)
+  const [history, setHistory] = useState(sheet === "history")
+  const [restoring, setRestoring] = useState<GradingVersion | null>(sheet && typeof sheet === "object" ? (data.history.find((v) => v.version === sheet.restore) ?? null) : null)
   const [dirty, setDirty] = useState(false)
+  const [query, setQuery] = useState("")
+  const [rule, setRule] = useState<string[]>([])
+  const [level, setLevel] = useState<string[]>([])
   const close = () => {
     setEditing(false)
+    setHistory(false)
     setRestoring(null)
     if (dirty) onChanged()
     setDirty(false)
   }
   const g = data.grading
-  const residualLevel = (score: number) => g.levels[(g.residual_bands.find((b) => score >= b.from && score <= b.to) ?? g.residual_bands[3]).level]
-  const sub = (title: string, id: string, body: React.ReactNode, note?: string) => (
-    <section className="flex min-w-0 flex-col gap-1" data-grading-table={id}>
-      <h3 className="text-sm font-semibold">{title}</h3>
-      {note && <p className="text-xs text-muted-foreground">{note}</p>}
-      {body}
-    </section>
+  const all = useMemo(() => gradingRows(data), [data])
+  const rows = useMemo(
+    () => all.filter((r) => matches(query, GRADING_RULE_LABELS[r.rule], r.appliesTo, r.inherent, r.residual, r.levelName) && (!rule.length || rule.includes(r.rule)) && (!level.length || level.includes(r.level))),
+    [all, query, rule, level],
   )
+  const paged = usePaged(rows)
   return (
-    <div className="flex flex-col gap-4" data-risk-grading data-grading-version={data.version}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm" data-grading-in-force>
-          In force: {versionWords(data.version)}.
-        </p>
-        <Button variant="outline" onClick={() => setEditing(true)} data-edit-grading>
-          <SlidersHorizontal /> Edit grading
-        </Button>
-      </div>
-      {sub("Likelihood × impact", "heat-map", <HeatMapTable data={data} />)}
-      {sub(
-        "Levels and bands",
-        "bands",
-        <div className="overflow-x-auto rounded-lg border">
-          <AdminTable
-            head={BANDS_HEAD}
-            rowKeys={[...RISK_LEVELS_ASC]}
-            rows={RISK_LEVELS_ASC.map((l, i) => [
-              `Level ${i + 1}`,
-              <span key="n" className={`rounded px-1.5 py-0.5 ${LEVEL_CLASS[l]}`} data-level-name={l}>
-                {g.levels[l]}
-              </span>,
-              bandWords(g.inherent_bands[i]),
-              bandWords(g.residual_bands[i]),
-            ])}
-            empty="No levels."
-          />
-        </div>,
-        "A score's level is the band it falls in. Together the bands cover 1 to 25 with no gap.",
-      )}
-      {sub(
-        "Residual method",
-        "method",
-        <div className="overflow-x-auto rounded-lg border">
-          {g.residual_method === "reduce" ? (
-            <AdminTable
-              head={REDUCE_HEAD}
-              rowKeys={[...CONTROL_STEPS]}
-              rows={CONTROL_STEPS.map((s) => {
-                const r = deriveResidual(g, EXAMPLE, s)
-                return [stepWords(s), percentWords(g.reduce[s]), `${r} (${residualLevel(r)})`]
-              })}
-              empty="No steps."
-            />
-          ) : (
-            <AdminTable
-              head={["Inherent level", ...CONTROL_STEPS.map((s) => `${stepWords(s)} control`)]}
-              rowKeys={[...RISK_LEVELS_ASC]}
-              rows={RISK_LEVELS_ASC.map((l) => [g.levels[l], ...CONTROL_STEPS.map((s) => g.levels[g.matrix[l][s]])])}
-              empty="No levels."
-            />
-          )}
-        </div>,
-        `${METHOD_LABELS[g.residual_method]}. ${data.methodWords} A risk whose control isn't assessed stands at its inherent score; one whose keeper set the residual themselves (an override) is never derived again.`,
-      )}
-      {sub(
-        "Version history",
-        "history",
-        <div className="overflow-x-auto rounded-lg border">
-          <AdminTable
-            head={HISTORY_HEAD}
-            rowKeys={data.history.map((v) => String(v.version))}
-            rows={data.history.map((v) => [
-              `Version ${v.version}${v.version === data.version ? " (in force)" : ""}`,
-              whenOf(v.at),
-              v.by ?? "Mynt",
-              <span key="w" className="block min-w-40 font-normal whitespace-normal">
-                {v.note ?? "No reason recorded"}
-                {v.restoredFrom !== null ? ` (restored version ${v.restoredFrom})` : ""}
-              </span>,
-              v.residualsChanged === null ? "Not recorded" : String(v.residualsChanged),
-              v.version === data.version || !v.grading ? (
-                v.version === data.version ? "In force" : "Can't be read"
-              ) : (
-                <span key="a" className="flex justify-end">
-                  <Button size="sm" variant="outline" onClick={() => setRestoring(v)} data-restore-version={v.version}>
-                    <History /> Restore this version
-                  </Button>
-                </span>
-              ),
-            ])}
-            empty="No versions yet: these are Mynt's defaults. The first change keeps them as version 1."
-          />
-        </div>,
-      )}
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-risk-grading data-grading-version={data.version}>
+      <AdminList
+        id="risk-grading"
+        search={query}
+        onSearch={setQuery}
+        searchLabel="Search the grading by rule, score or level"
+        facets={[
+          { id: "rule", label: "Rule", options: GRADING_RULES.map((r) => ({ value: r, label: GRADING_RULE_LABELS[r] })), selected: rule, onChange: setRule },
+          { id: "level", label: "Level", options: RISK_LEVELS_ASC.map((l) => ({ value: l, label: g.levels[l] })), selected: level, onChange: setLevel },
+        ]}
+        onClearFilters={() => (setRule([]), setLevel([]))}
+        importable={false}
+        onExport={() => downloadCsv(`risk-grading-version-${data.version}.csv`, csvOf(GRADING_CSV_HEAD, rows.map((r) => [GRADING_RULE_LABELS[r.rule], r.appliesTo, r.inherent, r.residual, r.levelName])))}
+        exportDisabled={!rows.length}
+        note={`In force: ${versionWords(data.version)}. Inherent score = likelihood × impact; a score's level is the band it falls in. ${METHOD_LABELS[g.residual_method]}. ${data.methodWords} A risk whose control isn't assessed stands at its inherent score; one whose keeper set the residual themselves (an override) is never derived again.`}
+        cta={
+          <>
+            <Button variant="outline" onClick={() => setHistory(true)} data-grading-history-open>
+              <History /> Version history
+            </Button>
+            <Button onClick={() => setEditing(true)} data-edit-grading>
+              <SlidersHorizontal /> Edit bands
+            </Button>
+          </>
+        }
+        page={paged.page}
+        pages={paged.pages}
+        total={rows.length}
+        onPage={paged.setPage}
+      >
+        <AdminTable
+          head={GRADING_HEAD}
+          rowKeys={paged.shown.map((r) => r.key)}
+          rows={paged.shown.map((r) => [
+            <span key="r" data-grading-rule={r.rule}>
+              {GRADING_RULE_LABELS[r.rule]}
+            </span>,
+            <span key="a" className="block min-w-48 font-normal whitespace-normal">
+              {r.appliesTo}
+            </span>,
+            r.inherent,
+            r.residual,
+            <span key="l" className={`rounded px-1.5 py-0.5 ${LEVEL_CLASS[r.level]}`} data-level={r.level}>
+              {r.levelName}
+            </span>,
+          ])}
+          empty="No rule matches."
+        />
+      </AdminList>
       <EditGradingSheet key={`e${data.version}:${editing}`} data={data} open={editing} onClose={close} onDone={() => setDirty(true)} fetcher={fetcher} />
+      <GradingHistorySheet
+        data={data}
+        open={history}
+        onClose={close}
+        onRestore={(v) => {
+          setHistory(false)
+          setRestoring(v)
+        }}
+      />
       <RestoreGradingSheet key={`r${restoring?.version ?? ""}`} version={restoring} onClose={close} onDone={() => setDirty(true)} fetcher={fetcher} />
     </div>
   )
 }
 
-/** Platform settings' Risk grading section. */
+/** Platform settings' Risk grading tab. */
 export function RiskGradingSection() {
   const pick = useCallback((b: Record<string, unknown>) => (b.grading ? (b.grading as GradingData) : undefined), [])
   const { state, reload } = useAdminData("/api/admin/risk-grading", pick)
-  return (
-    <Section id="risk-grading" title="Risk grading" description="How every risk on every register is graded: the levels, their score bands, and how the residual score is derived from the inherent score and the control's effectiveness.">
-      {state.kind === "ready" ? <RiskGradingView data={state.data} onChanged={reload} /> : <AdminNotReady state={state} what="Risk grading" />}
-    </Section>
-  )
+  return state.kind === "ready" ? <RiskGradingView data={state.data} onChanged={reload} /> : <AdminNotReady state={state} what="Risk grading" />
 }

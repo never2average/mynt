@@ -144,11 +144,23 @@ describe("each tab", () => {
     expect(renderToStaticMarkup(<OverviewView ops={quiet} />)).toContain('data-attention="none"')
   })
 
-  it("Platform settings: the operational settings read-only, with where each comes from", () => {
-    const html = renderToStaticMarkup(<OperationalSettingsView settings={[{ key: "BUILD_CAP_USD", value: "12", default: "10", source: "environment", description: "Spend cap" }]} />)
+  it("Platform settings: the operational settings as one table, with where each comes from; one the server sets is read-only", () => {
+    const row = { description: "Spend cap", usedBy: "Coding-agent builds", validation: "A number from 0.5 to 500", options: null, setAt: null, setBy: null, needsRestart: false }
+    const html = renderToStaticMarkup(
+      <OperationalSettingsView
+        settings={[
+          { ...row, key: "BUILD_CAP_USD", value: "12", default: "10", source: "environment" },
+          { ...row, key: "BUILD_MONTHLY_CAP_USD", value: "100", default: "100", source: "default" },
+        ]}
+      />,
+    )
+    expect(html.match(/<table/g)).toHaveLength(1)
     expect(html).toContain("BUILD_CAP_USD")
-    expect(html).toContain("The server&#x27;s environment")
-    expect(html).not.toContain("<input")
+    expect(html).toContain("Server environment")
+    expect(html).toContain("Set on the server; overrides what&#x27;s set in Mynt")
+    expect(html.match(/Change setting/g)).toHaveLength(1)
+    // The page itself has no field but the search: a value is changed in the Change setting sheet.
+    expect(html.match(/<input/g)).toHaveLength(1)
   })
 
   it("Workspaces: list and detail (metadata card with Invite member, Members, Apps, Activity)", () => {

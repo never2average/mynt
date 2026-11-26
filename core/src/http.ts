@@ -1,4 +1,5 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { platformSecret } from "./platform-keys.js";
 import { clerkWebhookEvent } from "./clerk-orgs.js";
 import type { WorkspaceSync } from "./workspace-sync.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -233,11 +234,11 @@ async function confidentialAttestation(ctx: AdminContext, req: IncomingMessage, 
 }
 
 // POST /webhooks/clerk: the identity provider's organization, membership and invitation events, signed with
-// CLERK_WEBHOOK_SECRET (off when that isn't set). Verified by the provider's own library, which also refuses an old
+// CLERK_WEBHOOK_SECRET (off when neither the server's environment nor the platform key vault sets it). Verified by the provider's own library, which also refuses an old
 // or replayed signature; each event id is handled once, and a failure lets the provider deliver it again.
 export const ORG_WEBHOOK_PATH = "/webhooks/clerk";
 async function orgWebhook(store: Store, sync: WorkspaceSync | null, req: IncomingMessage, res: ServerResponse) {
-  const secret = process.env.CLERK_WEBHOOK_SECRET;
+  const secret = platformSecret("CLERK_WEBHOOK_SECRET"); // the environment's, else the key vault's: read per event
   if (!secret || !sync) return void res.writeHead(404).end();
   const chunks: Buffer[] = [];
   let size = 0;

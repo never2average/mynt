@@ -179,6 +179,15 @@ test("Mynt's own risk models are an admin's tools only", async () => {
     assert.deepEqual((await toolNames(await connect(store, who))).filter((t) => RISK_MODEL_TOOLS.includes(t)), []);
 });
 
+test("the platform key vault and the operational settings are an admin's tools only", async () => {
+  const { store, as, developer } = await setup();
+  const PLATFORM_SETTINGS_TOOLS = ["get_platform_settings", "list_platform_keys", "remove_platform_key", "set_platform_key", "set_platform_setting"];
+  const admin = await toolNames(await connect(store, await as("Root", ["admin"])));
+  assert.deepEqual(admin.filter((t) => PLATFORM_SETTINGS_TOOLS.includes(t)), PLATFORM_SETTINGS_TOOLS);
+  for (const who of [developer, await as("Lena", ["license_provider"]), await as("Vera", ["vendor"]), null])
+    assert.deepEqual((await toolNames(await connect(store, who))).filter((t) => PLATFORM_SETTINGS_TOOLS.includes(t)), []);
+});
+
 test("a vendor gets the public catalogue, its firm and its own tools, with its onboarding; admins read any vendor's", async () => {
   const { store, as, innovator } = await setup();
   const vendor = await as("Vera", ["vendor"]);

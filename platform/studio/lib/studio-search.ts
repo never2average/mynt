@@ -112,7 +112,7 @@ export const PLATFORM_SEARCH_PAGES: readonly StudioPage[] = [
   { href: "/platform/audit", label: "Platform admin: Audit trails", keywords: "audit log trail history who changed what actions security financial obligations" },
   { href: "/platform/risk-models", label: "Platform admin: Risk models", keywords: "risk models model validation versions thresholds method health linked risks financial compliance third-party operations business process technology regulated product scorecard" },
   { href: "/platform/risk-register", label: "Platform admin: Risk register", keywords: "risk register risks platform inherent control residual treatment controls factors security signals attention backups conformance financial compliance third-party vendor operations business process technology regulated product" },
-  { href: "/platform/settings", label: "Platform admin: Platform settings", keywords: "platform settings esign e-signature pricing budget audit risk grading levels bands heat map residual method inherent control" },
+  { href: "/platform/settings", label: "Platform admin: Platform settings", keywords: "platform settings key vault keys api key secret operational settings esign e-signature pricing budget audit risk grading levels bands heat map residual method inherent control" },
 ];
 
 // Tabs inside a section, found by what they hold and never listed as sections of their own: Regulated firms → Licences, the

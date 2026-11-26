@@ -142,7 +142,7 @@ Each feature module owns its tools and registers them from `server.ts`. Grouped 
 | Money and liquidity | `core/src/money-rails.ts`, `core/src/liquidity-tools.ts`, `core/src/treasury-tools.ts` | [Money rails](reference/money-rails.md), [Liquidity pools and on-chain treasuries](reference/liquidity-and-treasury.md) |
 | Solana | `core/src/solana/tools.ts`, `core/src/solana/mainnet-gate.ts` | [Solana programs](reference/solana-programs.md) |
 | Confidential computing | `core/src/confidential/governance.ts` | [Confidential computing](reference/confidential-computing.md) |
-| Mynt admins | `core/src/admin.ts`, `core/src/platform-admin.ts`, `core/src/ops.ts`, `core/src/review.ts`, `core/src/bd.ts`, `core/src/app-removal.ts` | [Platform administration](reference/platform-admin.md) |
+| Mynt admins | `core/src/admin.ts`, `core/src/platform-admin.ts`, `core/src/platform-keys.ts`, `core/src/platform-settings.ts`, `core/src/ops.ts`, `core/src/review.ts`, `core/src/bd.ts`, `core/src/app-removal.ts` | [Platform administration](reference/platform-admin.md) |
 
 Some modules register only when their service is configured: hosting, developer modules, the product desk, explorations, coding-agent builds, Solana, the mainnet gate, product health, covenants, the treasury, the connector and the governance desk each come from `ctx`.
 
@@ -289,7 +289,7 @@ See [Workspaces and sign-in](reference/workspaces-and-sign-in.md).
 
 An app's workspace holds agreements with the firms behind its products (`core/src/app-agreements.ts`, with kinds, statuses and scopes in `core/src/app-agreements-schema.ts`). Either side proposes and the other accepts. Production needs a signed program agreement with every sponsoring licence provider.
 
-Program agreements can be signed by e-signature. `core/src/esign/provider.ts` is the interface and names no service; `core/src/esign/signwell.ts` is the adapter. A Mynt admin sets it up at run time (`core/src/esign-settings.ts`), and `core/src/agreement-esign.ts` runs the signing flow and seals the signed copy.
+Program agreements can be signed by e-signature. `core/src/esign/provider.ts` is the interface and names no service; `core/src/esign/signwell.ts` is the adapter. A Mynt admin sets it up at run time (`core/src/esign-settings.ts`); its key is a row of the platform key vault (`core/src/platform-keys.ts`), where admins set the server's own keys, sealed by the confidential host and never returned. And `core/src/agreement-esign.ts` runs the signing flow and seals the signed copy.
 
 Under a program agreement, a licence provider runs oversight audits on the app (`core/src/agreement-audits.ts`) and sets service levels (`core/src/agreement-slas.ts`). Risk registers for apps, products and Mynt itself are in `core/src/risk-register.ts`, what a risk holds under it (factors, treatment tasks, controls, links) in `core/src/risk-detail.ts`, how every risk is graded in `core/src/risk-grading.ts`, and Mynt's own risk models in `core/src/risk-models.ts`.
 

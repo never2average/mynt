@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { operationalSetting } from "./platform-settings.js";
 import type { AgentMeter } from "./agent-meter.js";
 import type { AgentRun } from "./agent-proxy.js";
 import { serialLoop } from "./worker.js";
@@ -35,9 +36,14 @@ export interface DeskConfig extends AgentHostConfig {
 export function deskConfigFromEnv(host: AgentHostConfig, env = process.env): DeskConfig {
   return {
     ...host,
-    jobCapUsd: Number(env.DESK_JOB_CAP_USD ?? 5),
+    // Operational settings (platform-settings.ts): read at each use, so an admin's change needs no restart.
+    get jobCapUsd() {
+      return Number(operationalSetting("DESK_JOB_CAP_USD", env) ?? 5);
+    },
     runCapUsd: Number(env.DESK_RUN_CAP_USD ?? 1),
-    monthlyCapUsd: Number(env.DESK_MONTHLY_CAP_USD ?? 50),
+    get monthlyCapUsd() {
+      return Number(operationalSetting("DESK_MONTHLY_CAP_USD", env) ?? 50);
+    },
     sandboxType: env.BUILD_SANDBOX_TYPE ?? "default",
   };
 }

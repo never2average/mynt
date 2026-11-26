@@ -69,6 +69,7 @@ export function AdminList({
   dates,
   onExport,
   exportDisabled,
+  importable = true,
   cta,
   note,
   children,
@@ -84,8 +85,9 @@ export function AdminList({
   facets?: Facet[]
   onClearFilters?: () => void
   dates?: React.ReactNode // a date range filter (components/filter-controls.tsx DateRangeFilter), beside Filters
-  onExport: () => void
+  onExport?: () => void // none: a table with nothing worth exporting (a handful of fixed rows)
   exportDisabled?: boolean
+  importable?: boolean // false: a table whose rows can never come from a file (the key vault: a key is typed in once)
   cta?: React.ReactNode
   note?: string | null // e.g. "The newest 500 of 812 are shown"
   children: React.ReactNode
@@ -103,14 +105,18 @@ export function AdminList({
         </div>
         {facets && facets.length > 0 && <FiltersPopover facets={facets} onClear={() => onClearFilters?.()} />}
         {dates}
-        <Button variant="outline" disabled title={IMPORT_NOTE} aria-description={IMPORT_NOTE} data-import>
-          <Upload />
-          Import
-        </Button>
-        <Button variant="outline" onClick={onExport} disabled={exportDisabled} data-export>
-          <Download />
-          Export CSV
-        </Button>
+        {importable && (
+          <Button variant="outline" disabled title={IMPORT_NOTE} aria-description={IMPORT_NOTE} data-import>
+            <Upload />
+            Import
+          </Button>
+        )}
+        {onExport && (
+          <Button variant="outline" onClick={onExport} disabled={exportDisabled} data-export>
+            <Download />
+            Export CSV
+          </Button>
+        )}
         {cta}
       </div>
       {note && <p className="text-xs text-muted-foreground" data-list-note>{note}</p>}

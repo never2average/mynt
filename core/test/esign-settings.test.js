@@ -114,9 +114,10 @@ test("admins only; the key is checked, sealed, never returned; the webhook is re
   assert.equal(set.settings.webhook.registered, true);
   assert.deepEqual(w.service.hooks, [{ id: "hook-1", callback_url: `${PUBLIC}/esign/webhook` }]);
   // Sealed in the database, one row per key.
-  const rows = (await w.store.db.query(`SELECT name, sealed FROM ${T}.platform_secrets ORDER BY name`)).rows;
+  const rows = (await w.store.db.query(`SELECT name, sealed FROM ${T}.platform_secrets WHERE status = 'active' ORDER BY name`)).rows;
   assert.deepEqual(rows.map((x) => x.name), ["esign:signwell:api_key", "esign:signwell:webhook_id"]);
-  for (const x of rows) assert.match(x.sealed, /^v1:/);
+  // Sealed by the confidential host (the platform key vault's rows, platform-keys.ts).
+  for (const x of rows) assert.match(x.sealed, /^cs1:local:secret:/);
   assert.ok(!JSON.stringify(rows).includes(GOOD) && !JSON.stringify(rows).includes("hook-1"));
   // The live configuration uses them at once.
   assert.equal(w.settings.current.provider.name, "signwell");
@@ -146,7 +147,8 @@ test("Re-register reuses a hook already pointing here; Remove key deletes the ho
   assert.equal(removed.webhook_deleted, true);
   assert.equal(removed.still_configured_by_environment, false);
   assert.deepEqual(w.service.hooks, [], "the hook is deleted at the service");
-  assert.equal((await w.store.db.query(`SELECT count(*)::int AS n FROM ${T}.platform_secrets`)).rows[0].n, 0);
+  // The vault keeps the rows as history, retired, with their values destroyed.
+  assert.equal((await w.store.db.query(`SELECT count(*)::int AS n FROM ${T}.platform_secrets WHERE status = 'active' OR sealed IS NOT NULL`)).rows[0].n, 0);
   assert.equal(w.settings.current, null);
   assert.equal(ok(await w.admin.call("get_esign_settings")).configured, false);
   assert.equal((await w.admin.call("register_esign_webhook")).isError, true, "no key, no webhook");

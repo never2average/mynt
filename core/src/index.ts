@@ -33,6 +33,10 @@ import { exitedLiquidityProvider, liquidityConfigFromEnv, liquidityProviderBooks
 import { createServer } from "./server.js";
 import { SolanaService } from "./solana/service.js";
 import { EsignSettings } from "./esign-settings.js";
+import { installPlatformKeys, PlatformKeyVault } from "./platform-keys.js";
+import { OperationalSettings } from "./platform-settings.js";
+import { solanaConfigFromEnv } from "./solana/service.js";
+import { turnkeyFromEnv } from "./solana/custody/turnkey.js";
 import { CovenantService } from "./covenants.js";
 import { sweepAgreementAudits } from "./agreement-audits.js";
 import { TreasuryService, treasuryConfigFromEnv } from "./treasury.js";
@@ -104,9 +108,14 @@ Environment:
   CONFIDENTIAL_HOST         local (default: in-process, keyed by MYNT_VAULT_KEY), aws-nitro or gcp-confidential-space, with
                             CONFIDENTIAL_HOST_URL and CONFIDENTIAL_HOST_CLIENT_CERT / CONFIDENTIAL_HOST_CLIENT_KEY (file paths);
                             aws-nitro also CONFIDENTIAL_HOST_KMS_KEY (the wrap key's ARN)
-  ESIGN_PROVIDER=signwell   Overrides for e-signature, which admins set up in Mynt Studio (Settings → E-signature):
+  ESIGN_PROVIDER=signwell   Overrides for e-signature, which admins set up in Mynt Studio (Platform settings → E-signature):
                             SIGNWELL_API_KEY, SIGNWELL_WEBHOOK_ID, ESIGN_TEST_MODE=off. Keys and signed copies are
-                            sealed with MYNT_VAULT_KEY`;
+                            sealed with MYNT_VAULT_KEY
+
+Keys and budgets set from Mynt:
+  A Mynt admin can set this server's own keys (the provider, model, sign-in, GitHub, Solana and custody keys above) in
+  the platform key vault, and its budgets and limits as operational settings (Mynt Studio: Platform settings). The
+  environment wins wherever it sets the name; DATABASE_URL, MYNT_VAULT_KEY and CONFIDENTIAL_HOST_* stay here.`;
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
@@ -148,25 +157,33 @@ const openServices = async () => {
   const confidentialReleases = await ConfidentialReleases.open(db);
   const confidential = confidentialHostFromEnv(process.env, confidentialReleases, db);
   await bootVault(db, confidential);
-  const sandboxes = sandboxesFromEnv();
-  const buildConfig = buildConfigFromEnv();
-  const github = GitHubApp.fromEnv();
+  // The platform key vault (platform-keys.ts): Mynt's own keys an admin set from Mynt, sealed by the confidential
+  // host. `env` is the environment with those keys filled in where the server doesn't set them, so everything built
+  // below from the environment gets them too (after a restart); the environment itself still wins. The operational
+  // settings (platform-settings.ts) are read where they're used.
+  const platformKeys = await PlatformKeyVault.open(store, { host: confidential });
+  installPlatformKeys(platformKeys);
+  const env = platformKeys.bootEnv();
+  const operationalSettings = await OperationalSettings.open(store);
+  const sandboxes = sandboxesFromEnv(env);
+  const buildConfig = buildConfigFromEnv(env);
+  const github = GitHubApp.fromEnv(env);
   const builds = await BuildService.open(db, store, sandboxes, github, buildConfig);
   // Each app's managed repository, when Mynt has an organization for them (BUILD_MANAGED_REPO_OWNER).
-  builds.managedHost = GitHubRepoHost.fromEnv(github);
-  builds.identity = identity(store); // the push check's GitHub account (repo-ownership.ts)
+  builds.managedHost = GitHubRepoHost.fromEnv(github, env);
+  builds.identity = identity(store, env); // the push check's GitHub account (repo-ownership.ts)
   // Innovators' product desk: their models run as code in sandboxes; agents only for the thinking.
-  const deskConfig = deskConfigFromEnv(buildConfig);
+  const deskConfig = deskConfigFromEnv(buildConfig, env);
   const desk = await DeskService.open(db, store, sandboxes, github, deskConfig);
   desk.managedHost = builds.managedHost; // never a firm's workspace (so never an exploration's either)
   // The connector agent shares the builds' sandbox host and model backend. Channels plug in later.
-  const bd = await BdService.open(db, sandboxes, bdConfigFromEnv(buildConfig));
+  const bd = await BdService.open(db, sandboxes, bdConfigFromEnv(buildConfig, env));
   // The governance desk: review agents steered by workspaces/governance-review; admins decide.
-  const review = await ReviewService.open(db, store, sandboxes, reviewConfigFromEnv(buildConfig), desk);
+  const review = await ReviewService.open(db, store, sandboxes, reviewConfigFromEnv(buildConfig, env), desk);
   // The desk's algorithm explorations: explorer agents steered by workspaces/algorithm-explorer; Mynt scores.
-  const explore = await ExploreService.open(db, store, sandboxes, github, exploreConfigFromEnv(deskConfig), desk, review);
+  const explore = await ExploreService.open(db, store, sandboxes, github, exploreConfigFromEnv(deskConfig, env), desk, review);
   // Developers' hosting: a VM each, fetching their verified commits with a read-only GitHub token.
-  const hosting = await HostingService.open(db, hostingProviderFromEnv(), hostingConfigFromEnv(), async (developerId, repository) => {
+  const hosting = await HostingService.open(db, hostingProviderFromEnv(env), hostingConfigFromEnv(env), async (developerId, repository) => {
     if (!github) return null;
     // Only through a connection an admin approved (repo-approvals.ts), or one of Mynt's managed repositories.
     const installation = await builds.sourceInstallation(developerId, repository);
@@ -174,10 +191,10 @@ const openServices = async () => {
   });
   const modules = await ModuleRegistry.open(db);
   // Developers' Solana programs; builds hand it the programs Mynt built while verifying.
-  const solana = await SolanaService.open(db, store);
+  const solana = await SolanaService.open(db, store, solanaConfigFromEnv(env), { custody: turnkeyFromEnv(env) });
   builds.solana = solana;
   // The mainnet program gate: every mainnet deploy and upgrade needs its approved review (solana.gate).
-  const gate = await MainnetGateService.open(db, store, solana, sandboxes, gateConfigFromEnv(buildConfig));
+  const gate = await MainnetGateService.open(db, store, solana, sandboxes, gateConfigFromEnv(buildConfig, env));
   // Every agent's model calls are metered at the proxy, against its run's cap.
   const meter = await AgentMeter.open(db);
   for (const s of [builds, bd, desk, review, explore, gate]) s.meter = meter;
@@ -206,8 +223,8 @@ const openServices = async () => {
   // E-signature for program agreements: set up by an admin in Mynt Studio (Settings → E-signature), with the
   // environment's ESIGN_PROVIDER, SIGNWELL_API_KEY, SIGNWELL_WEBHOOK_ID and ESIGN_TEST_MODE as overrides. Off until
   // then, and the manual flow stays.
-  const esign = await EsignSettings.open(store);
-  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign, confidential, confidentialReleases };
+  const esign = await EsignSettings.open(store, { keys: platformKeys });
+  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env };
 };
 
 const parseRoles = (): Role[] => {
@@ -224,21 +241,22 @@ const parseEmail = (): string => {
   return email!;
 };
 
-const clerkAdmin = () => (process.env.CLERK_SECRET_KEY ? new ClerkAdmin(process.env.CLERK_SECRET_KEY) : null);
+// `env`: the environment, with the platform key vault's keys filled in once the services are open (openServices).
+const clerkAdmin = (env: NodeJS.ProcessEnv = process.env) => (env.CLERK_SECRET_KEY ? new ClerkAdmin(env.CLERK_SECRET_KEY) : null);
 // Workspaces follow Clerk's organizations when Clerk is the sign-in provider (workspace-sync.ts).
-const orgDirectory = async (store: Store) =>
-  process.env.CLERK_SECRET_KEY && process.env.CLERK_PUBLISHABLE_KEY
+const orgDirectory = async (store: Store, env: NodeJS.ProcessEnv = process.env) =>
+  env.CLERK_SECRET_KEY && env.CLERK_PUBLISHABLE_KEY
     ? new ClerkOrgDirectory({
-        secretKey: process.env.CLERK_SECRET_KEY,
-        publishableKey: process.env.CLERK_PUBLISHABLE_KEY,
-        accountPortalUrl: process.env.CLERK_ACCOUNT_PORTAL_URL || undefined,
+        secretKey: env.CLERK_SECRET_KEY,
+        publishableKey: env.CLERK_PUBLISHABLE_KEY,
+        accountPortalUrl: env.CLERK_ACCOUNT_PORTAL_URL || undefined,
         instanceId: await orgInstanceId(store.db),
       })
     : null;
 
 // People's linked accounts (GitHub, wallets), read from Clerk when it's the sign-in provider.
-const identity = (store: { db: ConstructorParameters<typeof ClerkIdentityProvider>[1] }) => {
-  const c = process.env.CLERK_SECRET_KEY && process.env.CLERK_PUBLISHABLE_KEY ? process.env : null;
+const identity = (store: { db: ConstructorParameters<typeof ClerkIdentityProvider>[1] }, env: NodeJS.ProcessEnv = process.env) => {
+  const c = env.CLERK_SECRET_KEY && env.CLERK_PUBLISHABLE_KEY ? env : null;
   return c
     ? new LinkedAccountsService(
         new ClerkIdentityProvider(
@@ -253,13 +271,13 @@ const [command = "serve", sub] = positionals;
 if (values.help) {
   console.log(USAGE);
 } else if (command === "serve") {
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env } = await openServices();
   const token = process.env.FINANCIAL_PRODUCTS_TOKEN;
   const user = token ? ((await store.userByToken(token)) ?? die("FINANCIAL_PRODUCTS_TOKEN is not a valid token")) : null;
-  await createServer(store, user, { clerkAdmin: clerkAdmin(), identity: identity(store), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases }).connect(new StdioServerTransport());
+  await createServer(store, user, { clerkAdmin: clerkAdmin(env), identity: identity(store, env), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings }).connect(new StdioServerTransport());
 } else if (command === "serve-http") {
   const port = Number(values.port);
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign, confidential, confidentialReleases } = await openServices();
+  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env } = await openServices();
   // This process runs deploys, so it alone recovers ones a previous run of it left behind.
   solana.recovery = true;
   builds.startWorker();
@@ -272,10 +290,10 @@ if (values.help) {
   productHealth.startWorker();
   liquidity.startWorker();
   covenants.startWorker(); // on its own timer: a rule about missing snapshots has to fire when the health worker never ran
-  const config = clerkConfigFromEnv();
+  const config = clerkConfigFromEnv(env);
   const clerk = config ? new ClerkAuth(config, store) : null;
   // Workspaces are Clerk organizations: Mynt's tools write there, its webhook and a reconcile worker read back.
-  const directory = await orgDirectory(store);
+  const directory = await orgDirectory(store, env);
   setOrgDirectory(directory);
   const workspaceSync = directory ? new WorkspaceSync(store, directory, offboardingServices({ builds, hosting })) : null;
   if (workspaceSync) {
@@ -291,14 +309,14 @@ if (values.help) {
         .finally(() => setTimeout(tick, wait));
     setTimeout(tick, 60_000);
   }
-  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(), identity: identity(store), workspaceSync, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases }).listen(port, values.host, () =>
+  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(env), identity: identity(store, env), workspaceSync, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings }).listen(port, values.host, () =>
     console.error(`mynt MCP listening on http://${values.host}:${port}/mcp${clerk ? " (Clerk whitelist auth)" : ""}`),
   );
   // Workspace offboardings with a step still to do (a provider was down), and Mynt invites made by workspace invites
   // that lapsed unanswered: every five minutes.
   const workspaceSweep = setInterval(() => {
     retryOffboards(store, offboardingServices({ builds, hosting })).catch((e) => console.error("offboarding retry:", e));
-    releaseLapsedInvites(store, clerkAdmin()).catch((e) => console.error("lapsed invites:", e));
+    releaseLapsedInvites(store, clerkAdmin(env)).catch((e) => console.error("lapsed invites:", e));
     finishArchives(store, offboardingServices({ builds, hosting })).catch((e) => console.error("archived workspaces:", e));
   }, 5 * 60 * 1000);
   void workspaceSweep;
