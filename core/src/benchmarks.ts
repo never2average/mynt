@@ -7,6 +7,7 @@ import { BdService, type BdConfig } from "./bd.js";
 import { compareRuns, GATE_DEFAULTS, regressionGate, scoreboard, type FailureClass, type RunSummary, type TaskResult } from "./benchmark-compare.js";
 import {
   BENCHMARK_AGENTS,
+  programSample,
   sourceCommit,
   taskSetFor,
   taskSets,
@@ -16,6 +17,7 @@ import {
   type CodingTask,
   type ConnectorTask,
   type DeskTask,
+  type ProgramTask,
   type ReviewTask,
   type TaskSet,
 } from "./benchmark-tasks.js";
@@ -30,6 +32,7 @@ import { operationalSetting } from "./platform-settings.js";
 import { runProductTests } from "./product-tests.js";
 import { checklist, ReviewService, type ItemResult, type ReviewConfig } from "./review.js";
 import type { SandboxHost } from "./sandbox-host.js";
+import { MainnetGateService, type AuditFinding, type GateConfig } from "./solana/mainnet-gate.js";
 import type { Store, User } from "./store.js";
 import { isQuotaExhausted, isTransient, QUOTA_MESSAGE } from "./transient.js";
 import { serialLoop } from "./worker.js";
@@ -138,6 +141,8 @@ export interface BenchmarkDeps {
   deskConfig: DeskConfig;
   reviewConfig: ReviewConfig;
   bdConfig: BdConfig;
+  // The mainnet program gate's settings (its agents' model, caps and time limits), for the program samples.
+  gateConfig?: GateConfig | null;
   fetcher?: Fetcher; // the governance desk's page fetcher (tests give a stand-in)
 }
 
@@ -202,6 +207,8 @@ export class BenchmarkService {
   desk!: DeskService;
   review!: ReviewService;
   connector!: BdService;
+  // The mainnet gate's agents, on samples only: a gate with no program registry (MainnetGateService.openForSamples).
+  gate: MainnetGateService | null = null;
   private bench: Db;
   private connectorClock = new Date();
   private connectorCapUsd = MIN_TASK_USD;
@@ -235,17 +242,19 @@ export class BenchmarkService {
       {},
       () => s.connectorClock,
     );
+    s.gate = deps.gateConfig ? await MainnetGateService.openForSamples(db, store, deps.sandboxes, deps.gateConfig) : null;
     s.adapters = { coding: s.coding(), "product-desk": s.productDesk(), "governance-review": s.governance(), connector: s.connectorAdapter(), "program-audit": s.program("program-audit"), "program-red-team": s.program("program-red-team") };
     return s;
   }
 
   set meter(m: AgentMeter | null) {
     for (const x of [this.builds, this.desk, this.review, this.connector]) x.meter = m;
+    if (this.gate) this.gate.meter = m;
   }
 
   // The run behind a live benchmark agent's token, for the agent proxy (the same budgets and metering as any run).
   async agentRun(token: string): Promise<AgentRun | null> {
-    return (await this.builds.agentRun(token)) ?? (await this.desk.agentRun(token)) ?? (await this.review.agentRun(token)) ?? (await this.connector.agentRun(token));
+    return (await this.builds.agentRun(token)) ?? (await this.desk.agentRun(token)) ?? (await this.review.agentRun(token)) ?? (await this.connector.agentRun(token)) ?? (this.gate ? await this.gate.agentRun(token) : null);
   }
 
   // A benchmark connector run's token: its MCP tools are the benchmark's own connector, never the real one.
@@ -668,14 +677,110 @@ export class BenchmarkService {
     };
   }
 
-  // The mainnet gate's two agents have task sets and samples, but no way to run yet: the gate only reviews a mainnet
-  // program record whose build Mynt compiled, and a benchmark must never create one of those.
+  // The mainnet gate's two agents, on sample source with a known answer. Each sample goes through the gate's own
+  // code (MainnetGateService, opened for samples): the same sandboxes, scripts, agent workspaces and verdict logic as
+  // a real review, with no program registered and nothing that could be approved or deployed. The audit is scored on
+  // Mynt's pass over the auditor's findings (a quote Mynt found in the file); the red team on Mynt's own re-run of
+  // its proofs of concept.
   private program(agent: "program-audit" | "program-red-team"): Adapter {
-    const why = `${agent} benchmarks can't run yet: the mainnet program gate reviews only a mainnet program's own verified build, and a benchmark must not register mainnet programs. The task set and its samples are in place; the gate needs an entry point that takes a sample's source${agent === "program-red-team" ? " and compiles it" : ""} directly`;
-    const never = async () => {
-      throw new BenchmarkRefusal(why);
+    const audit = agent === "program-audit";
+    const gate = () => this.gate;
+    const config = this.deps.gateConfig ?? null;
+    const BLOCKING = ["critical", "high"];
+    return {
+      needs: [
+        "A sandbox host with allowance left (its sandboxes must run containers: Mynt's Solana build and the static analysis tools run in them), the agents' model backend, and PUBLIC_URL.",
+        audit
+          ? "Nothing else: Mynt lays each sample over the coding agents' starter program in a sandbox of its own, runs static analysis, then the auditor. No program is registered, and no mainnet review is opened."
+          : "Nothing else: Mynt builds each sample with its verifiable Solana build in a sandbox of its own, the red team attacks the bytes on a local validator, and Mynt re-runs its proofs itself. No program is registered or deployed anywhere.",
+      ],
+      model: () => config?.gateModel ?? null,
+      unavailable: async () => (gate() && config ? null : "the mainnet program gate isn't set up on this Mynt, so its agents have nothing to run in"),
+      maxTaskUsd: () => (config ? (audit ? config.auditCapUsd : config.redTeamCapUsd) : 0),
+      // The agent's model spend is held at the task's cap by the agent proxy; Mynt's own sandboxes around it (the
+      // sample's preparation, static analysis, the proofs' re-run) are time-limited, and this much is kept for them.
+      reserveUsd: () => 1,
+      start: async (run, t, capUsd) => {
+        const task = t as ProgramTask;
+        const sample = programSample(task.source_dir);
+        if (!sample) throw new Error(`The sample under ${task.source_dir} has no program Mynt can name (a programs/<name>/src/lib.rs that declares its address)`);
+        const row = await gate()!.requestSample({ mode: audit ? "audit" : "red_team", ...sample, ref: `benchmark:${String(run.id).slice(0, 8)}:${task.id}`, requested_by: run.started_by as string, cap_usd: capUsd });
+        return row.id as string;
+      },
+      tick: async () => void (await gate()?.tick()),
+      stop: async (jobId, reason) => void (await gate()?.stopSample(jobId, reason)),
+      poll: async (_run, jobId, t) => {
+        const task = t as ProgramTask;
+        const r = await gate()!.row(jobId);
+        if (!r) return lost("the sample's review record is gone");
+        if (r.status === "running") return null;
+        const error = (r.error as string | null) ?? "";
+        const prepared = !!(r.sample as { prepared?: unknown } | null)?.prepared;
+        const rules = r.rules as { passed?: boolean; findings?: { rule: string; blocks?: boolean }[] } | null;
+        const checks: Check[] = [{ name: "sample_prepared", status: prepared ? "pass" : "fail", ...(prepared ? {} : { detail: error.slice(0, 400) }) }];
+        // What Mynt's own hard rules would have done with it, for the record: they don't count for or against the agent.
+        if (rules) checks.push({ name: "mynt_hard_rules", status: rules.passed ? "pass" : "warn", detail: rules.passed ? "Would pass Mynt's hard rules" : `Mynt's hard rules alone would refuse it (${(rules.findings ?? []).filter((f) => f.blocks).map((f) => f.rule).join(", ")}): recorded only` });
+        let done = false; // the agent's work was complete, so the sample's answer can be scored
+        let observed: Record<string, unknown> = { review_status: r.status, blocked_reason: r.blocked_reason ?? null };
+        if (audit) {
+          const a = r.audit as { finished?: boolean; agent?: { result?: string | null }; findings?: AuditFinding[] } | null;
+          const stat = r.static_analysis as { passed?: boolean; reasons?: string[] } | null;
+          if (stat) checks.push({ name: "static_analysis", status: stat.passed ? "pass" : "warn", detail: stat.passed ? "cargo-audit and Radar reported nothing sure" : `Recorded only: ${(stat.reasons ?? []).join("; ").slice(0, 300)}` });
+          done = !!a?.finished;
+          checks.push({ name: "audit_complete", status: !a ? "not_reported" : done ? "pass" : "fail", ...(a && !done ? { detail: `The auditor: ${a.agent?.result ?? "no result"}` } : {}) });
+          const serious = (a?.findings ?? []).filter((f) => BLOCKING.includes(f.severity));
+          const verified = serious.filter((f) => f.verified);
+          if (done && task.sample === "bad") {
+            const inFile = verified.filter((f) => f.file === task.expect.file);
+            const unverified = serious.filter((f) => !f.verified && f.file === task.expect.file);
+            // A critical or high finding whose quote Mynt couldn't find in the file doesn't count.
+            checks.push({
+              name: !inFile.length && unverified.length ? "evidence_verified" : "planted_problem_caught",
+              status: inFile.length ? "pass" : "fail",
+              detail: inFile.length ? inFile.slice(0, 3).map((f) => `${f.severity} ${f.title} (${f.file}${f.line ? `:${f.line}` : ""})`).join("; ") : unverified.length ? `${unverified.length} critical/high finding(s) in ${task.expect.file}, none with a quote Mynt found there` : `No verified critical or high finding in ${task.expect.file}`,
+            });
+          } else if (done) checks.push({ name: "nothing_falsely_flagged", status: verified.length ? "fail" : "pass", detail: verified.length ? `Blocked on: ${verified.slice(0, 3).map((f) => `${f.severity} ${f.title}`).join("; ")}` : "No verified critical or high finding" });
+          observed = { ...observed, findings: (a?.findings ?? []).map((f) => ({ id: f.id, severity: f.severity, vulnerability: f.vulnerability, file: f.file, verified: f.verified })), expected_blocked: task.sample === "bad" };
+        } else {
+          const red = r.red_team as { finished?: boolean; agent?: { result?: string | null }; findings?: { id: string; title: string; poc: string | null }[] } | null;
+          const confirmations = (r.confirmations as Record<string, { confirmed?: boolean; reason?: string; error?: boolean }> | null) ?? null;
+          const pocs = (red?.findings ?? []).filter((f) => f.poc).length;
+          // With proofs to re-run, the answer is Mynt's re-run: without its result nothing can be scored.
+          done = !!red?.finished && (pocs === 0 || !!confirmations) && r.status !== "failed";
+          checks.push({ name: "red_team_complete", status: !red ? "not_reported" : red.finished ? "pass" : "fail", ...(red && !red.finished ? { detail: `The red team: ${red.agent?.result ?? "no result"}` } : {}) });
+          const confirmed = Object.entries(confirmations ?? {}).filter(([, c]) => c.confirmed).map(([poc]) => poc);
+          if (done && task.sample === "bad")
+            checks.push({ name: "exploit_confirmed", status: confirmed.length ? "pass" : "fail", detail: confirmed.length ? `Mynt's own re-run confirmed: ${confirmed.join(", ")}` : pocs ? `Mynt re-ran ${pocs} proof(s) of concept and confirmed none (${Object.values(confirmations ?? {}).map((c) => c.reason).filter(Boolean).slice(0, 2).join("; ").slice(0, 300)})` : "The red team wrote no proof of concept" });
+          else if (done) checks.push({ name: "nothing_falsely_flagged", status: confirmed.length ? "fail" : "pass", detail: confirmed.length ? `Mynt's own re-run confirmed an exploit of the sound sample: ${confirmed.join(", ")}` : "No exploit confirmed" });
+          observed = { ...observed, findings: (red?.findings ?? []).length, proofs: pocs, confirmed, expected_exploit: task.sample === "bad" };
+        }
+        const passed = done && checks.every((c) => c.status === "pass" || c.status === "warn");
+        let failure_class: FailureClass | null = null;
+        let failed_check: string | null = null;
+        if (!passed) {
+          const agentRan = !!(audit ? r.audit : r.red_team);
+          // Before the agent's result exists, nothing is the agent's: the host's fault when it looks like it, else the harness's.
+          failure_class = r.status === "cancelled" ? "harness" : done || agentRan ? (r.status === "failed" ? (failureClassOf(error) === "infrastructure" ? "infrastructure" : "harness") : "agent") : failureClassOf(error) === "infrastructure" ? "infrastructure" : "harness";
+          failed_check = failure_class !== "agent" ? failure_class : (checks.find((c) => c.status === "fail")?.name ?? (audit ? "audit_failed" : "red_team_failed"));
+        }
+        const cost = Number(r.cost_usd ?? 0);
+        return {
+          passed,
+          failure_class,
+          failed_check,
+          detail: passed ? null : (checks.filter((c) => c.status === "fail").map((c) => `${c.name}${c.detail ? ` (${c.detail})` : ""}`).join("; ") || error || `The sample's review ended ${r.status}`).slice(0, 1000),
+          checks,
+          observed,
+          // The gate keeps one figure per review, and only once a sandbox or the meter has reported.
+          cost_usd: cost > 0 ? cents(cost) : null,
+          cost_parts: null,
+          cost_note: cost > 0 ? "The gate records one figure per review: the agent's model spend and every sandbox's time together" : "Not measured: neither the sandbox host nor the agent's meter reported a cost for this sample",
+          started_at: iso(r.created_at),
+          finished_at: iso(r.updated_at),
+          ...(isQuotaExhausted(error) ? { stop_run: QUOTA_MESSAGE } : {}),
+        };
+      },
     };
-    return { needs: [why], model: () => null, unavailable: async () => why, maxTaskUsd: () => 0, reserveUsd: () => 0, start: never, tick: async () => undefined, poll: async () => null, stop: async () => undefined };
   }
 
   // ---- runs ----
@@ -690,7 +795,7 @@ export class BenchmarkService {
       const a = this.adapters[agent];
       // What only a start can check (the repository a desk run names) isn't held against readiness here.
       const own = await a.unavailable({ repository: "" }).catch((e) => (e as Error).message);
-      const whyNot = agent.startsWith("program-") ? own : (host ?? (agent === "product-desk" && own?.startsWith("a product-desk run needs") ? null : own));
+      const whyNot = host ?? (agent === "product-desk" && own?.startsWith("a product-desk run needs") ? null : own);
       out.push({
         agent,
         task_set: set.file,
@@ -725,7 +830,7 @@ export class BenchmarkService {
     if (!(o.cap_usd > 0)) throw refuse("a run needs an explicit cap in US dollars (cap_usd), the most it may spend");
     const ceiling = this.capCeilingUsd();
     if (o.cap_usd > ceiling) throw refuse(`its cap of US$${o.cap_usd} is over BENCHMARK_CAP_USD, the most one run may spend (US$${ceiling}); an admin can change that in the operational settings`);
-    const own = o.agent.startsWith("program-") ? await adapter.unavailable(o) : (this.hostMissing() ?? (await adapter.unavailable(o)));
+    const own = this.hostMissing() ?? (await adapter.unavailable(o));
     if (own) throw refuse(own);
     if (o.cap_usd < MIN_TASK_USD + adapter.reserveUsd()) throw refuse(`a cap of US$${o.cap_usd} is too small for even one task (at least US$${MIN_TASK_USD + adapter.reserveUsd()})`);
     const quota = o.host_restored ? null : await this.hostOutOfAllowance();

@@ -202,7 +202,7 @@ const openServices = async () => {
   const meter = await AgentMeter.open(db);
   for (const s of [builds, bd, desk, review, explore, gate]) s.meter = meter;
   // Agent benchmarks: the same services again, over their own tables, run only when an admin starts a run.
-  const benchmarks = await BenchmarkService.open(db, store, { sandboxes, repos: github, buildConfig, deskConfig, reviewConfig, bdConfig });
+  const benchmarks = await BenchmarkService.open(db, store, { sandboxes, repos: github, buildConfig, deskConfig, reviewConfig, bdConfig, gateConfig: gate.config });
   benchmarks.meter = meter;
   // Each product's financial health: encrypted to its licence provider and liquidity providers, fingerprinted on chain.
   const healthConfig = productHealthConfigFromEnv();

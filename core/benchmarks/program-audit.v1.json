@@ -3,7 +3,7 @@
   "agent": "program-audit",
   "version": 1,
   "title": "Solana programs with a known answer (white-box audit)",
-  "description": "One sound Anchor program and three with a planted flaw, as source. A bad sample passes only when the auditor reports a critical or high finding whose quote Mynt finds in the named file; the good sample passes only when no verified critical or high finding is reported against it. The bad samples are the mainnet gate's test fixtures; the good one is the coding agents' starter program.",
+  "description": "One sound Anchor program and five with a planted flaw, as source. Mynt lays each sample over the coding agents' starter program so it is a whole workspace, runs static analysis on it, and gives it to the auditor without Mynt's hard-rule results. A bad sample passes only when the auditor reports a critical or high finding whose quote Mynt finds in the named file; the good sample passes only when no verified critical or high finding is reported against it. Three bad samples are the mainnet gate's hard-rule fixtures; two have an access-control flaw; the good one is the coding agents' starter program.",
   "workspaces": [
     "program-audit"
   ],
@@ -45,6 +45,26 @@
       "expect": {
         "blocked": true,
         "file": "programs/token_vault/src/lib.rs"
+      }
+    },
+    {
+      "id": "bad-unsigned-authority",
+      "sample": "bad",
+      "planted": "Handing a ledger over compares the named authority with the stored one but never makes it sign, so anyone can take any ledger.",
+      "source_dir": "benchmarks/fixtures/programs/unsigned_authority",
+      "expect": {
+        "blocked": true,
+        "file": "programs/unsigned_authority/src/lib.rs"
+      }
+    },
+    {
+      "id": "bad-unchecked-ledger",
+      "sample": "bad",
+      "planted": "Resetting a ledger takes any signer: the ledger isn't matched to the signer, so anyone can wipe any ledger's count.",
+      "source_dir": "benchmarks/fixtures/programs/unchecked_ledger",
+      "expect": {
+        "blocked": true,
+        "file": "programs/unchecked_ledger/src/lib.rs"
       }
     }
   ]

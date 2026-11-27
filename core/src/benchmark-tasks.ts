@@ -128,6 +128,20 @@ export function programSources(sourceDir: string, root = CORE_DIR): Record<strin
   return out;
 }
 
+/**
+ * A program sample as the gate takes it: its program's name (the folder under programs/), the address it declares,
+ * and the files Mynt lays over the coding agents' starter program. Null when the folder holds no such program.
+ */
+export function programSample(sourceDir: string, root = CORE_DIR): { name: string; program_id: string; files: Record<string, string> } | null {
+  const files = programSources(sourceDir, root);
+  for (const path of Object.keys(files).sort()) {
+    const name = /^programs\/([a-z][a-z0-9_]{1,40})\/src\/lib\.rs$/.exec(path)?.[1];
+    const id = name ? /declare_id!\(\s*"([1-9A-HJ-NP-Za-km-z]{32,44})"\s*\)/.exec(files[path])?.[1] : undefined;
+    if (name && id) return { name, program_id: id, files };
+  }
+  return null;
+}
+
 /** What's wrong with one task-set file: its schema first, then what the schema can't say. Empty when it's sound. */
 export function taskSetErrors(file: string, data: unknown): string[] {
   const validate = schemaValidator();
@@ -163,6 +177,8 @@ export function taskSetErrors(file: string, data: unknown): string[] {
       const t = task as ProgramTask;
       const sources = programSources(t.source_dir);
       if (!Object.keys(sources).some((p) => p.endsWith(".rs"))) errors.push(`${at}: no Rust source under ${t.source_dir}`);
+      else if (!programSample(t.source_dir)) errors.push(`${at}: no programs/<name>/src/lib.rs that declares its address under ${t.source_dir}`);
+      if (set.agent === "program-red-team" && t.sample === "bad" && !t.expect.exploit_confirmed) errors.push(`${at}: a bad sample expects an exploit Mynt confirms`);
       if (t.expect.file && !(t.expect.file in sources)) errors.push(`${at}: no file '${t.expect.file}' under ${t.source_dir}`);
       if (set.agent === "program-audit" && t.sample === "bad" && !(t.expect.blocked && t.expect.file)) errors.push(`${at}: a bad sample expects a blocking finding and names its file`);
     } else {
