@@ -69,7 +69,7 @@ describe("who gets in", () => {
       expect(Object.keys(STUDIO_TOOLS)).not.toContain(t);
     }
     expect(parseAdminCall("start_benchmark_run", { agent: "coding" })).toHaveProperty("error");
-    expect(parseAdminCall("start_benchmark_run", { agent: "ask-ai", cap_usd: 5 })).toHaveProperty("error");
+    expect(parseAdminCall("start_benchmark_run", { agent: "no-such-agent", cap_usd: 5 })).toHaveProperty("error");
   });
 });
 

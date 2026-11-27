@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AgentMeter } from "./agent-meter.js";
 import type { AgentRun } from "./agent-proxy.js";
 import { BdService, type BdConfig } from "./bd.js";
+import { addBenchmarkRunnerTools, AskBenchmarkRunner, type AskRunnerOptions } from "./benchmark-ask-runner.js";
 import { compareRuns, GATE_DEFAULTS, regressionGate, scoreboard, type FailureClass, type RunSummary, type TaskResult } from "./benchmark-compare.js";
 import {
   baselineFiles,
@@ -152,14 +153,15 @@ export interface BenchmarkDeps {
   // The mainnet program gate's settings (its agents' model, caps and time limits), for the program samples.
   gateConfig?: GateConfig | null;
   fetcher?: Fetcher; // the governance desk's page fetcher (tests give a stand-in)
+  askRunner?: AskRunnerOptions; // how long an Ask AI task waits for Studio's runner (tests move the clock)
 }
 
-interface Check {
+export interface Check {
   name: string;
   status: "pass" | "fail" | "warn" | "not_reported";
   detail?: string;
 }
-interface Outcome {
+export interface Outcome {
   passed: boolean;
   failure_class: FailureClass | null;
   failed_check: string | null;
@@ -174,7 +176,9 @@ interface Outcome {
   // The whole run must stop (the host can't run anything more), with this reason.
   stop_run?: string;
 }
-interface Adapter {
+export interface Adapter {
+  // The agent's code runs outside this server (benchmark-ask-runner.ts): a run needs no sandbox host or model backend here.
+  external?: true;
   // What a real run of this agent needs, in words (shown before the first run).
   needs: string[];
   model(): string | null;
@@ -215,6 +219,7 @@ export class BenchmarkService {
   connector!: BdService;
   // The mainnet gate's agents, on samples only: a gate with no program registry (MainnetGateService.openForSamples).
   gate: MainnetGateService | null = null;
+  askRunner!: AskBenchmarkRunner;
   private bench: Db;
   private connectorClock = new Date();
   private connectorCapUsd = MIN_TASK_USD;
@@ -259,7 +264,8 @@ export class BenchmarkService {
       () => s.connectorClock,
     );
     s.gate = deps.gateConfig ? await MainnetGateService.openForSamples(db, store, deps.sandboxes, deps.gateConfig) : null;
-    s.adapters = { coding: s.coding(), "product-desk": s.productDesk(), "algorithm-explorer": s.explorer(), "governance-review": s.governance(), connector: s.connectorAdapter(), "program-audit": s.program("program-audit"), "program-red-team": s.program("program-red-team") };
+    s.askRunner = await AskBenchmarkRunner.open(db, deps.askRunner);
+    s.adapters = { coding: s.coding(), "product-desk": s.productDesk(), "algorithm-explorer": s.explorer(), "governance-review": s.governance(), connector: s.connectorAdapter(), "program-audit": s.program("program-audit"), "program-red-team": s.program("program-red-team"), "ask-ai": s.askRunner.adapter() };
     return s;
   }
 
@@ -934,7 +940,7 @@ export class BenchmarkService {
       if (!set) continue;
       const a = this.adapters[agent];
       const own = await a.unavailable().catch((e) => (e as Error).message);
-      const whyNot = host ?? own;
+      const whyNot = a.external ? own : (host ?? own);
       const cap = this.capCeilingUsd();
       out.push({
         agent,
@@ -973,11 +979,11 @@ export class BenchmarkService {
     if (!(o.cap_usd > 0)) throw refuse("a run needs an explicit cap in US dollars (cap_usd), the most it may spend");
     const ceiling = this.capCeilingUsd();
     if (o.cap_usd > ceiling) throw refuse(`its cap of US$${o.cap_usd} is over BENCHMARK_CAP_USD, the most one run may spend (US$${ceiling}); an admin can change that in the operational settings`);
-    const own = this.hostMissing() ?? (await adapter.unavailable());
+    const own = adapter.external ? await adapter.unavailable() : (this.hostMissing() ?? (await adapter.unavailable()));
     if (own) throw refuse(own);
     if (o.cap_usd < MIN_TASK_USD + adapter.reserveUsd())
       throw refuse(`a cap of US$${o.cap_usd} is too small for even one task: a ${o.agent} run needs at least US$${cents(MIN_TASK_USD + adapter.reserveUsd())} to start one, and US$${cents(adapter.maxTaskUsd() + adapter.reserveUsd())} to give one task its whole budget`);
-    const quota = o.host_restored ? null : await this.hostOutOfAllowance();
+    const quota = o.host_restored || adapter.external ? null : await this.hostOutOfAllowance();
     if (quota) throw refuse(quota);
     const active = await this.one(`SELECT id, agent FROM ${T}.benchmark_runs WHERE status = ANY($1) LIMIT 1`, [ACTIVE]);
     if (active) throw refuse(`another benchmark run is still going (${active.agent}, ${active.id}); one runs at a time, so stop it or let it finish`);
@@ -1337,6 +1343,9 @@ export function registerBenchmarkTools(server: McpServer, store: Store, admin: U
         return stopped;
       }),
   );
+
+  // For an agent whose code runs outside this server (Ask AI, in Studio): take the task in flight, hand its record in.
+  addBenchmarkRunnerTools(server, store, admin, benchmarks?.askRunner ?? null);
 }
 
 /** Every task set, as the docs and the gate script list them. */

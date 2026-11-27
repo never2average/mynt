@@ -1,11 +1,11 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { askToolDefs, type AskTool } from "@/lib/ask";
+import { studioAskRun } from "@/lib/ask-runs";
 import { answerQuestion, askJson as json, readAsk } from "@/lib/ask-server";
 import { askConfigured } from "@/lib/llm";
 import { NotAllowedError } from "@/lib/mynt-client";
 import { currentSession, fromOwnOrigin } from "@/lib/session";
 import { finishSession } from "@/lib/session-response";
-import { callStudioTool, ensureRoles, isAuthError, listMyntTools, logLine, MyntRefusedError, sessionIsDeveloper, ToolRefusedError } from "@/lib/studio-server";
+import { callStudioTool, ensureRoles, isAuthError, listMyntTools, logLine, sessionIsDeveloper } from "@/lib/studio-server";
 import { connectStudio } from "@/lib/tokens";
 import { resolveWorkspace, workspaceOf, workspaceSupport } from "@/lib/workspace-server";
 
@@ -57,18 +57,7 @@ export async function POST(req: Request) {
     mynt,
     prepare: async () => {
       const tools = await listMyntTools(mynt);
-      return {
-        tools: askToolDefs(tools),
-        workspaceId: await resolveWorkspace(mynt, workspaceOf(req), workspaceSupport(tools)),
-        callTool: async (name, args) => {
-          try {
-            return { text: JSON.stringify(await callStudioTool(mynt, name as AskTool, args)), isError: false };
-          } catch (err) {
-            if (err instanceof MyntRefusedError || err instanceof ToolRefusedError) return { text: err.message, isError: true };
-            throw err;
-          }
-        },
-      };
+      return studioAskRun(tools, await resolveWorkspace(mynt, workspaceOf(req), workspaceSupport(tools)), (name, args) => callStudioTool(mynt, name, args));
     },
   });
 }

@@ -9,9 +9,10 @@
 // pick which tasks to run, and says what the cap covers of them before anything starts. A run's page (/platform/benchmarks/<id>) is a
 // metadata card, then Tasks, Failures, Cost and Compare, each a table; Stop run is a labelled button with a sheet.
 // A figure Mynt didn't measure reads "Not measured" with why, never 0.
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useMemo, useRef, useState } from "react"
 import { CircleStop, Play } from "lucide-react"
 
+import { AskBenchmarkRunner } from "@/components/admin-ask-benchmark-runner"
 import { AdminDetail, AdminList, AdminNotReady, AdminSheet, AdminTable, Field, fieldClass, useAdminAction, useAdminData } from "@/components/admin-kit"
 import { downloadCsv } from "@/components/licences-view"
 import { matches, usePaged } from "@/components/list-layout"
@@ -590,10 +591,26 @@ function RunPage({ id, onBack }: { id: string; onBack: () => void }) {
   const { state, reload } = useAdminData(`${ROUTE}/${id}${baseline ? `?baseline=${baseline}` : ""}`, pick)
   const pickList = useCallback((b: Record<string, unknown>) => (b.list as BenchmarkList | undefined) ?? undefined, [])
   const list = useAdminData(ROUTE, pickList)
-  if (state.kind !== "ready") return <AdminNotReady state={state} what="this benchmark run" />
+  // An Ask AI run's tasks are run by Studio from this page while it is going (admin-ask-benchmark-runner.tsx). It
+  // stays mounted, first in both returns, while the page reloads after each task.
+  const lastRun = useRef<BenchmarkRun | null>(null)
+  if (state.kind === "ready") lastRun.current = state.data.detail.run
+  const askRunner = <AskBenchmarkRunner run={lastRun.current} onStep={reload} />
+  if (state.kind !== "ready")
+    return (
+      <>
+        {askRunner}
+        <AdminNotReady state={state} what="this benchmark run" />
+      </>
+    )
   const { detail, comparison } = state.data
   const others = list.state.kind === "ready" ? list.state.data.runs.filter((r) => r.agent === detail.run.agent && r.id !== detail.run.id) : []
-  return <BenchmarkRunView detail={detail} others={others} comparison={baseline ? comparison : null} baseline={baseline} onBaseline={setBaseline} onBack={onBack} onChanged={reload} />
+  return (
+    <>
+      {askRunner}
+      <BenchmarkRunView detail={detail} others={others} comparison={baseline ? comparison : null} baseline={baseline} onBaseline={setBaseline} onBack={onBack} onChanged={reload} />
+    </>
+  )
 }
 
 /** The section: the list, or one run when its id is in the address. */

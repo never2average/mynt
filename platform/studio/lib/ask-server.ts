@@ -14,7 +14,7 @@ import { readCapped, STREAM_HEADERS, TOO_LARGE } from "./ai-route";
 import { runAsk, type AskDeps } from "./ask";
 import { cleanAnswer, conversationFrom, hasUncited, NOT_COVERED, questionFrom, type AskAnswer, type AskArea, type AskSource, type AskStreamEvent } from "./ask-answer";
 import { argsSummary, readLabel, readSummary, sourcesOf } from "./ask-sources";
-import { askModels, createLlm } from "./llm";
+import { askModels, createLlm, type Llm } from "./llm";
 import { scrub, scrubText } from "./scrub";
 import type { Session } from "./session-store";
 import { sessionStore } from "./session-store";
@@ -125,6 +125,15 @@ export function shownResult(result: unknown): string {
   return text.length > MAX_RESULT_SHOWN ? `${text.slice(0, MAX_RESULT_SHOWN)}\n…(cut short)` : text;
 }
 
+/**
+ * A read's reply as the model is given it. The same hiding as the panel's: a value under a field named like a secret
+ * (a signing secret, a token, a key) is replaced whatever it looks like, as well as text shaped like a key anywhere.
+ * The model can't repeat, and a transcript can't keep, what it was never handed.
+ */
+export function readForModel(text: string, result: unknown): string {
+  return typeof result === "string" ? scrubText(text) : JSON.stringify(scrub(result));
+}
+
 const parsed = (text: string): unknown => {
   try {
     return JSON.parse(text);
@@ -133,7 +142,12 @@ const parsed = (text: string): unknown => {
   }
 };
 
-async function writeAnswer(area: AskArea, what: string, history: MessageParam[], run: AnswerRun, send: (e: AskStreamEvent) => void, signal: AbortSignal) {
+/**
+ * Writes one answer to `send`, event by event. The routes call it through answerQuestion; Ask AI's benchmark
+ * (lib/ask-benchmark.ts) calls it directly, with the reads answered from a fixture and the model metered against the
+ * task's budget (`using.llm`), so what is measured is this code and no copy of it.
+ */
+export async function writeAnswer(area: AskArea, what: string, history: MessageParam[], run: AnswerRun, send: (e: AskStreamEvent) => void, signal: AbortSignal, using: { llm?: Llm; models?: string[] } = {}) {
   const sources: AskSource[] = [];
   let text = "";
   // What was written before a read (the model saying it will look), or by a model that then failed, is dropped.
@@ -167,9 +181,9 @@ async function writeAnswer(area: AskArea, what: string, history: MessageParam[],
   let thoughtMs = 0;
   let thought = false;
 
-  const llm = createLlm();
+  const llm = using.llm ?? createLlm();
   let model: string | null = null;
-  for (const candidate of askModels()) {
+  for (const candidate of using.models ?? askModels()) {
     try {
       await runAsk(history, {
         ...run,
@@ -200,7 +214,7 @@ async function writeAnswer(area: AskArea, what: string, history: MessageParam[],
           send({ type: "tool_end", id, ok: true, ms, summary: readSummary(area, name, result), result: shownResult(result) });
           // The model is told this read's numbered sources, and cites only those.
           const legend = cited.map((s) => `[${s.n}] ${s.title}`).join("\n");
-          return { text: `Sources for this read (cite a statement by the number of the source it comes from; the first is the whole read):\n${legend}\n\n${scrubText(out.text)}`, isError: false };
+          return { text: `Sources for this read (cite a statement by the number of the source it comes from; the first is the whole read):\n${legend}\n\n${readForModel(out.text, result)}`, isError: false };
         },
         emit: (ev) => {
           if (ev.type === "text") {

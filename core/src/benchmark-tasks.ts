@@ -5,6 +5,7 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { workspaceFiles, WORKSPACES_ROOT } from "./agent-host.js";
 import { appKinds } from "./app-kinds.js";
+import { askTaskSetErrors, type AskTask } from "./benchmark-ask.js";
 import type { FinancialProduct } from "./catalog.js";
 import { DECISION_PURPOSES, explorationAngles } from "./explore.js";
 import { OBJECTIVES, type Objective } from "./explore-score.js";
@@ -25,7 +26,7 @@ export const BENCHMARKS_DIR = fileURLToPath(new URL("../benchmarks/", import.met
 export const CORE_DIR = fileURLToPath(new URL("../", import.meta.url));
 export const TASK_SET_SCHEMA_PATH = fileURLToPath(new URL("../schemas/benchmark-task-set.schema.json", import.meta.url));
 
-export const BENCHMARK_AGENTS = ["coding", "product-desk", "algorithm-explorer", "governance-review", "program-audit", "program-red-team", "connector"] as const;
+export const BENCHMARK_AGENTS = ["coding", "product-desk", "algorithm-explorer", "governance-review", "program-audit", "program-red-team", "connector", "ask-ai"] as const;
 export type BenchmarkAgent = (typeof BENCHMARK_AGENTS)[number];
 
 export interface CodingTask {
@@ -103,7 +104,7 @@ export interface ConnectorTask {
     not_shared?: { of: string; with: string }[];
   };
 }
-export type BenchmarkTask = CodingTask | DeskTask | ExplorerTask | ReviewTask | ProgramTask | ConnectorTask;
+export type BenchmarkTask = CodingTask | DeskTask | ExplorerTask | ReviewTask | ProgramTask | ConnectorTask | AskTask;
 
 export interface TaskSet<T = BenchmarkTask> {
   agent: BenchmarkAgent;
@@ -112,6 +113,7 @@ export interface TaskSet<T = BenchmarkTask> {
   description: string;
   workspaces: string[];
   tasks: T[];
+  fixture?: { file: string; sha256: string }; // ask-ai: the dataset its questions are asked over (benchmark-ask.ts)
   file: string; // its file's name
   sha256: string; // of the file's bytes: what a run records, so two runs are known to have had the same tasks
 }
@@ -183,6 +185,7 @@ export function taskSetErrors(file: string, data: unknown): string[] {
   for (const w of set.workspaces) if (!existsSync(join(WORKSPACES_ROOT, w, "CLAUDE.md"))) errors.push(`${file}: no agent workspace '${w}'`);
   const ids = set.tasks.map((t) => t.id);
   for (const id of new Set(ids)) if (ids.filter((x) => x === id).length > 1) errors.push(`${file}: task '${id}' twice`);
+  if (set.agent === "ask-ai") return [...errors, ...askTaskSetErrors(file, set as TaskSet<AskTask>)];
   for (const task of set.tasks) {
     const at = `${file}: ${task.id}`;
     if (set.agent === "coding") {
