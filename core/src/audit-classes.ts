@@ -53,6 +53,12 @@ const SECURITY = [
   // machine access and the kill switch
   "vm_access",
   "app_exec",
+  // what is online for an app in Production, and what runs inside it: an attempt Mynt refused (hosting-tools.ts), by
+  // someone who isn't an owner or admin of its workspace, or with a build that fails the production checks about it
+  "deploy_app_refused",
+  "undeploy_app_refused",
+  "app_restart_refused",
+  "app_exec_refused",
   "suspend_tenant",
   "resume_tenant",
   // account recovery and cutting people off

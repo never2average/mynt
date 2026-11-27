@@ -27,6 +27,7 @@ const fake = {
   tools: ALL as { name: string; inputSchema?: unknown }[],
   calls: [] as { name: string; args: Record<string, unknown> }[],
   role: "owner",
+  stage: "staging",
   tenant: null as Record<string, unknown> | null,
   hosted: [] as Record<string, unknown>[],
   builds: [shipped] as Build[],
@@ -52,7 +53,7 @@ vi.mock("@/lib/tokens", () => ({
         case "list_workspaces":
           return ok([{ id: "w1", name: "Acme", role: fake.role, created_at: "2026-09-01T00:00:00Z", members: 3, apps: 1 }]);
         case "list_my_apps":
-          return ok([{ id: "a1", name: "Cards", status: "draft", stage: "staging", workspace_id: "w1" }]);
+          return ok([{ id: "a1", name: "Cards", status: "draft", stage: fake.stage, workspace_id: "w1" }]);
         case "list_builds":
           return ok({ builds: fake.builds });
         case "get_build":
@@ -99,6 +100,7 @@ beforeEach(() => {
   fake.hosted = [];
   fake.builds = [shipped, { id: "b1", app_id: "a1", status: "succeeded", repository: "octo/cards", commit_sha: "1111111", updated_at: "2026-11-10T10:00:00Z" }, { id: "b3", app_id: "a1", status: "failed", updated_at: "2026-11-21T10:00:00Z" }];
   fake.refuse = {};
+  fake.stage = "staging";
 });
 
 describe("GET /api/apps/[appId]/hosting", () => {
@@ -188,6 +190,31 @@ describe("POST /api/apps/[appId]/hosting: Put online", () => {
     const res = await post({ action: "put_online", build_id: "b2" });
     expect(res.status).toBe(422);
     expect((await res.json()).message).toBe("Repository 'octo/cards' is waiting for an admin's approval");
+  });
+
+  it("says who may put a build online: any member in Staging, owners and admins in Production", async () => {
+    fake.role = "member";
+    expect(await (await get()).json()).toMatchObject({ stage: "staging", role: "member", canPutOnline: true });
+    fake.stage = "production";
+    expect(await (await get()).json()).toMatchObject({ stage: "production", role: "member", canPutOnline: false });
+    fake.role = "admin";
+    expect(await (await get()).json()).toMatchObject({ stage: "production", role: "admin", canPutOnline: true });
+  });
+
+  it("in Production, leaves the refusal to Mynt (which records it) and shows it in Mynt's words: a member, and a build that fails the production checks", async () => {
+    fake.tenant = { id: "t1", status: "running" };
+    fake.stage = "production";
+    fake.role = "member";
+    fake.refuse.deploy_app = "This app is in Production: only its workspace's owners and admins put a build online. Ask one of them. In Idea and Staging any member of the workspace can.";
+    const member = await post({ action: "put_online", build_id: "b2" });
+    expect(member.status).toBe(422);
+    expect((await member.json()).message).toBe(fake.refuse.deploy_app);
+    expect(called("deploy_app")).toHaveLength(1);
+    fake.role = "owner";
+    fake.refuse.deploy_app = "Build b2 can't go online: this app is in Production, where a build goes online only if it passes the production checks about the build. Independent audit passed: 1 critical or high finding(s) in the independent audit. The build that is online stays as it is";
+    const owner = await post({ action: "put_online", build_id: "b2" });
+    expect(owner.status).toBe(422);
+    expect((await owner.json()).message).toBe(fake.refuse.deploy_app);
   });
 
   it("chooses the repository the app's next builds push to", async () => {

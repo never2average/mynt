@@ -271,6 +271,13 @@ The top bar shows where the app stands on Mynt's hosting: **Online at** its addr
 
 The sheet shows the build, the repository and commit it deploys, and what happens: Mynt's hosting builds exactly that commit on the app's own machine, the app gets its own public address, and its Mynt key is added at Mynt's edge, never stored on the app's machine.
 
+For an app in **Production**, the sheet says up front who may do it and what Mynt checks:
+
+- A member reads "only the workspace's owners and admins put a build online there", and the **Put online** button is off.
+- An owner or admin reads the checks Mynt makes of the build first. If Mynt refuses, the sheet shows the refusal in Mynt's words, naming each failing check, and the build online stays.
+
+In Ideas and Staging any member puts a build online, as before. Studio has no Take offline or Restart button for an app; those are the `undeploy_app` and `restart_app` tools, under the same rule.
+
 A build that pushed to no repository can't be hosted. The sheet says so and offers **Choose repository**; the app's next build pushes there. The chat's composer offers the same **Put online** once a build has shipped. The full behaviour is in [Put online](apps-and-builds.md#put-online).
 
 ## The service workspace

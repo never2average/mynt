@@ -137,7 +137,18 @@ export const WHAT_HAPPENS = [
 /** Turning on the workspace's hosting is for its owners and admins. */
 export const canTurnOnHosting = (role: string | null | undefined) => role === "owner" || role === "admin";
 export const MEMBERS_HOSTING =
-  "Your workspace's hosting isn't on yet. An owner or admin turns it on, by putting one of its apps online here; then any member can put apps online.";
+  "Your workspace's hosting isn't on yet. An owner or admin turns it on, by putting one of its apps online here; then any member can put apps in Ideas and Staging online (in Production, owners and admins).";
+
+/**
+ * In Production, what is online is the workspace's owners' and admins' to change (Mynt refuses anyone
+ * else, and records the attempt). In Idea and Staging any member puts a build online.
+ */
+export const canPutOnline = (stage: string | null | undefined, role: string | null | undefined) => stage !== "production" || role === "owner" || role === "admin";
+export const PRODUCTION_OWNERS_ONLY =
+  "This is in Production: only the workspace's owners and admins put a build online there. Ask one of them. In Idea and Staging any member of the workspace can.";
+/** What Put online adds for an app in Production, said before the click. */
+export const PRODUCTION_CHECKS =
+  "This is in Production, so Mynt puts the build online only if it passes the production checks about the build: Mynt verified it, its independent audit passed, it has no open critical or high findings and, when the app moves value, a Mynt admin signed off this build. If one fails, Mynt says which here, and the build that is online stays.";
 
 /** How often the sheet and top bar ask Mynt again while the app is being deployed. */
 export const POLL_MS = 5000;

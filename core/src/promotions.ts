@@ -28,6 +28,10 @@ import { appRole, frozenReason, isUuid, memberApp, type AppStage } from "./works
 // necessary (its basis: programs, rails): if that changes without a new build, it no longer counts. Production promotes
 // what runs: the hosted build must be the verified build the checks and sign-off are about.
 //
+// After promotion the same checks keep guarding what is online: for an app in Production, deploy_app puts a build
+// online only for an owner or admin of its workspace, and only if the checks that are about the build pass for that
+// build (productionDeployBlockers; hosting-tools.ts). A service's new build takes over under productionBlockers.
+//
 // The stage is stored, and changes only by promotion and demotion: a new app starts as an idea, however far its builds
 // and hosting get. Apps from before promotions kept the stage Mynt derived for them then (seedAppStages).
 
@@ -96,8 +100,10 @@ interface State {
   promotion: Row | undefined;
 }
 
+const OPTIONAL_TABLES = ["build_runs", "hosted_apps", "hosting_tenants", "solana_programs", "solana_program_flags", "solana_mainnet_reviews"];
+
 async function readState(q: Q, appId: string): Promise<State> {
-  const have = await tables(q, ["build_runs", "hosted_apps", "hosting_tenants", "solana_programs", "solana_program_flags", "solana_mainnet_reviews"]);
+  const have = await tables(q, OPTIONAL_TABLES);
   const builds = have.has("build_runs");
   const verified = builds
     ? await one(q, `SELECT * FROM ${T}.build_runs WHERE app_id = $1 AND status = 'succeeded' ORDER BY COALESCE(finished_at, updated_at) DESC, created_at DESC LIMIT 1`, [appId])
@@ -460,6 +466,46 @@ export async function productionBlockers(store: Store, appId: string, buildId: s
   return checks.filter((c) => c.status === "fail").map((c) => `${c.label}: ${c.detail}`);
 }
 
+/**
+ * What stops build `buildId` going online for an app that is in Production: the checks a promotion to Production runs
+ * that are about the build, read for the build that is going online (not the one that was online when the app was
+ * promoted). They are the same functions promotion uses, so the words are the same:
+ *
+ * - it is a build of this app that Mynt verified;
+ * - its independent audit passed (a build with no audit only warns, as in promotion, unless the app moves value);
+ * - it has no open critical or high audit findings;
+ * - when the app moves value (Solana programs, or a product on an approved money rail), a Mynt admin signed off this
+ *   very build, and what made the sign-off necessary hasn't changed since. In Production the sign-off is asked before
+ *   the build is online (requestSignoff), because it can't go online without it.
+ *
+ * Empty: nothing does. A check that fails or is pending (a sign-off asked and not decided yet) stops it; a warning that
+ * wouldn't stop a promotion doesn't.
+ *
+ * Not read here, on purpose: the checks that aren't about the build. Hosting health and webhook deliveries are what a
+ * deploy repairs, so they can't be asked of it first. Licences, program agreements and the mainnet program gate are
+ * about the app's products and programs, the same whichever build runs, and are enforced where they act (a product
+ * without a signed agreement isn't served to a live key; programs reach mainnet through their own gate); a production
+ * app that stops meeting one is flagged in get_workspace_attention, and a build that fixes it can still go online. A
+ * service differs (productionBlockers): its takeover also reads its terms and its firm's licence, because taking over
+ * is what lists it.
+ */
+export async function productionDeployBlockers(store: Store, app: App, buildId: string): Promise<PromotionCheck[]> {
+  const q = store.db;
+  const have = await tables(q, OPTIONAL_TABLES);
+  const build = have.has("build_runs") && isUuid(buildId) ? await one(q, `SELECT * FROM ${T}.build_runs WHERE id::text = $1 AND app_id = $2`, [buildId, app.id]) : undefined;
+  if (!build || build.status !== "succeeded")
+    return [{ id: "build_verified", label: "Latest build verified by Mynt", status: "fail", detail: `Build ${short(buildId)} isn't a build of this app that passed Mynt's verification` }];
+  // The same checks, about this build.
+  const on: State = { have, verified: build, newestFinished: build, running: undefined, hosted: undefined, promotion: await one(q, `SELECT * FROM ${T}.app_promotions WHERE app_id = $1`, [app.id]) };
+  // Whether the app moves value decides how strict the audit checks are, and whether a sign-off is needed.
+  const { moneyFirms } = await licenceCheck(store, app, on);
+  const { reasons, basis } = await signoffReasons(q, on, await programsOf(q, app.id, on), moneyFirms);
+  const needs = reasons.length > 0;
+  const checks = [auditCheck(on, { production: true, strict: needs }), findingsCheck(app.id, on, needs)];
+  if (needs) checks.push(await signoffCheck(q, app.id, on, await signoffFor(q, app.id, build), reasons, basis));
+  return checks.filter((c) => c.status === "fail" || c.status === "pending");
+}
+
 export class PromotionError extends Error {}
 
 // The checks for moving `app` one step up to `to`, from Mynt's own records. `q`: a transaction's connection when
@@ -615,12 +661,14 @@ export async function requestSignoff(store: Store, user: Pick<User, "id">, app: 
     await lockApp(tx, app.id);
     await refuseFrozen(tx, app);
     const from = await stageOf(tx, app);
-    if (from !== "staging") throw new PromotionError(`Sign-off is for promoting to production, and the app is in ${from}`);
+    // In Staging, for the promotion; in Production, for a newer build before it goes online (productionDeployBlockers).
+    if (from === "idea") throw new PromotionError(`Sign-off is for promoting to production, and the app is in ${from}`);
     const { result, s, basis, reasons } = await evaluate(tx, store, app, from, "production");
     if (!result.needs_admin_signoff) throw new PromotionError("This app doesn't need an admin's sign-off to go to production");
     if (!s.verified) throw new PromotionError("Sign-off is for a build Mynt verified, and the app has none yet");
-    // The sign-off is for what runs: the verified build must be the one deployed on Mynt's hosting.
-    if (s.hosted?.build_id !== s.verified.id)
+    // The sign-off is for what runs: the verified build must be the one deployed on Mynt's hosting. Not in Production,
+    // where a build that needs a sign-off can't be deployed until it has one.
+    if (from === "staging" && s.hosted?.build_id !== s.verified.id)
       throw new PromotionError(`Sign-off is for the build that runs: deploy build ${short(s.verified.id)} on Mynt's hosting first${s.hosted ? ` (it runs ${short(s.hosted.build_id)})` : ""}`);
     const current = await signoffFor(tx, app.id, s.verified);
     if (current?.status === "requested" || (current?.status === "approved" && !stale(current, basis))) return { signoff: publicSignoff(current), already: true };
@@ -832,7 +880,7 @@ export function registerPromotionTools(server: McpServer, store: Store, user: Us
     {
       title: "Ask a Mynt admin to sign off a production promotion",
       description:
-        "Developer (the workspace's owners and admins): when get_promotion_checks says needs_admin_signoff, ask Mynt's admins to sign off the app's latest verified build for production. The sign-off is for that build only: a newer verified build needs a new one. Asking again for the same build returns the open request.",
+        "Developer (the workspace's owners and admins): when get_promotion_checks says needs_admin_signoff, ask Mynt's admins to sign off the app's latest verified build for production. The sign-off is for that build only: a newer verified build needs a new one. Asking again for the same build returns the open request. In Staging the build must be the one deployed. For an app already in Production that moves value, ask before deploying a newer build: deploy_app puts it online only once it is signed off.",
       inputSchema: { app_id: z.string() },
     },
     async ({ app_id }) => {

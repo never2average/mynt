@@ -66,6 +66,29 @@ describe("Put online's sheet", () => {
     expect((screen.getByRole("button", { name: "Put online" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("in Production, tells a member up front that owners and admins put a build online, and doesn't let them confirm", () => {
+    render(<PutOnlineView meta={meta({ role: "member", canTurnOn: false, stage: "production", canPutOnline: false, hosting: { on: true, status: "running", app: notOnline } })} onPutOnline={noop} onChooseRepository={noop} />);
+    expect(screen.getByText(/only the workspace's owners and admins put a build online there\. Ask one of them\./)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Put online" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("in Production, tells an owner what Mynt checks of the build first, and shows Mynt's refusal in its own words", () => {
+    const refusal = "Build abcdef12 can't go online: this app is in Production, where a build goes online only if it passes the production checks about the build. Independent audit passed: 1 critical or high finding(s) in the independent audit. The build that is online stays as it is";
+    render(<PutOnlineView meta={meta({ stage: "production", canPutOnline: true, hosting: { on: true, status: "running", app: notOnline } })} error={refusal} onPutOnline={noop} onChooseRepository={noop} />);
+    expect(screen.getByText(/Mynt puts the build online only if it passes the production checks about the build/)).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toBe(refusal);
+    expect((screen.getByRole("button", { name: "Put online" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("in Staging, a member still puts a build online, with no word about Production", () => {
+    const html = renderToStaticMarkup(<PutOnlineView meta={meta({ role: "member", canTurnOn: false, stage: "staging", canPutOnline: true, hosting: { on: true, status: "running", app: notOnline } })} onPutOnline={noop} onChooseRepository={noop} />);
+    expect(html).not.toContain("Production, ");
+    expect(html).not.toContain("data-production-owners-note");
+    expect(html).not.toContain("data-production-checks");
+    expect(html).not.toMatch(/data-confirm-put-online[^>]*disabled/);
+    expect(html).not.toMatch(/disabled[^>]*data-confirm-put-online/);
+  });
+
   it("shows the live address once the app runs this build, and offers the newer build when it runs an older one", () => {
     const online = { state: "online" as const, url: "https://cards.example.test", buildId: "b2", commitSha: "abcdef1234567890", error: null };
     render(<PutOnlineView meta={meta({ hosting: { on: true, status: "running", app: online } })} onPutOnline={noop} onChooseRepository={noop} />);

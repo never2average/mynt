@@ -615,6 +615,39 @@ There are two modes:
 
 A workspace's owners and admins turn hosting on with `request_hosting`, and `hosting_status` shows the workspace's hosting, the apps it hosts and each one's public address. `deploy_app(app_id, build_id)` takes only a build that passed Mynt's verification.
 
+### Who puts a build online
+
+It depends on the app's stage.
+
+| Stage | Who may `deploy_app`, `undeploy_app`, `restart_app` and `app_run` | Which builds go online |
+| --- | --- | --- |
+| Idea, Staging | Any member of the app's workspace | Any build of the app that Mynt verified |
+| Production | Only the workspace's owners and admins | A build that Mynt verified and that passes the production checks about the build |
+
+`app_status`, `app_logs` and `hosting_status` stay every member's in every stage.
+
+An app in Production serves real customers on a live key, so what is online there, and what runs inside it, changes the way its stage does: by an owner or admin, after Mynt's own checks.
+
+**The checks a build must pass in Production.** They are promotion's own checks (see [Checks to move to production](workspaces-and-sign-in.md#checks-to-move-to-production)), read for the build that is going online rather than the one that was online when the app was promoted:
+
+- it is a build of this app that Mynt verified;
+- `audit_passed`: its independent audit found no critical or high issue. A build no audit ran on only warns, as in promotion, unless the app moves value;
+- `audit_findings`: it has no open critical or high audit findings;
+- `admin_signoff`, when the app moves value: a Mynt admin signed off this very build. An owner or admin asks with `request_promotion_signoff` before deploying it; see [Production sign-off](workspaces-and-sign-in.md#production-sign-off).
+
+A check that fails, or a sign-off still waiting, refuses the deploy. The refusal lists each failing check in the words `get_promotion_checks` uses, and the build that is online stays as it is.
+
+**What isn't checked again at a deploy.** The production checks that aren't about the build:
+
+- hosting health and webhook deliveries are what a deploy repairs, so they can't be asked of it first;
+- licences, program agreements and the mainnet program gate are about the app's products and programs, the same whichever build runs. They are enforced where they act: a live key isn't served a product without a signed agreement (see [Production needs program agreements](agreements.md#production-needs-program-agreements)), and programs reach mainnet through their own gate.
+
+A production app that stops meeting any of them is flagged in `get_workspace_attention`, and a build that fixes it can still go online. A service differs: its new build takes over only when its terms and its firm's licence also hold, because taking over is what lists it (see [Services](services.md)).
+
+**Refused attempts are audited.** Each is in the audit trail with who tried and why: `deploy_app_refused`, `undeploy_app_refused`, `app_restart_refused` and `app_exec_refused`. The reason is `production_needs_owner_or_admin` or, for a build, `production_checks` with the failing checks' ids. A refused command is never recorded.
+
+**No automatic deploys.** Nothing puts an app's build online but `deploy_app`: a build that Mynt verifies is not deployed by Mynt itself, in any stage. The one thing Mynt switches by itself is a service's new build, and only under the service's own rule.
+
 ### Put online
 
 In Mynt Studio, the app's top bar shows where the app stands: Online at its address, Deploying or Not online. Beside it is the Put online button.
@@ -622,6 +655,11 @@ In Mynt Studio, the app's top bar shows where the app stands: Online at its addr
 1. Put online opens a sheet. It shows the app's newest verified build, the repository and commit it deploys, and what happens.
 2. Confirming turns the workspace's hosting on if needed (`request_hosting`, for owners and admins), then hosts the build with `deploy_app`.
 3. The sheet follows the deploy until the app answers at its address.
+
+For an app in Production the sheet says up front what applies (see [Who puts a build online](#who-puts-a-build-online)):
+
+- A member reads that only the workspace's owners and admins put a build online there, and the confirm button is off.
+- An owner or admin reads which checks Mynt makes of the build first. If Mynt refuses, the sheet shows its refusal in its own words, with each failing check.
 
 When the app already runs an older build, the confirm button reads "Put the new build online".
 
@@ -682,6 +720,8 @@ Builders reach their app's container through Mynt.
 | `app_logs` | The app's logs |
 | `app_run` | A command inside the app's container, under gVisor, never on the VM itself |
 | `restart_app` | Restarts the app |
+
+For an app in Production, `app_run` and `restart_app` are for the workspace's owners and admins only: a command can read what the app holds for real customers, and a restart interrupts them. `app_status` and `app_logs` stay every member's. See [Who puts a build online](#who-puts-a-build-online).
 
 Mynt runs each one on the app's VM, only against that builder's own app container, and posts the result back, scrubbed of secrets. Under direct hosting they run at once. In gateway mode, the VM's agent claims the request over the tunnel within a few seconds. Every request is audited.
 
