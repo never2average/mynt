@@ -898,7 +898,7 @@ export const ADMIN_TOOLS = {
       agent: benchmarkAgent,
       cap_usd: z.number().positive().max(2000),
       label: z.string().trim().min(1).max(120).optional(),
-      repository: z.string().trim().regex(/^[\w.-]+\/[\w.-]+$/).max(200).optional(),
+      task_ids: z.array(z.string().trim().min(1).max(120)).min(1).max(100).optional(),
       host_restored: z.literal(true).optional(),
     })
     .strict(),

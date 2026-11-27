@@ -866,7 +866,7 @@ export class BenchmarkService {
     const own = this.hostMissing() ?? (await adapter.unavailable(o));
     if (own) throw refuse(own);
     if (o.cap_usd < MIN_TASK_USD + adapter.reserveUsd())
-      throw refuse(`a cap of US$${o.cap_usd} can't cover even one ${o.agent} task: a run needs at least US$${cents(MIN_TASK_USD + adapter.reserveUsd())} to start one, and US$${cents(adapter.maxTaskUsd() + adapter.reserveUsd())} to give one task its whole budget`);
+      throw refuse(`a cap of US$${o.cap_usd} is too small for even one task: a ${o.agent} run needs at least US$${cents(MIN_TASK_USD + adapter.reserveUsd())} to start one, and US$${cents(adapter.maxTaskUsd() + adapter.reserveUsd())} to give one task its whole budget`);
     const quota = o.host_restored ? null : await this.hostOutOfAllowance();
     if (quota) throw refuse(quota);
     const active = await this.one(`SELECT id, agent FROM ${T}.benchmark_runs WHERE status = ANY($1) LIMIT 1`, [ACTIVE]);

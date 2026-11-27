@@ -59,7 +59,22 @@ export type BenchmarkRun = {
   finishedAt: string | null
   scoreboard: Scoreboard
 }
+/** What a set could cost at most against the cap one run may have (Mynt works it out; see budgetWords). */
+export type BenchmarkBudget = {
+  perTaskCeilingUsd: number | null
+  setCeilingUsd: number | null
+  capUsd: number | null
+  fitsWholeSet: boolean
+  tasksCoveredInFull: number
+  canStart: boolean
+  note: string | null
+}
+export type BenchmarkTaskChoice = { id: string; label: string }
+/** One of the benchmarks' own rows in the shared records: listed on this page and nowhere else. */
+export type BenchmarkRecord = { kind: string; id: string; name: string; status: string | null; createdAt: string | null }
 export type BenchmarkAgentInfo = {
+  budget: BenchmarkBudget
+  taskList: BenchmarkTaskChoice[]
   agent: string
   taskSet: string
   version: number
@@ -86,7 +101,7 @@ export type BenchmarkTask = {
   costNote: string | null
   durationMs: number | null
 }
-export type BenchmarkList = { runs: BenchmarkRun[]; agents: BenchmarkAgentInfo[]; maxCapUsd: number | null }
+export type BenchmarkList = { runs: BenchmarkRun[]; agents: BenchmarkAgentInfo[]; maxCapUsd: number | null; records: BenchmarkRecord[]; recordsNote: string | null }
 export type BenchmarkDetail = { run: BenchmarkRun; tasks: BenchmarkTask[] }
 export type ComparedTask = { taskId: string; baseline: string; candidate: string; change: string; why: string | null; failedCheck: string | null; costDeltaUsd: number | null; durationDeltaMs: number | null }
 export type BenchmarkComparison = {
@@ -156,6 +171,33 @@ function runFrom(v: unknown, scoreboard: unknown): BenchmarkRun | null {
   }
 }
 
+function budgetFrom(v: unknown): BenchmarkBudget {
+  const b = row(v) ?? {}
+  return {
+    perTaskCeilingUsd: figure(b.per_task_ceiling_usd),
+    setCeilingUsd: figure(b.set_ceiling_usd),
+    capUsd: figure(b.cap_usd),
+    fitsWholeSet: b.fits_whole_set === true,
+    tasksCoveredInFull: count(b.tasks_covered_in_full),
+    canStart: b.can_start === true,
+    note: text(b.note),
+  }
+}
+
+const RECORD_KINDS: [string, string][] = [
+  ["workspaces", "Workspace"],
+  ["apps", "App"],
+  ["firms", "Stand-in firm"],
+  ["products", "Draft product"],
+]
+function recordsFrom(v: unknown): BenchmarkRecord[] {
+  const r = row(v)
+  if (!r) return []
+  const one = (kind: string, x: Row): BenchmarkRecord => ({ kind, id: text(x.id) ?? "", name: text(x.name) ?? "Not named", status: text(x.status), createdAt: text(x.created_at) })
+  const account = row(r.account)
+  return [...(account ? [one("Account", account)] : []), ...RECORD_KINDS.flatMap(([key, kind]) => rows(r[key]).map((x) => one(kind, x)))]
+}
+
 /** list_benchmark_runs, as the page's list shows it; null when Mynt's answer isn't one. */
 export function benchmarkListFrom(v: unknown): BenchmarkList | null {
   const body = row(v)
@@ -165,6 +207,8 @@ export function benchmarkListFrom(v: unknown): BenchmarkList | null {
       .map((r) => runFrom(r, r.scoreboard))
       .filter((r): r is BenchmarkRun => r !== null),
     agents: rows(body.agents).map((a) => ({
+      budget: budgetFrom(a.budget),
+      taskList: rows(a.task_list).map((t) => ({ id: text(t.id) ?? "", label: text(t.label) ?? text(t.id) ?? "" })).filter((t) => t.id),
       agent: text(a.agent) ?? "unknown",
       taskSet: text(a.task_set) ?? "",
       version: count(a.version),
@@ -178,6 +222,8 @@ export function benchmarkListFrom(v: unknown): BenchmarkList | null {
       needs: words(a.needs),
     })),
     maxCapUsd: figure(row(body.cap)?.max_usd_per_run),
+    records: recordsFrom(body.records),
+    recordsNote: text(row(body.records)?.note),
   }
 }
 
@@ -250,6 +296,32 @@ const signed = (n: number, digits: number) => `${n > 0 ? "+" : n < 0 ? "−" : "
 export const usdDeltaWords = (v: number | null) => (v === null ? NOT_MEASURED : `${signed(v, 2).replace(/^([+−]?)/, "$1US$")}`)
 export const pointsDeltaWords = (v: number | null) => (v === null ? NOT_MEASURED : `${signed(v * 100, 1)} points`)
 export const durationDeltaWords = (ms: number | null) => (ms === null ? NOT_MEASURED : `${signed(ms / 1000, 0)} s`)
+
+/** A set's ceiling against the cap, for the Task sets table: "US$80.00 at most; the US$25 cap covers 2 of 8 tasks in full". */
+export function ceilingWords(b: BenchmarkBudget, tasks: number) {
+  if (b.setCeilingUsd === null) return notMeasured("this agent's per-task cap isn't set on this Mynt")
+  const cap = b.capUsd === null ? "the cap" : `the US$${b.capUsd} cap`
+  if (!b.canStart) return `US$${b.setCeilingUsd.toFixed(2)} at most; ${cap} can't cover even one task`
+  if (b.fitsWholeSet) return `US$${b.setCeilingUsd.toFixed(2)} at most; fits under ${cap}`
+  if (b.tasksCoveredInFull === 0) return `US$${b.setCeilingUsd.toFixed(2)} at most; ${cap} can't cover even one task in full`
+  return `US$${b.setCeilingUsd.toFixed(2)} at most; ${cap} covers ${b.tasksCoveredInFull} of ${tasks} tasks in full`
+}
+/**
+ * What a cap covers of the tasks chosen, in the Start run sheet, before anything is spent: worked out here from the
+ * per-task ceiling Mynt gave, so it follows the cap being typed and the tasks being ticked.
+ */
+export function capCoverWords(b: BenchmarkBudget, chosen: number, capUsd: number | null) {
+  if (b.perTaskCeilingUsd === null) return notMeasured("this agent's per-task cap isn't set on this Mynt, so what a cap covers can't be worked out")
+  const per = b.perTaskCeilingUsd
+  const ceiling = Math.round(chosen * per * 100) / 100
+  const about = `${chosen} task${chosen === 1 ? "" : "s"} at up to US$${per} each could cost at most US$${ceiling.toFixed(2)}.`
+  if (capUsd === null || !(capUsd > 0)) return `${about} Give a cap to see what it covers.`
+  if (b.capUsd !== null && capUsd > b.capUsd) return `${about} A cap of US$${capUsd} is over US$${b.capUsd}, the most one run may spend (BENCHMARK_CAP_USD in Platform settings).`
+  if (capUsd >= ceiling) return `${about} A cap of US$${capUsd} covers all of them.`
+  const covered = Math.floor((capUsd + 1e-9) / per)
+  if (covered === 0) return `${about} A cap of US$${capUsd} can't cover even one task in full: the run would give its first task only what the cap leaves, then stop. Give at least US$${per}.`
+  return `${about} A cap of US$${capUsd} is sure to cover ${covered} of them in full: the run stops when the cap is reached, and the rest are recorded as not run. Pick ${covered} or fewer, or raise the cap.`
+}
 
 export const TASK_STATUS_LABELS: Record<string, string> = { pending: "Waiting", running: "Running", passed: "Passed", failed: "Failed", not_run: "Not run" }
 export const FAILURE_CLASS_LABELS: Record<string, string> = {

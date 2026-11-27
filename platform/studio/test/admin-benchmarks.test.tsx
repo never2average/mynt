@@ -15,7 +15,7 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: () => undefined, replace: () => undefined, prefetch: () => undefined, back: () => undefined }),
 }));
 
-const { BenchmarksView, BenchmarkRunView, StartRunSheet, StopRunSheet, RUNS_HEAD, TASK_SETS_HEAD, RUN_TABS, NO_RUNS_NOTE } = await import("@/components/admin-benchmarks");
+const { BenchmarksView, BenchmarkRunView, StartRunSheet, StopRunSheet, RUNS_HEAD, TASK_SETS_HEAD, RECORDS_HEAD, LIST_TABS, RUN_TABS, NO_RUNS_NOTE, NO_RECORDS_NOTE } = await import("@/components/admin-benchmarks");
 const lib = await import("@/lib/benchmarks");
 const { PLATFORM_SECTIONS } = await import("@/components/platform-shell");
 const admin = await import("@/lib/admin");
@@ -35,11 +35,19 @@ const BASE = "22222222-2222-4222-8222-222222222222";
 const board = (over: Record<string, unknown> = {}) => ({ tasks: 3, passed: 1, failed: 1, infrastructure_failures: 1, harness_failures: 0, not_run: 0, waiting: 0, scored: 2, pass_rate: 0.5, pass_rate_note: null, cost_usd: 1.3, cost_note: null, median_duration_ms: 61000, duration_note: null, ...over });
 const runRow = (over: Record<string, unknown> = {}) => ({ id: RUN, agent: "coding", label: "After the secure skill change", task_set: "coding.v1.json", task_set_version: 1, status: "finished", stop_reason: null, cap_usd: 20, charged_usd: 1.3, model: "claude-opus-5-5", workspace_revisions: { "coding-build": "abcdef0123456789".repeat(4) }, source_commit: null, source_commit_note: "Not recorded: the server wasn't running from a git checkout", started_by: "Ada Admin", created_at: "2026-11-27T10:00:00.000Z", finished_at: "2026-11-27T10:30:00.000Z", ...over });
 const AGENTS = [
-  { agent: "coding", task_set: "coding.v1.json", version: 1, title: "App builds on the starter ideas", description: "Eight app builds.", tasks: 8, model: "claude-opus-5-5", max_task_usd: 10, ready: true, why_not: null, needs: ["A sandbox host with allowance left, the agents' model backend, and PUBLIC_URL."] },
-  { agent: "product-desk", task_set: "product-desk.v1.json", version: 1, title: "Feasibility models", description: "Six product ideas.", tasks: 6, model: "claude-opus-5-5", max_task_usd: 5, ready: true, why_not: null, needs: ["A repository set aside for benchmarks."] },
-  { agent: "program-audit", task_set: "program-audit.v1.json", version: 1, title: "Solana programs", description: "Four programs.", tasks: 4, model: null, max_task_usd: null, ready: false, why_not: "Program-audit benchmarks can't run yet", needs: ["Not runnable yet."] },
+  { agent: "coding", task_set: "coding.v1.json", version: 1, title: "App builds on the starter ideas", description: "Eight app builds.", tasks: 8, model: "claude-opus-5-5", max_task_usd: 10, ready: true, why_not: null, needs: ["A sandbox host with allowance left, the agents' model backend, and PUBLIC_URL."], budget: { tasks: 8, per_task_ceiling_usd: 10, set_ceiling_usd: 80, cap_usd: 25, fits_whole_set: false, tasks_covered_in_full: 2, can_start: true, note: "The whole set could cost up to US$80 (8 task(s) at up to US$10 each), more than the cap of US$25. The cap is sure to cover 2 task(s) in full: pick up to 2, or raise BENCHMARK_CAP_USD in Platform settings." }, task_list: ["two-key-household-fund", "tax-refund-split", "closing-date-cd", "payroll-buffer", "t5", "t6", "t7", "t8"].map((id) => ({ id, label: `The ${id} app` })) },
+  { agent: "product-desk", task_set: "product-desk.v1.json", version: 1, title: "Feasibility models", description: "Six product ideas.", tasks: 6, model: "claude-opus-5-5", max_task_usd: 5, ready: true, why_not: null, needs: ["Nothing else: no repository."], budget: { tasks: 6, per_task_ceiling_usd: 5, set_ceiling_usd: 30, cap_usd: 25, fits_whole_set: false, tasks_covered_in_full: 5, can_start: true, note: "The whole set could cost up to US$30." }, task_list: ["d1", "d2", "d3", "d4", "d5", "d6"].map((id) => ({ id, label: id })) },
+  { agent: "program-audit", task_set: "program-audit.v1.json", version: 1, title: "Solana programs", description: "Four programs.", tasks: 4, model: null, max_task_usd: null, ready: false, why_not: "Program-audit benchmarks can't run yet", needs: ["Not runnable yet."], budget: { tasks: 4, per_task_ceiling_usd: null, set_ceiling_usd: null, cap_usd: 25, fits_whole_set: false, tasks_covered_in_full: 0, can_start: false, note: "Not measured: this agent's per-task cap isn't set on this Mynt" }, task_list: [] },
 ];
-const listOf = (runs: unknown[]) => lib.benchmarkListFrom({ runs, agents: AGENTS, cap: { max_usd_per_run: 25 } })!;
+const RECORDS = {
+  note: "Made by benchmark runs and used only by them.",
+  account: { id: "u1", name: "Mynt benchmarks", created_at: "2026-11-20T10:00:00.000Z" },
+  workspaces: [{ id: "w1", name: "Mynt benchmarks", created_at: "2026-11-20T10:00:00.000Z" }],
+  apps: [{ id: "a1", name: "Benchmark: tax-refund-split", status: "draft", created_at: "2026-11-20T10:00:00.000Z" }],
+  firms: [{ id: "e1", name: "Mynt benchmarks (not a firm)", created_at: "2026-11-20T10:00:00.000Z" }],
+  products: [{ id: "benchmark-d1", name: "Starter certificate", status: "draft", created_at: "2026-11-20T10:00:00.000Z" }],
+};
+const listOf = (runs: unknown[], records: unknown = null) => lib.benchmarkListFrom({ runs, agents: AGENTS, cap: { max_usd_per_run: 25 }, records })!;
 const TASKS = [
   { task_id: "two-key-household-fund", status: "passed", failure_class: null, failed_check: null, detail: null, checks: [{ name: "tests", status: "pass" }, { name: "secrets_scan", status: "pass" }], cap_usd: 10, cost_usd: 0.6, cost_parts: { agent_model: 0.5, sandboxes: 0.1, mynt_audit: null }, cost_note: null, duration_ms: 61000 },
   { task_id: "tax-refund-split", status: "failed", failure_class: "agent", failed_check: "secrets_scan", detail: "failed: Not production-ready: secrets_scan (gitleaks: 1 leak)", checks: [{ name: "secrets_scan", status: "fail" }], cap_usd: 10, cost_usd: 0.7, cost_parts: { agent_model: 0.6, sandboxes: 0.1, mynt_audit: null }, cost_note: null, duration_ms: 75000 },
@@ -91,6 +99,10 @@ describe("the list", () => {
     expect(sets).toContain("Coding agents");
     expect(sets).toContain("A sandbox host with allowance left");
     expect(sets).toMatch(/data-agent-ready="yes"[^>]*>Yes</);
+    // Each set's ceiling against the cap one run may have; a ceiling nothing set is said, never shown as 0.
+    expect(sets).toMatch(/data-agent-ceiling="part"[^>]*>US\$80\.00 at most; the US\$25 cap covers 2 of 8 tasks in full</);
+    expect(sets).toMatch(/data-agent-ceiling="none"[^>]*>Not measured: this agent&#x27;s per-task cap isn&#x27;t set on this Mynt</);
+    expect(sets).not.toContain("US$0");
     expect(sets).toMatch(/data-agent-ready="no"[^>]*>No\. Program-audit benchmarks can&#x27;t run yet/);
     expect((sets.match(/<table/g) ?? []).length).toBe(1);
   });
@@ -128,27 +140,81 @@ describe("the list", () => {
     fireEvent.change(sheet.querySelector("[data-start-run-cap]")!, { target: { value: "20" } });
     fireEvent.change(sheet.querySelector("[data-start-run-label]")!, { target: { value: "baseline" } });
     expect(sheet.querySelector("[data-start-run-repository]")).toBeNull();
+    // Before anything is spent: the set's ceiling against the cap, and what the cap typed covers of the tasks picked.
+    expect(sheet.querySelector("[data-start-run-ceiling]")!.textContent).toContain("The cap is sure to cover 2 task(s) in full");
+    expect(sheet.querySelector("[data-start-run-cover]")!.textContent).toContain("8 tasks at up to US$10 each could cost at most US$80.00. A cap of US$20 is sure to cover 2 of them in full");
     await act(async () => {
       fireEvent.submit(sheet.querySelector("[data-start-run-form]")!);
     });
+    // The whole set: no task list is sent.
     expect(calls).toEqual([{ url: "/api/admin/benchmarks", body: { agent: "coding", cap_usd: 20, label: "baseline" } }]);
     expect(document.querySelector("[data-sheet-result]")!.textContent).toContain("Started: 8 coding task(s).");
   });
 
-  it("the sheet asks the product desk for its benchmark repository, shows why an agent can't run, and Mynt's refusal", async () => {
+  it("the sheet takes no repository from anyone, shows why an agent can't run, and Mynt's refusal", async () => {
     const { f, calls } = fetcher({ error: "refused", message: "This run can't start: the sandbox host's allowance is used up." }, 409);
     render(<StartRunSheet open agents={listOf([]).agents} maxCapUsd={25} onClose={() => undefined} onDone={() => undefined} fetcher={f} />);
     const sheet = document.querySelector('[data-admin-sheet="start-benchmark-run"]')!;
     fireEvent.change(sheet.querySelector("[data-start-run-agent]")!, { target: { value: "program-audit" } });
     expect(sheet.querySelector("[data-start-run-not-ready]")!.textContent).toContain("Program-audit benchmarks can't run yet");
     fireEvent.change(sheet.querySelector("[data-start-run-agent]")!, { target: { value: "product-desk" } });
-    fireEvent.change(sheet.querySelector("[data-start-run-repository]")!, { target: { value: "mynt-bench/desk" } });
+    // A product-desk run names no repository: there is nowhere to type one.
+    expect(sheet.querySelector("[data-start-run-repository]")).toBeNull();
+    expect(sheet.textContent).not.toMatch(/repository set aside|GitHub App/);
     fireEvent.change(sheet.querySelector("[data-start-run-cap]")!, { target: { value: "15" } });
     await act(async () => {
       fireEvent.submit(sheet.querySelector("[data-start-run-form]")!);
     });
-    expect(calls[0].body).toEqual({ agent: "product-desk", cap_usd: 15, repository: "mynt-bench/desk" });
+    expect(calls[0].body).toEqual({ agent: "product-desk", cap_usd: 15 });
     expect(document.querySelector("[data-sheet-error]")!.textContent).toContain("the sandbox host's allowance is used up");
+  });
+
+  it("the task picker: a chosen part of a set is what is posted, and the sheet says what the cap covers of it", async () => {
+    const { f, calls } = fetcher();
+    render(<StartRunSheet open agents={listOf([]).agents} maxCapUsd={25} onClose={() => undefined} onDone={() => undefined} fetcher={f} />);
+    const sheet = document.querySelector('[data-admin-sheet="start-benchmark-run"]')!;
+    const cover = () => sheet.querySelector("[data-start-run-cover]")!.textContent!;
+    const submit = sheet.querySelector("[data-start-run-submit]") as HTMLButtonElement;
+    expect(sheet.querySelectorAll("[data-start-run-task]").length).toBe(8);
+    expect(sheet.querySelector("[data-start-run-tasks]")!.textContent).toContain("Tasks to run (8 of 8)");
+    expect(sheet.querySelector("[data-start-run-tasks]")!.textContent).toContain("The tax-refund-split app");
+    // A cap that can't cover even one task says so plainly.
+    fireEvent.change(sheet.querySelector("[data-start-run-cap]")!, { target: { value: "6" } });
+    expect(cover()).toContain("A cap of US$6 can't cover even one task in full");
+    expect(cover()).toContain("Give at least US$10.");
+    // A cap over what one run may spend names the setting.
+    fireEvent.change(sheet.querySelector("[data-start-run-cap]")!, { target: { value: "40" } });
+    expect(cover()).toContain("A cap of US$40 is over US$25, the most one run may spend (BENCHMARK_CAP_USD in Platform settings).");
+    // Nothing picked: nothing to run.
+    fireEvent.click(sheet.querySelector("[data-start-run-none]")!);
+    fireEvent.change(sheet.querySelector("[data-start-run-cap]")!, { target: { value: "20" } });
+    expect(cover()).toBe("Pick at least one task.");
+    expect(submit.disabled).toBe(true);
+    // Two tasks under a cap that covers both.
+    fireEvent.click(sheet.querySelector('[data-start-run-task="tax-refund-split"]')!);
+    fireEvent.click(sheet.querySelector('[data-start-run-task="payroll-buffer"]')!);
+    expect(sheet.querySelector("[data-start-run-tasks]")!.textContent).toContain("Tasks to run (2 of 8)");
+    expect(cover()).toBe("2 tasks at up to US$10 each could cost at most US$20.00. A cap of US$20 covers all of them.");
+    expect(submit.disabled).toBe(false);
+    await act(async () => {
+      fireEvent.submit(sheet.querySelector("[data-start-run-form]")!);
+    });
+    expect(calls).toEqual([{ url: "/api/admin/benchmarks", body: { agent: "coding", cap_usd: 20, task_ids: ["tax-refund-split", "payroll-buffer"] } }]);
+  });
+
+  it("Records: the benchmarks' own account, workspace, apps, stand-in firm and draft products, one table, read only", () => {
+    expect(LIST_TABS.map((t) => t.label)).toEqual(["Runs", "Task sets", "Records"]);
+    const html = renderToStaticMarkup(<BenchmarksView list={listOf([], RECORDS)} onOpen={() => undefined} initialTab="records" />);
+    expect(heads(html)).toEqual([...RECORDS_HEAD]);
+    expect((html.match(/<table/g) ?? []).length).toBe(1);
+    for (const [kind, name] of [["Account", "Mynt benchmarks"], ["Workspace", "Mynt benchmarks"], ["App", "Benchmark: tax-refund-split"], ["Stand-in firm", "Mynt benchmarks (not a firm)"], ["Draft product", "Starter certificate"]])
+      expect(html).toMatch(new RegExp(`data-benchmark-record="${kind}"[^>]*>${name.replace(/[()]/g, "\\$&")}<`));
+    expect(html).toContain("Made by benchmark runs and used only by them.");
+    // The only button is the section's own labelled one: nothing here edits a record.
+    expect([...html.matchAll(/<button[^>]*>(.*?)<\/button>/g)].map((m) => m[1].replace(/<[^>]+>/g, "")).filter((b) => /Start run/.test(b)).length).toBe(1);
+    const none = renderToStaticMarkup(<BenchmarksView list={listOf([])} onOpen={() => undefined} initialTab="records" />);
+    expect(none).toContain(NO_RECORDS_NOTE);
+    expect(none).toContain("No benchmark run has made any record yet.");
   });
 });
 

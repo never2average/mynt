@@ -106,11 +106,11 @@ describe("reading", () => {
 
 describe("Start run and Stop run", () => {
   it("a run is started with exactly what the sheet sent, and never without a cap", async () => {
-    const ok = await list.POST(req("/api/admin/benchmarks", { agent: "product-desk", cap_usd: 20, label: "baseline", repository: "mynt-bench/desk" }));
+    const ok = await list.POST(req("/api/admin/benchmarks", { agent: "product-desk", cap_usd: 20, label: "baseline", task_ids: ["d1", "d2"] }));
     expect(ok.status).toBe(200);
     expect(await ok.json()).toMatchObject({ ok: true, id: RUN, message: expect.stringContaining("Started") });
-    expect(called("start_benchmark_run")).toEqual([{ agent: "product-desk", cap_usd: 20, label: "baseline", repository: "mynt-bench/desk" }]);
-    for (const bad of [{ agent: "coding" }, { agent: "coding", cap_usd: 0 }, { agent: "coding", cap_usd: "20" }, { agent: "coding", cap_usd: 5, start_now: true }, { agent: "coding", cap_usd: 5, repository: "not a repo" }, { cap_usd: 5 }]) {
+    expect(called("start_benchmark_run")).toEqual([{ agent: "product-desk", cap_usd: 20, label: "baseline", task_ids: ["d1", "d2"] }]);
+    for (const bad of [{ agent: "coding" }, { agent: "coding", cap_usd: 0 }, { agent: "coding", cap_usd: "20" }, { agent: "coding", cap_usd: 5, start_now: true }, { agent: "coding", cap_usd: 5, repository: "not a repo" }, { agent: "product-desk", cap_usd: 5, repository: "a-customer/their-repository" }, { agent: "coding", cap_usd: 5, task_ids: [] }, { cap_usd: 5 }]) {
       expect((await list.POST(req("/api/admin/benchmarks", bad))).status, JSON.stringify(bad)).toBe(400);
     }
     expect(called("start_benchmark_run")).toHaveLength(1);

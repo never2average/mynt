@@ -73,7 +73,7 @@ test("every agent's set is listed with its ceiling, the cap, its tasks to pick f
   await b.stop(started.run.id, "the test has what it needs");
 
   // A cap too small for one task is refused in the same plain words, before anything starts.
-  await assert.rejects(b.start(admin, { agent: "coding", cap_usd: 0.4 }), /can't cover even one coding task: a run needs at least US\$0\.5 to start one, and US\$\d+ to give one task its whole budget/);
+  await assert.rejects(b.start(admin, { agent: "coding", cap_usd: 0.4 }), /too small for even one task: a coding run needs at least US\$0\.5 to start one, and US\$\d+ to give one task its whole budget/);
   // A task the set doesn't have is refused by name.
   await assert.rejects(b.start(admin, { agent: "coding", cap_usd: 5, task_ids: ["no-such-task"] }), /no task 'no-such-task'/);
 });

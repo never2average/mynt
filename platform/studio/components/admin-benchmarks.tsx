@@ -2,9 +2,11 @@
 
 // Platform admin → Agent benchmarks (/platform/benchmarks; lib/benchmarks.ts; GET and POST /api/admin/benchmarks and
 // /api/admin/benchmarks/<id>): how well Mynt's hosted agents do real work, scored by Mynt's own verification.
-// The section has two read views, each ONE table under one toolbar: Runs (every run with its scoreboard) and Task sets
-// (each agent's set, what a run needs and whether one could start now). Start run is a labelled button opening a
-// sheet: a run spends money, so the sheet asks for its cap and says so. A run's page (/platform/benchmarks/<id>) is a
+// The section has three read views, each ONE table under one toolbar: Runs (every run with its scoreboard), Task sets
+// (each agent's set, what a run needs, whether one could start now, and what the set could cost against the cap) and
+// Records (the benchmarks' own account, apps, stand-in firm and draft products, which no other list in Studio shows).
+// Start run is a labelled button opening a sheet: a run spends money, so the sheet asks for its cap, lets the admin
+// pick which tasks to run, and says what the cap covers of them before anything starts. A run's page (/platform/benchmarks/<id>) is a
 // metadata card, then Tasks, Failures, Cost and Compare, each a table; Stop run is a labelled button with a sheet.
 // A figure Mynt didn't measure reads "Not measured" with why, never 0.
 import { useCallback, useMemo, useState } from "react"
@@ -18,6 +20,8 @@ import { Tab, TabList } from "@/components/ui/tabs"
 import { csvOf } from "@/lib/admin"
 import {
   agentLabel,
+  capCoverWords,
+  ceilingWords,
   CHANGE_LABELS,
   durationDeltaWords,
   durationWords,
@@ -43,12 +47,15 @@ import {
 
 const ROUTE = "/api/admin/benchmarks"
 export const RUNS_HEAD = ["Run", "Agent", "Status", "Passed", "Pass rate", "Infrastructure failures", "Cost", "Model", "Started", "Action"] as const
-export const TASK_SETS_HEAD = ["Agent", "Task set", "Tasks", "Can a run start now?", "What a run needs"] as const
+export const TASK_SETS_HEAD = ["Agent", "Task set", "Tasks", "Ceiling against the cap", "Can a run start now?", "What a run needs"] as const
+export const RECORDS_HEAD = ["Kind", "Name", "Status", "Made", "Id"] as const
+export const NO_RECORDS_NOTE = "No benchmark run has made any record yet. A coding run makes an account nobody can sign in as and one app per task; a product-desk run makes a stand-in firm with one draft product per task. They are listed here and nowhere else."
 export const NO_RUNS_NOTE =
   "No benchmark run has been made yet, so nothing has been measured. A run is started here by a Mynt admin, with a cap in US dollars: it puts one agent's task set through the same sandboxes and the same checks by Mynt as real work, and spends money on the model and on sandboxes. What each agent's run needs, and whether one could start now, is on the Task sets tab."
 export const LIST_TABS = [
   { id: "runs", label: "Runs" },
   { id: "task-sets", label: "Task sets" },
+  { id: "records", label: "Records" },
 ] as const
 type ListTab = (typeof LIST_TABS)[number]["id"]
 export const RUN_TABS = [
@@ -68,12 +75,18 @@ export function StartRunSheet({ open, agents, maxCapUsd, onClose, onDone, fetche
   const [agent, setAgent] = useState(agents.find((a) => a.ready)?.agent ?? agents[0]?.agent ?? "")
   const [cap, setCap] = useState("")
   const [label, setLabel] = useState("")
-  const [repository, setRepository] = useState("")
   const [restored, setRestored] = useState(false)
+  // The tasks left out, per agent: every task is in until the admin unticks it.
+  const [left, setLeft] = useState<Record<string, string[]>>({})
   const action = useAdminAction(fetcher)
   const chosen = agents.find((a) => a.agent === agent) ?? null
   const capUsd = Number(cap)
-  const ok = chosen !== null && cap.trim() !== "" && Number.isFinite(capUsd) && capUsd > 0
+  const out = left[agent] ?? []
+  const picked = (chosen?.taskList ?? []).filter((t) => !out.includes(t.id)).map((t) => t.id)
+  const whole = chosen !== null && picked.length === chosen.taskList.length
+  const typed = cap.trim() !== "" && Number.isFinite(capUsd) && capUsd > 0
+  const ok = chosen !== null && typed && picked.length > 0
+  const toggle = (id: string) => setLeft((l) => ({ ...l, [agent]: out.includes(id) ? out.filter((x) => x !== id) : [...out, id] }))
   return (
     <AdminSheet
       open={open}
@@ -92,7 +105,7 @@ export function StartRunSheet({ open, agents, maxCapUsd, onClose, onDone, fetche
             e.preventDefault()
             if (!ok) return
             void action
-              .run(ROUTE, { agent, cap_usd: capUsd, ...(label.trim() ? { label: label.trim() } : {}), ...(agent === "product-desk" && repository.trim() ? { repository: repository.trim() } : {}), ...(restored ? { host_restored: true } : {}) })
+              .run(ROUTE, { agent, cap_usd: capUsd, ...(label.trim() ? { label: label.trim() } : {}), ...(whole ? {} : { task_ids: picked }), ...(restored ? { host_restored: true } : {}) })
               .then((res) => res?.ok === true && onDone(typeof res.id === "string" ? res.id : null))
           }}
         >
@@ -110,20 +123,53 @@ export function StartRunSheet({ open, agents, maxCapUsd, onClose, onDone, fetche
               A run can&apos;t start now: {chosen.whyNot ?? "Mynt didn't say why."}
             </p>
           )}
+          {chosen && (
+            <p className="text-sm" data-start-run-ceiling>
+              {chosen.budget.note ?? ceilingWords(chosen.budget, chosen.tasks)}
+            </p>
+          )}
+          {chosen && chosen.taskList.length > 0 && (
+            <fieldset className="flex flex-col gap-1" data-start-run-tasks>
+              <legend className="text-sm font-medium">
+                Tasks to run ({picked.length} of {chosen.taskList.length})
+              </legend>
+              <div className="flex gap-2">
+                <Button type="button" variant="outline" size="sm" onClick={() => setLeft((l) => ({ ...l, [agent]: [] }))} data-start-run-all>
+                  Pick all
+                </Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => setLeft((l) => ({ ...l, [agent]: chosen.taskList.map((t) => t.id) }))} data-start-run-none>
+                  Pick none
+                </Button>
+              </div>
+              <ul className="flex max-h-56 flex-col gap-1 overflow-y-auto rounded-md border p-2">
+                {chosen.taskList.map((t) => (
+                  <li key={t.id}>
+                    <label className="flex items-start gap-2 text-sm">
+                      <input type="checkbox" className="mt-1" checked={!out.includes(t.id)} onChange={() => toggle(t.id)} data-start-run-task={t.id} />
+                      <span>
+                        <code className="text-xs">{t.id}</code>
+                        {t.label && t.label !== t.id ? <span className="block text-muted-foreground">{t.label}</span> : null}
+                      </span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            </fieldset>
+          )}
           <Field
             label="Cap in US dollars"
             hint={`Required: the most this run may spend. ${maxCapUsd === null ? "" : `At most US$${maxCapUsd} (the BENCHMARK_CAP_USD operational setting). `}${chosen?.maxTaskUsd ? `One task may spend up to US$${chosen.maxTaskUsd}, so the whole set could cost up to US$${chosen.maxTaskUsd * chosen.tasks}; what it really costs hasn't been measured until a run is made.` : ""}`}
           >
             <input className={fieldClass} value={cap} onChange={(e) => setCap(e.target.value)} inputMode="decimal" placeholder="For example 20" autoComplete="off" required data-start-run-cap />
           </Field>
+          {chosen && (
+            <p className={picked.length === 0 ? "text-sm text-destructive" : "text-sm"} data-start-run-cover>
+              {picked.length === 0 ? "Pick at least one task." : capCoverWords(chosen.budget, picked.length, typed ? capUsd : null)}
+            </p>
+          )}
           <Field label="Label" hint="What this run is for, so it can be told apart later: for example, Baseline before changing the instructions.">
             <input className={fieldClass} value={label} onChange={(e) => setLabel(e.target.value)} maxLength={120} autoComplete="off" data-start-run-label />
           </Field>
-          {agent === "product-desk" && (
-            <Field label="Benchmark repository" hint="owner/name: a repository set aside for benchmarks, with Mynt's GitHub App installed. The desk agent pushes a branch per task there, and Mynt opens a pull request for each.">
-              <input className={fieldClass} value={repository} onChange={(e) => setRepository(e.target.value)} maxLength={200} autoComplete="off" spellCheck={false} data-start-run-repository />
-            </Field>
-          )}
           <label className="flex items-start gap-2 text-sm">
             <input type="checkbox" checked={restored} onChange={(e) => setRestored(e.target.checked)} className="mt-1" data-start-run-restored />
             <span>The sandbox host&apos;s allowance has been restored. Tick this only if Mynt refused the run because the allowance was used up, and billing has been added since.</span>
@@ -185,6 +231,8 @@ export function BenchmarksView({ list, onOpen, onChanged = () => undefined, fetc
   const sets = useMemo(() => list.agents.filter((a) => matches(query, agentLabel(a.agent), a.agent, a.title, a.taskSet, a.whyNot, ...a.needs)), [list.agents, query])
   const pagedRuns = usePaged(runs)
   const pagedSets = usePaged(sets)
+  const records = useMemo(() => list.records.filter((r) => matches(query, r.kind, r.name, r.status, r.id)), [list.records, query])
+  const pagedRecords = usePaged(records)
   const startRun = (
     <Button onClick={() => setStarting(true)} data-start-run>
       <Play />
@@ -255,6 +303,37 @@ export function BenchmarksView({ list, onOpen, onChanged = () => undefined, fetc
             ])}
           />
         </AdminList>
+      ) : tab === "records" ? (
+        <AdminList
+          id="benchmark-records"
+          search={query}
+          onSearch={setQuery}
+          searchLabel="Search the benchmarks' own records by kind or name"
+          importable={false}
+          cta={startRun}
+          note={list.records.length ? list.recordsNote : NO_RECORDS_NOTE}
+          page={pagedRecords.page}
+          pages={pagedRecords.pages}
+          total={records.length}
+          onPage={pagedRecords.setPage}
+        >
+          <AdminTable
+            head={RECORDS_HEAD}
+            empty={list.records.length ? "No record matches the search." : "No benchmark run has made any record yet."}
+            rowKeys={pagedRecords.shown.map((r) => `${r.kind}:${r.id}`)}
+            rows={pagedRecords.shown.map((r) => [
+              r.kind,
+              <span key="n" className="font-medium" data-benchmark-record={r.kind}>
+                {r.name}
+              </span>,
+              r.status ?? "Not applicable",
+              whenWords(r.createdAt),
+              <code key="i" className="text-xs">
+                {r.id}
+              </code>,
+            ])}
+          />
+        </AdminList>
       ) : (
         <AdminList id="benchmark-task-sets" search={query} onSearch={setQuery} searchLabel="Search task sets by agent or what a run needs" importable={false} cta={startRun} page={pagedSets.page} pages={pagedSets.pages} total={sets.length} onPage={pagedSets.setPage}>
           <AdminTable
@@ -270,6 +349,9 @@ export function BenchmarksView({ list, onOpen, onChanged = () => undefined, fetc
                 <code className="block text-xs text-muted-foreground">{a.taskSet}</code>
               </span>,
               String(a.tasks),
+              <span key="c" data-agent-ceiling={a.budget.fitsWholeSet ? "fits" : a.budget.tasksCoveredInFull > 0 ? "part" : "none"} className="block min-w-56 font-normal whitespace-normal" title={a.budget.note ?? undefined}>
+                {ceilingWords(a.budget, a.tasks)}
+              </span>,
               <span key="r" data-agent-ready={a.ready ? "yes" : "no"} className="block min-w-56 font-normal whitespace-normal">
                 {a.ready ? "Yes" : `No. ${a.whyNot ?? "Mynt didn't say why."}`}
               </span>,
