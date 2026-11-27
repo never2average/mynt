@@ -624,6 +624,15 @@ async function walk({ devnet, keep, dir, say, step, note, result, cleanup }) {
   const developer = await session(devUser);
   await must(builder, "set_product_access", { id: PRODUCT, access_mode: "open", build_terms: { permitted_actions: ["display", "deep_link"], handoff_url: "https://example.com/start" } });
   const app = await must(developer, "create_app", { name: "Dollar transfers (demo)", description: "Send dollars in and out", audience: "US individuals", product_ids: [PRODUCT] });
+  // The product is sponsored, so the app's workspace and the licence provider sign a program agreement for it:
+  // production needs one in force, and without it live keys aren't served the product.
+  const sponsorFirm = (await store.getUser(lpUser.id)).entity_id;
+  const program = await must(developer, "propose_app_agreement", { app_id: app.id, counterparty_entity_id: sponsorFirm, kind: "program", scopes: ["financial_regulatory_operations"], products: [PRODUCT], terms_summary: "The licence provider's program for dollar transfers (demo)" });
+  await must(provider, "respond_to_app_agreement", { agreement_id: program.id, decision: "accept" });
+  await must(developer, "sign_app_agreement", { agreement_id: program.id });
+  const signedProgram = await must(provider, "sign_app_agreement", { agreement_id: program.id });
+  if (signedProgram.status !== "signed") throw new Error(`program agreement: ${signedProgram.status}`);
+  note("The app's workspace and the licence provider signed a program agreement for the product: production needs one.");
   // Production gates real money: only a production app publishes and holds live keys. A real app gets there with
   // promote_app, on its verified, hosted build; this demo has no build, so it puts the app there directly.
   await store.db.query("INSERT INTO financial_products.app_promotions (app_id, stage) VALUES ($1, 'production')", [app.id]);
