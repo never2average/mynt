@@ -15,6 +15,7 @@ import { AGREEMENT_AUDIT_TABLES } from "./agreement-audits-schema.js";
 import { AGREEMENT_SLA_TABLES } from "./agreement-slas-schema.js";
 import { grandfatherLiveApps, PROMOTION_TABLES, seedAppStages } from "./promotion-schema.js";
 import { WORKSPACE_TABLES, migrateAppWorkspaces, personalWorkspace } from "./workspaces.js";
+import { BENCHMARK_MARKER_TABLES, inheritBenchmark, notBenchmark } from "./benchmark-marker.js";
 import { fingerprint, runProductTests, type TestReport } from "./product-tests.js";
 import {
   hydrateRegulators,
@@ -2200,6 +2201,7 @@ export class Store {
     const { rows } = await db.query("SELECT 1 FROM pg_namespace WHERE nspname = 'financial_products'");
     if (rows.length === 0) await db.exec("CREATE SCHEMA financial_products");
     await db.exec(TABLES);
+    await db.exec(BENCHMARK_MARKER_TABLES);
     await db.exec(COVENANT_TABLES);
     await db.query(
       `INSERT INTO financial_products.products (id, owner_id, status, data, published_at)
@@ -3028,7 +3030,17 @@ export class Store {
   }
 
   async listUsers(): Promise<User[]> {
-    return (await this.all("SELECT * FROM financial_products.users ORDER BY created_at")).map(toUser);
+    return (await this.all(`SELECT * FROM financial_products.users WHERE ${notBenchmark()} ORDER BY created_at`)).map(toUser);
+  }
+
+  // Marks an account as the agent benchmarks' own (benchmark-marker.ts): it, and everything it has made or will
+  // make, stays out of every list, count, search and directory. Only benchmarks.ts calls this.
+  async markBenchmarkUser(userId: string): Promise<void> {
+    await this.db.query("UPDATE financial_products.users SET benchmark = true WHERE id = $1 AND NOT benchmark", [userId]);
+    await this.db.query("UPDATE financial_products.workspaces SET benchmark = true WHERE created_by = $1 AND NOT benchmark", [userId]);
+    await this.db.query("UPDATE financial_products.apps SET benchmark = true WHERE owner_id = $1 AND NOT benchmark", [userId]);
+    await this.db.query("UPDATE financial_products.entities SET benchmark = true WHERE created_by = $1 AND NOT benchmark", [userId]);
+    await this.db.query("UPDATE financial_products.products SET benchmark = true WHERE owner_id = $1 AND NOT benchmark", [userId]);
   }
 
   async clerkIdForEmail(email: string): Promise<string | null> {
@@ -3280,7 +3292,7 @@ export class Store {
 
   // Every product (drafts too), for recomputing what's derived from each (see derived.ts).
   async allProducts(): Promise<ProductRecord[]> {
-    return (await this.all("SELECT * FROM financial_products.products ORDER BY id")).map(toProductRecord);
+    return (await this.all(`SELECT * FROM financial_products.products WHERE ${notBenchmark()} ORDER BY id`)).map(toProductRecord);
   }
 
   // Products resting on a legal entity: owned by it, pinned to it, or with a component provided by a party it stands behind.
@@ -3323,13 +3335,13 @@ export class Store {
   }
 
   async publishedProducts(): Promise<FinancialProduct[]> {
-    const rows = await this.all("SELECT * FROM financial_products.products WHERE status = 'published' ORDER BY published_at, id");
+    const rows = await this.all(`SELECT * FROM financial_products.products WHERE status = 'published' AND ${notBenchmark()} ORDER BY published_at, id`);
     return rows.map((r) => toProductRecord(r).product);
   }
 
   // Products in staging: tested, not published, not archived, open to sandbox builds only.
   async stagingProducts(): Promise<ProductRecord[]> {
-    return (await this.all("SELECT * FROM financial_products.products WHERE stage = 'staging' AND status <> 'published' AND archived_at IS NULL ORDER BY updated_at, id")).map(toProductRecord);
+    return (await this.all(`SELECT * FROM financial_products.products WHERE stage = 'staging' AND status <> 'published' AND archived_at IS NULL AND ${notBenchmark()} ORDER BY updated_at, id`)).map(toProductRecord);
   }
 
   // Sets or clears the stored staging stage (a published product is production whatever this says).
@@ -3360,8 +3372,8 @@ export class Store {
   ): Promise<ProductRecord> {
     try {
       const r = await this.one(
-        `INSERT INTO financial_products.products (id, owner_id, status, data, entity_id, action, underlying_product_ids)
-         VALUES ($1, $2, 'draft', $3, $4, $5, $6) RETURNING *`,
+        `INSERT INTO financial_products.products (id, owner_id, status, data, entity_id, action, underlying_product_ids, benchmark)
+         VALUES ($1, $2, 'draft', $3, $4, $5, $6, ${inheritBenchmark("$2")}) RETURNING *`,
         [p.id, ownerId, JSON.stringify(p), meta.entity_id ?? null, meta.action ?? "issuance", meta.underlying_product_ids ?? []],
       );
       return toProductRecord(r!);
@@ -3612,8 +3624,8 @@ export class Store {
   ): Promise<App> {
     const workspace = workspaceId ?? (await personalWorkspace(this.db, ownerId));
     const r = await this.one(
-      `INSERT INTO financial_products.apps (id, owner_id, name, description, audience, product_ids, status, disclosures, actions, workspace_id)
-       VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7, $8, $9) RETURNING *`,
+      `INSERT INTO financial_products.apps (id, owner_id, name, description, audience, product_ids, status, disclosures, actions, workspace_id, benchmark)
+       VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7, $8, $9, ${inheritBenchmark("$2")}) RETURNING *`,
       [randomUUID(), ownerId, fields.name, fields.description, fields.audience, fields.product_ids, fields.disclosures ?? [], fields.actions ?? ["display"], workspace],
     );
     return toApp(r!);
@@ -3655,7 +3667,7 @@ export class Store {
 
 
   async allApps(): Promise<App[]> {
-    return (await this.all("SELECT * FROM financial_products.apps ORDER BY created_at")).map(toApp);
+    return (await this.all(`SELECT * FROM financial_products.apps WHERE ${notBenchmark()} ORDER BY created_at`)).map(toApp);
   }
 
   // Entities and held licences
@@ -3665,8 +3677,8 @@ export class Store {
     e: Pick<Entity, "name" | "registration_numbers" | "regions"> & Partial<Pick<Entity, "legal_form" | "incorporation" | "identifiers">>,
   ): Promise<Entity> {
     const r = await this.one(
-      `INSERT INTO financial_products.entities (id, name, registration_numbers, regions, created_by, legal_form, incorporation, identifiers)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      `INSERT INTO financial_products.entities (id, name, registration_numbers, regions, created_by, legal_form, incorporation, identifiers, benchmark)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ${inheritBenchmark("$5")}) RETURNING *`,
       [
         randomUUID(),
         e.name,
@@ -3772,7 +3784,7 @@ export class Store {
   }
 
   async listEntities(): Promise<Entity[]> {
-    return (await this.all("SELECT * FROM financial_products.entities ORDER BY created_at")).map(toEntity);
+    return (await this.all(`SELECT * FROM financial_products.entities WHERE ${notBenchmark()} ORDER BY created_at`)).map(toEntity);
   }
 
   // Membership of a firm. Leaving or moving ends standing at the old firm (told to it). Joining as a licence provider
@@ -3966,7 +3978,7 @@ export class Store {
   }
 
   async publishedApps(): Promise<App[]> {
-    return (await this.all("SELECT * FROM financial_products.apps WHERE status = 'published' ORDER BY created_at")).map(toApp);
+    return (await this.all(`SELECT * FROM financial_products.apps WHERE status = 'published' AND ${notBenchmark()} ORDER BY created_at`)).map(toApp);
   }
 
   // --- SDKs and experiences (developer build layer) ---

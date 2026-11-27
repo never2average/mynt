@@ -275,9 +275,15 @@ export class BenchmarkService {
   private async identity(): Promise<User> {
     const kept = await this.store.getSetting<{ user_id?: string }>(IDENTITY);
     const found = kept?.user_id ? await this.store.getUser(kept.user_id) : undefined;
-    if (found) return found;
+    // The one mark that keeps this account, and everything it makes, out of every list, count, search and directory
+    // (benchmark-marker.ts). Set again on each use, so records an earlier version made unmarked are covered too.
+    if (found) {
+      await this.store.markBenchmarkUser(found.id);
+      return found;
+    }
     // Its sign-in token is thrown away here: nobody, and no agent, can act as this account.
     const { user } = await this.store.createUser("Mynt benchmarks", ["developer"]);
+    await this.store.markBenchmarkUser(user.id);
     await this.store.setSetting(IDENTITY, { ...(kept ?? {}), user_id: user.id }, null);
     return user;
   }
@@ -288,6 +294,29 @@ export class BenchmarkService {
     const entity = await this.store.createEntity(user.id, { name: "Mynt benchmarks (not a firm)", registration_numbers: {}, regions: ["US"] });
     await this.store.setSetting(IDENTITY, { ...(kept ?? {}), user_id: user.id, entity_id: entity.id }, null);
     return entity.id;
+  }
+
+  /**
+   * The benchmarks' own rows in the shared records, for the Agent benchmarks page: the only place they are listed.
+   * Everywhere else leaves them out by their mark.
+   */
+  async records() {
+    const kept = await this.store.getSetting<{ user_id?: string; entity_id?: string }>(IDENTITY);
+    const rows = async (sql: string) => (kept?.user_id ? await this.all(sql, [kept.user_id]) : []);
+    const account = (await rows(`SELECT id::text AS id, name, created_at FROM ${T}.users WHERE id = $1 AND benchmark`))[0];
+    const workspaces = await rows(`SELECT id::text AS id, name, created_at FROM ${T}.workspaces WHERE created_by = $1 AND benchmark ORDER BY created_at`);
+    const apps = await rows(`SELECT id::text AS id, name, status, workspace_id::text AS workspace_id, created_at FROM ${T}.apps WHERE owner_id = $1 AND benchmark ORDER BY name`);
+    const firms = await rows(`SELECT id::text AS id, name, created_at FROM ${T}.entities WHERE created_by = $1 AND benchmark ORDER BY created_at`);
+    const products = await rows(`SELECT id, data->>'name' AS name, status, entity_id::text AS entity_id, created_at FROM ${T}.products WHERE owner_id = $1 AND benchmark ORDER BY id`);
+    const at = (r: Row) => ({ ...r, created_at: iso(r.created_at) });
+    return {
+      note: "Made by benchmark runs and used only by them. They are marked as the benchmarks' own, so no other list, count, search, Ask AI answer or the Marketplace shows them. Nobody can sign in as the account.",
+      account: account ? at(account) : null,
+      workspaces: workspaces.map(at),
+      apps: apps.map(at),
+      firms: firms.map(at),
+      products: products.map(at),
+    };
   }
 
   // ---- what each agent's run is made of ----
@@ -796,8 +825,12 @@ export class BenchmarkService {
       // What only a start can check (the repository a desk run names) isn't held against readiness here.
       const own = await a.unavailable({ repository: "" }).catch((e) => (e as Error).message);
       const whyNot = host ?? (agent === "product-desk" && own?.startsWith("a product-desk run needs") ? null : own);
+      const cap = this.capCeilingUsd();
       out.push({
         agent,
+        // What a run of this set could cost against what one run may spend, and what a chosen part of it would.
+        budget: budgetFor(set.tasks.length, a.maxTaskUsd(), a.reserveUsd(), cap),
+        task_list: set.tasks.map((t) => ({ id: t.id, label: taskLabel(t) })),
         task_set: set.file,
         version: set.version,
         title: set.title,
@@ -832,7 +865,8 @@ export class BenchmarkService {
     if (o.cap_usd > ceiling) throw refuse(`its cap of US$${o.cap_usd} is over BENCHMARK_CAP_USD, the most one run may spend (US$${ceiling}); an admin can change that in the operational settings`);
     const own = this.hostMissing() ?? (await adapter.unavailable(o));
     if (own) throw refuse(own);
-    if (o.cap_usd < MIN_TASK_USD + adapter.reserveUsd()) throw refuse(`a cap of US$${o.cap_usd} is too small for even one task (at least US$${MIN_TASK_USD + adapter.reserveUsd()})`);
+    if (o.cap_usd < MIN_TASK_USD + adapter.reserveUsd())
+      throw refuse(`a cap of US$${o.cap_usd} can't cover even one ${o.agent} task: a run needs at least US$${cents(MIN_TASK_USD + adapter.reserveUsd())} to start one, and US$${cents(adapter.maxTaskUsd() + adapter.reserveUsd())} to give one task its whole budget`);
     const quota = o.host_restored ? null : await this.hostOutOfAllowance();
     if (quota) throw refuse(quota);
     const active = await this.one(`SELECT id, agent FROM ${T}.benchmark_runs WHERE status = ANY($1) LIMIT 1`, [ACTIVE]);
@@ -860,7 +894,7 @@ export class BenchmarkService {
       ],
     );
     for (const [n, t] of tasks.entries()) await this.db.query(`INSERT INTO ${T}.benchmark_results (id, run_id, task_id, position, status) VALUES ($1, $2, $3, $4, 'pending')`, [randomUUID(), id, t.id, n]);
-    return (await this.run(id))!;
+    return { ...(await this.run(id))!, budget: budgetFor(tasks.length, adapter.maxTaskUsd(), adapter.reserveUsd(), o.cap_usd) };
   }
 
   // The sandbox host's allowance was used up the last time anything real tried to run, and nothing has run since.
@@ -1041,6 +1075,43 @@ export class BenchmarkService {
   }
 }
 
+const money = (n: number) => `US$${cents(n)}`;
+
+/**
+ * What a run of `tasks` tasks could cost at most, against `capUsd` (the most one run may spend, or a run's own cap):
+ * how many tasks are sure of their whole budget, and what it means when that is none or not all. Each task may spend
+ * up to the agent's per-task cap, and `reserveUsd` is what Mynt may spend on top of a task or a task may overrun by.
+ */
+export function budgetFor(tasks: number, maxTaskUsd: number, reserveUsd: number, capUsd: number) {
+  const perTask = cents(maxTaskUsd + reserveUsd);
+  const ceiling = cents(tasks * perTask);
+  const covered = perTask > 0 ? Math.min(tasks, Math.floor((capUsd + 1e-9) / perTask)) : 0;
+  const least = cents(MIN_TASK_USD + reserveUsd);
+  const startable = perTask > 0 && capUsd >= least;
+  const fits = perTask > 0 && capUsd >= ceiling;
+  const note = !(perTask > 0)
+    ? "Not measured: this agent's per-task cap isn't set on this Mynt"
+    : !startable
+      ? `A cap of ${money(capUsd)} can't cover even one task: a run needs at least ${money(least)} to start one, and ${money(perTask)} to give one task its whole budget. Raise BENCHMARK_CAP_USD in Platform settings.`
+      : covered === 0
+        ? `A cap of ${money(capUsd)} can't cover even one task in full: one task may spend up to ${money(perTask)}. A run would give its first task only what the cap leaves (about ${money(Math.max(0, capUsd - reserveUsd))}) and stop after it. Raise BENCHMARK_CAP_USD in Platform settings to at least ${money(perTask)}.`
+        : fits
+          ? `The whole set fits: ${tasks} task(s) at up to ${money(perTask)} each is at most ${money(ceiling)}, under the cap of ${money(capUsd)}.`
+          : `The whole set could cost up to ${money(ceiling)} (${tasks} task(s) at up to ${money(perTask)} each), more than the cap of ${money(capUsd)}. The cap is sure to cover ${covered} task(s) in full: pick up to ${covered}, or raise BENCHMARK_CAP_USD in Platform settings. A run of more stops when the cap is reached and records the rest as not run.`;
+  return { tasks, per_task_ceiling_usd: perTask > 0 ? perTask : null, set_ceiling_usd: perTask > 0 ? ceiling : null, cap_usd: capUsd, cap_setting: "BENCHMARK_CAP_USD", fits_whole_set: fits, tasks_covered_in_full: covered, least_cap_usd: perTask > 0 ? least : null, can_start: startable, note };
+}
+
+// A task's line in the task picker: what it is, in a few words, from the task itself.
+function taskLabel(t: BenchmarkTask): string {
+  const x = t as unknown as Record<string, unknown>;
+  const product = x.product as { name?: string } | undefined;
+  const subject = x.subject as Record<string, { name?: string } | undefined> | undefined;
+  const named = product?.name ?? subject?.product?.name ?? subject?.entity?.name ?? subject?.licence?.name;
+  const text = (x.idea ?? named ?? x.planted ?? x.description ?? x.question ?? x.title ?? x.goal ?? x.prompt ?? "") as string;
+  const sample = typeof x.sample === "string" ? `${x.sample === "bad" ? "Planted problem" : "Sound sample"}${text ? ": " : ""}` : "";
+  return `${sample}${String(text)}`.replace(/\s+/g, " ").trim().slice(0, 160) || t.id;
+}
+
 function lost(why: string): Outcome {
   return { passed: false, failure_class: "harness", failed_check: "harness", detail: `The benchmark lost track of this task: ${why}`, checks: [], observed: null, cost_usd: null, cost_parts: null, cost_note: "Not measured: the task's record is gone", started_at: null, finished_at: null };
 }
@@ -1069,7 +1140,7 @@ export function registerBenchmarkTools(server: McpServer, store: Store, admin: U
     {
       title: "Agent benchmark runs",
       description:
-        "Admin: the agent benchmark runs, newest first, each with its scoreboard (tasks passed and failed on the agent's own account, the pass rate over those, infrastructure failures and tasks not run listed apart, cost and time), plus every agent that has a task set: how many tasks, what a run needs, and whether one could start here now (and if not, why). A figure nothing measured is null with a note saying why, never 0.",
+        "Admin: the agent benchmark runs, newest first, each with its scoreboard (tasks passed and failed on the agent's own account, the pass rate over those, infrastructure failures and tasks not run listed apart, cost and time), plus every agent that has a task set: how many tasks, each task's id, what a run needs, whether one could start here now (and if not, why), and its budget: what the whole set could cost at most against BENCHMARK_CAP_USD, how many tasks that cap is sure to cover in full, and a plain statement when it can't cover even one. Also the benchmarks' own records (their account, apps, stand-in firm and draft products), which no other list shows. A figure nothing measured is null with a note saying why, never 0.",
       inputSchema: { agent: agent.optional().describe("Only this agent's runs"), limit: z.number().int().min(1).max(200).optional() },
       annotations: { readOnlyHint: true },
     },
@@ -1077,6 +1148,7 @@ export function registerBenchmarkTools(server: McpServer, store: Store, admin: U
       attempt(async (b) => ({
         runs: await b.list({ agent: only, limit }),
         agents: await b.agents(),
+        records: await b.records(),
         cap: { setting: "BENCHMARK_CAP_USD", max_usd_per_run: b.capCeilingUsd(), note: "A run's own cap is given when it starts and may not be more than this." },
         gate_defaults: GATE_DEFAULTS,
       })),
@@ -1129,7 +1201,7 @@ export function registerBenchmarkTools(server: McpServer, store: Store, admin: U
           cap_usd: z.number().positive().describe("The most this run may spend, in US dollars. Required: there is no default."),
           label: z.string().trim().max(120).optional().describe("What this run is for, e.g. 'baseline before changing the secure skill'"),
           repository: z.string().trim().regex(/^[\w.-]+\/[\w.-]+$/).optional().describe("product-desk only: the repository set aside for benchmarks (owner/name), with Mynt's GitHub App installed"),
-          task_ids: z.array(z.string()).max(100).optional().describe("Only these tasks (default: the whole set)"),
+          task_ids: z.array(z.string()).max(100).optional().describe("Only these tasks, by id (default: the whole set). list_benchmark_runs gives each agent's tasks and how many the cap is sure to cover in full"),
           host_restored: z.boolean().optional().describe("Say true once the sandbox host's allowance, used up when a build last ran, has been restored"),
         })
         .strict(),
@@ -1138,7 +1210,7 @@ export function registerBenchmarkTools(server: McpServer, store: Store, admin: U
       attempt(async (b) => {
         const started = await b.start(admin, o);
         await store.audit(admin.id, "start_benchmark_run", started.run.id, { agent: o.agent, task_set: started.run.task_set, tasks: started.tasks.length, cap_usd: o.cap_usd, label: o.label ?? null, repository: o.repository ?? null, host_restored: o.host_restored ?? false });
-        return { ...started, message: `Started: ${started.tasks.length} ${o.agent} task(s), one at a time, up to US$${o.cap_usd}. Follow it with get_benchmark_run.` };
+        return { ...started, message: `Started: ${started.tasks.length} ${o.agent} task(s), one at a time, up to US$${o.cap_usd}. ${started.budget.note} Follow it with get_benchmark_run.` };
       }),
   );
 

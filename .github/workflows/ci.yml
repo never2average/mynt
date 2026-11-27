@@ -320,6 +320,13 @@ jobs:
           bash "$RUNNER_TEMP/mynt/program-analysis.sh" "$RUNNER_TEMP/captured" "$RUNNER_TEMP/analysis"
           cat "$RUNNER_TEMP/analysis/static.json"
           node -e 'import("./dist/solana/mainnet-gate.js").then((m) => { const r = m.assessStatic(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))); console.log(JSON.stringify(r.reasons)); if (!r.passed) process.exit(1); })' "$RUNNER_TEMP/analysis/static.json"
+      # The agent benchmarks' program samples (benchmarks/program-audit and program-red-team), prepared by the gate's
+      # own sample script exactly as a benchmark run prepares them in a sandbox: laid over the starter program, then
+      # captured for the auditor, or compiled by Mynt's verifiable build for the red team. No agent runs here.
+      - name: The benchmark's program samples are whole for the auditor and compile for the red team
+        run: |
+          node scripts/benchmark-samples.mjs "$RUNNER_TEMP/samples"
+          node scripts/benchmark-samples.mjs "$RUNNER_TEMP/samples" --build
       # Mynt's own program, built exactly as a build's program is, must pass Mynt's own mainnet gate hard rules, and
       # Mynt's encoders must work against the real program. Nothing is deployed anywhere but this job's local validator.
       - name: The product-health program builds, passes the mainnet gate's hard rules, and works on a local validator
