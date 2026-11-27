@@ -170,7 +170,8 @@ test("the mark is inherited where a row is made, and no organization is ever mad
 
 test("nothing in the server picks the benchmarks' records out by name", () => {
   const dir = new URL("../dist/", import.meta.url);
-  for (const f of readdirSync(dir).filter((f) => f.endsWith(".js") && f !== "benchmarks.js")) {
+  // benchmarks.js names its own records where it makes them; scratch-repo.js signs the scratch repository's first commit.
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".js") && !["benchmarks.js", "scratch-repo.js"].includes(f))) {
     const text = readFileSync(new URL(f, dir), "utf8");
     assert.ok(!/Mynt benchmarks|Benchmark: /.test(text), `${f} names the benchmarks' records`);
   }

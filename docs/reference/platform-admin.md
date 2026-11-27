@@ -225,11 +225,17 @@ The register's routes are `GET /api/admin/risks?area=<area>` and `POST /api/admi
 
 Agent benchmarks (`/platform/benchmarks`) is where a Mynt admin measures the hosted agents. What a run does, how it is scored and capped, and the regression gate are in [Agent benchmarks](benchmarks.md).
 
-The page is one table of runs, newest first: the agent, the run's label, its status, tasks passed out of tasks scored, the pass rate, infrastructure failures, cost against the cap, the model and when it started. Above it are a search box and **Start run**. A figure nothing measured reads "Not measured" with the reason.
+The page has three tabs, each one table, with a search box and **Start run** above it. A figure nothing measured reads "Not measured" with the reason.
 
-With no runs yet, the page says so and lists, for each agent, how many tasks its set has, what a run needs, and whether one could start now. Where it couldn't, it says why.
+| Tab | Shows |
+| --- | --- |
+| Runs | The runs, newest first: the agent, the run's label, its status, tasks passed out of tasks scored, the pass rate, infrastructure failures, cost against the cap, the model and when it started |
+| Task sets | Each agent's set: how many tasks, what the whole set could cost at most against the cap one run may have and how many tasks that cap covers in full, whether a run could start now (and why not), and what a run needs |
+| Records | The benchmarks' own rows in the shared records: their account, its workspace, the app of each coding task, the stand-in firm and its draft products. This is the only place they are listed: no other list, count, search, Ask AI answer or the Marketplace shows them |
 
-**Start run** opens a sheet: the agent, the cap in US dollars (required; the sheet shows the most it may be, `BENCHMARK_CAP_USD`), a label, and for the product desk the benchmark repository. It says plainly that the run spends money. Starting calls `start_benchmark_run`; a refusal is shown in the sheet in Mynt's own words.
+**Start run** opens a sheet: the agent; the set's ceiling against the cap; the set's tasks, each with a tick box (all ticked to begin with, with **Pick all** and **Pick none**); the cap in US dollars (required; the sheet shows the most it may be, `BENCHMARK_CAP_USD`); and a label. Under the cap the sheet says what that cap covers of the tasks picked, and says plainly when it can't cover even one task in full and what would. It asks for no repository: a product-desk run needs none. It says plainly that the run spends money. Starting calls `start_benchmark_run`; a refusal is shown in the sheet in Mynt's own words.
+
+While an Ask AI run is going, its page must stay open: the page itself asks Studio to answer each question in turn, and shows one line saying which.
 
 A run opens at `/platform/benchmarks/<id>`: a card with the run's facts (agent, task set, model, workspace folders' hashes, cap and what it has counted, why it stopped), then four tabs, each a table.
 

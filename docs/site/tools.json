@@ -88,7 +88,7 @@
       "id": "admin",
       "title": "Admin & governance",
       "summary": "Regions and the regulatory model, categories, take rates, invitations, oversight and operations.",
-      "tools": 62
+      "tools": 64
     }
   ],
   "roles": [
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Also holds the builder, vendor and licence-provider roles (except the licence-provider tools that act as a member of the firm itself), but not the liquidity-provider role.",
-      "tools": 435,
+      "tools": 437,
       "get_started": [
         {
           "tool": "define_region",
@@ -10250,7 +10250,7 @@
     {
       "name": "list_benchmark_runs",
       "title": "Agent benchmark runs",
-      "description": "Admin: the agent benchmark runs, newest first, each with its scoreboard (tasks passed and failed on the agent's own account, the pass rate over those, infrastructure failures and tasks not run listed apart, cost and time), plus every agent that has a task set: how many tasks, what a run needs, and whether one could start here now (and if not, why). A figure nothing measured is null with a note saying why, never 0.",
+      "description": "Admin: the agent benchmark runs, newest first, each with its scoreboard (tasks passed and failed on the agent's own account, the pass rate over those, infrastructure failures and tasks not run listed apart, cost and time), plus every agent that has a task set: how many tasks, each task's id, what a run needs, whether one could start here now (and if not, why), and its budget: what the whole set could cost at most against BENCHMARK_CAP_USD, how many tasks that cap is sure to cover in full, and a plain statement when it can't cover even one. Also the benchmarks' own records (their account, apps, stand-in firm and draft products), which no other list shows. A figure nothing measured is null with a note saying why, never 0.",
       "area": "admin",
       "roles": [
         "admin"
@@ -10266,10 +10266,12 @@
             "enum": [
               "coding",
               "product-desk",
+              "algorithm-explorer",
               "governance-review",
               "program-audit",
               "program-red-team",
-              "connector"
+              "connector",
+              "ask-ai"
             ]
           },
           "limit": {
@@ -12549,6 +12551,43 @@
           }
         },
         "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "next_benchmark_task",
+      "title": "Take a benchmark task to run",
+      "description": "Admin: for the runner of an agent whose code runs outside this server (Ask AI, which is Mynt Studio's): the task waiting in the Ask AI benchmark run that is going, if any. It answers with the question, the one scope of the invented fixture dataset its reads are to be answered from, the task's budget in US dollars with Mynt's rates for the models named, a claim to hand back with the record, and when the record is due. It never says what the task expects. Taking a task holds it for a while, so two runners don't spend on one question. It starts nothing: a run exists only once an admin has started it with start_benchmark_run and a cap.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "models": {
+            "minItems": 1,
+            "maxItems": 4,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "description": "The models the runner will ask, in order; the first is recorded as the run's model"
+          },
+          "instructions_sha256": {
+            "description": "A hash of the instructions and limits the runner's agent runs with, recorded on the run so two runs can be told apart",
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "models"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       }
     },
     {
@@ -18025,7 +18064,7 @@
     {
       "name": "start_benchmark_run",
       "title": "Start a benchmark run",
-      "description": "Admin: run one agent's benchmark task set for real: each task goes through the same service, sandbox, budgets and verification by Mynt as production work, in a benchmark context of its own (its own queues and budgets; no real workspace's data or budget is touched). This spends money on the model and on sandboxes, up to cap_usd, which is required and may not be more than BENCHMARK_CAP_USD; the run stops, and says so, when the cap is reached. Refused with the reason when it can't run here (no sandbox host or model backend, the host's allowance used up, another run going, something the agent's run needs missing). One run at a time. Audited.",
+      "description": "Admin: run one agent's benchmark task set for real: each task goes through the same service, sandbox, budgets and verification by Mynt as production work, in a benchmark context of its own (its own queues and budgets; no real workspace's data or budget is touched, and no repository: a run takes none). This spends money on the model and on sandboxes, up to cap_usd, which is required and may not be more than BENCHMARK_CAP_USD; the run stops, and says so, when the cap is reached. Refused with the reason when it can't run here (no sandbox host or model backend, the host's allowance used up, another run going, something the agent's run needs missing). One run at a time. Audited.",
       "area": "admin",
       "roles": [
         "admin"
@@ -18040,10 +18079,12 @@
             "enum": [
               "coding",
               "product-desk",
+              "algorithm-explorer",
               "governance-review",
               "program-audit",
               "program-red-team",
-              "connector"
+              "connector",
+              "ask-ai"
             ]
           },
           "cap_usd": {
@@ -18056,13 +18097,8 @@
             "type": "string",
             "maxLength": 120
           },
-          "repository": {
-            "description": "product-desk only: the repository set aside for benchmarks (owner/name), with Mynt's GitHub App installed",
-            "type": "string",
-            "pattern": "^[\\w.-]+\\/[\\w.-]+$"
-          },
           "task_ids": {
-            "description": "Only these tasks (default: the whole set)",
+            "description": "Only these tasks, by id (default: the whole set). list_benchmark_runs gives each agent's tasks and how many the cap is sure to cover in full",
             "maxItems": 100,
             "type": "array",
             "items": {
@@ -18435,6 +18471,51 @@
           "evidence"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "submit_benchmark_answer",
+      "title": "Hand in a benchmark task's record",
+      "description": "Admin: for the runner that took a task with next_benchmark_task: the raw record of what the agent did on it (for Ask AI: the answer as shown and as written, its flags, the sources it numbered, every read it attempted with what the model was handed, each model call's token usage, and whether it was stopped at its budget). The record is kept as it arrives and scored by Mynt on the benchmark's next tick, against expectations the runner was never given; a record Mynt can't read is the benchmark's failure, not the agent's. Refused when the run has ended, the task is closed or already answered, or the claim isn't the one holding the task. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "task_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "claim": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "record": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "run_id",
+          "task_id",
+          "claim",
+          "record"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       }
     },
     {
