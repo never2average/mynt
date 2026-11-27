@@ -501,6 +501,7 @@ Identifiers that go with a vault key but aren't secret stay in the environment t
 | `DESK_JOB_CAP_USD`, `DESK_RUN_CAP_USD`, `DESK_MONTHLY_CAP_USD` | The product desk | [Desk settings](products.md#desk-settings) |
 | `EXPLORE_CAP_USD`, `EXPLORE_MAX_ITERATIONS`, `EXPLORE_MAX_MINUTES`, `EXPLORE_EXPERIMENT_TIMEOUT_SECONDS` | Algorithm explorations | [Algorithm explorations](products.md#algorithm-explorations) |
 | `REVIEW_AUTO_OPEN`, `REVIEW_CASE_CAP_USD`, `REVIEW_MONTHLY_CAP_USD` | The governance desk | [Review settings](platform-admin.md#review-settings) |
+| `BENCHMARK_CAP_USD`, `BENCHMARK_POLL_MS` | Agent benchmarks: the most one run may spend, and how often the benchmark worker ticks | [The cap](benchmarks.md#the-cap) |
 | `BD_ENABLED`, `BD_DAILY_CAP`, `BD_RUN_CAP_USD`, `BD_MONTHLY_CAP_USD`, `BD_RUN_EVERY_HOURS`, `BD_FOLLOW_UP_GAP_DAYS`, `BD_MAX_UNANSWERED`, `BD_PROFILE_RETENTION_DAYS`, `BD_SENDER_NAME` | The connector | [Connector settings](platform-admin.md#connector-settings) |
 | `FIRM_CHECKS_EVERY_DAYS`, `SPONSOR_LEGITIMACY_RULE` | Firm checks | [Firm checks](licence-providers.md#firm-checks) |
 | `COVENANT_POLL_MS` | How often covenants are evaluated on their own timer | [When rules are evaluated](licence-providers.md#when-rules-are-evaluated) |

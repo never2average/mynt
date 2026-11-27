@@ -1,6 +1,6 @@
 # Mynt technical reference
 
-This is the index to Mynt's technical reference. The reference is 16 files in [`docs/reference/`](reference/), one per area: every tool, the runtime API, hosting, deployment and operations.
+This is the index to Mynt's technical reference. The reference is 17 files in [`docs/reference/`](reference/), one per area: every tool, the runtime API, hosting, deployment and operations.
 
 For what Mynt is, see the [README](../README.md). For how the parts fit together, see [architecture.md](architecture.md). For a map of the whole `docs/` folder, see [docs/README.md](README.md).
 
@@ -61,12 +61,13 @@ A Mynt admin is a person with the `admin` role, who runs the platform.
 
 1. [Roles and tools](reference/roles-and-tools.md)
 2. [Platform administration](reference/platform-admin.md)
-3. [Firms, licences and licence providers](reference/licence-providers.md)
-4. [Risk](reference/risk.md)
-5. [Agreements](reference/agreements.md#e-signature)
-6. [Money rails](reference/money-rails.md)
-7. [Solana programs](reference/solana-programs.md#mainnet-program-gate)
-8. [Workspaces and sign-in](reference/workspaces-and-sign-in.md)
+3. [Agent benchmarks](reference/benchmarks.md), before changing an agent's instructions, skills or model
+4. [Firms, licences and licence providers](reference/licence-providers.md)
+5. [Risk](reference/risk.md)
+6. [Agreements](reference/agreements.md#e-signature)
+7. [Money rails](reference/money-rails.md)
+8. [Solana programs](reference/solana-programs.md#mainnet-program-gate)
+9. [Workspaces and sign-in](reference/workspaces-and-sign-in.md)
 
 ### Operator
 
@@ -106,6 +107,7 @@ A coding agent working in this repository reads [AGENTS.md](../AGENTS.md) first.
 | [liquidity-and-treasury.md](reference/liquidity-and-treasury.md) | Liquidity pools, positions, the withdrawal queue, on-chain treasuries on Solana |
 | [solana-programs.md](reference/solana-programs.md) | An app's Solana program from reserve to deploy, signers, the toolchain and lock pins, the mainnet program gate, Turnkey custody |
 | [confidential-computing.md](reference/confidential-computing.md) | What the confidential service protects, its hosts, keys and attestation, releases, settings and operator steps |
+| [benchmarks.md](reference/benchmarks.md) | Agent benchmarks: the task sets, how a run is scored and capped, starting a run, the regression gate |
 | [operations.md](reference/operations.md) | Install, users and tokens, running the server, sign-in set-up, deploying, backups, every setting by name |
 | [studio.md](reference/studio.md) | What people see and do in Mynt Studio, page by page |
 

@@ -107,11 +107,11 @@ describe("the platform admin's own layout", () => {
       </TooltipProvider>,
     )
 
-  it("its sidebar is titled Mynt platform admin and lists the eight sections, in order, each its own address; Licences is no longer one", () => {
+  it("its sidebar is titled Mynt platform admin and lists the nine sections, in order, each its own address; Licences is no longer one", () => {
     const html = platformSidebar("/platform")
     expect(html).toContain(admin.PLATFORM_NAME)
     expect(PLATFORM_SECTIONS.map((s) => s.label)).toEqual(admin.ADMIN_TABS.map((t) => admin.ADMIN_TAB_LABELS[t]))
-    expect(PLATFORM_SECTIONS.map((s) => s.label)).toEqual(["Overview", "Workspaces", "Regulated firms", "Vendors", "Audit trails", "Risk models", "Risk register", "Platform settings"])
+    expect(PLATFORM_SECTIONS.map((s) => s.label)).toEqual(["Overview", "Workspaces", "Regulated firms", "Vendors", "Audit trails", "Risk models", "Risk register", "Agent benchmarks", "Platform settings"])
     expect(html).not.toContain('data-platform-link="licences"')
     expect(html).not.toContain(">Licences<")
     // The title has no "All workspaces and firms" line under it any more.
@@ -125,6 +125,7 @@ describe("the platform admin's own layout", () => {
       audit: "/platform/audit",
       "risk-models": "/platform/risk-models",
       "risk-register": "/platform/risk-register",
+      benchmarks: "/platform/benchmarks",
       settings: "/platform/settings",
     })
   })
@@ -291,7 +292,7 @@ describe("addresses", () => {
     expect(found).toContain("/platform")
     expect(found.every((h) => h.startsWith("/platform"))).toBe(true)
     expect(searchStudio(searchIndex({ admin: true }), "esign").map((h) => h.href)).toContain("/platform/settings")
-    expect(found).toEqual(["/platform", "/platform/workspaces", "/platform/firms", "/platform/vendors", "/platform/audit", "/platform/risk-models", "/platform/risk-register", "/platform/settings"].filter((h) => found.includes(h)))
+    expect(found).toEqual(["/platform", "/platform/workspaces", "/platform/firms", "/platform/vendors", "/platform/audit", "/platform/risk-models", "/platform/risk-register", "/platform/benchmarks", "/platform/settings"].filter((h) => found.includes(h)))
     for (const gone of ["/platform/apps", "/platform/people", "/platform/products"]) expect(searchIndex({ admin: true }).some((i) => i.href === gone)).toBe(false)
     expect(searchStudio(searchIndex({ admin: true }), "audit trails").map((h) => h.href)).toContain("/platform/audit")
     expect(searchStudio(searchIndex({ admin: true }), "security risk").map((h) => h.href)).toContain("/platform/risk-register")
@@ -343,7 +344,7 @@ describe("the platform admin's header: Docs and search, as the studio's header h
     Element.prototype.scrollIntoView ??= function () {}
   })
 
-  it("the sidebar has no Sections label above Overview; the eight sections are still listed", () => {
+  it("the sidebar has no Sections label above Overview; the nine sections are still listed", () => {
     const html = renderToStaticMarkup(
       <TooltipProvider>
         <SidebarProvider>
@@ -353,7 +354,7 @@ describe("the platform admin's header: Docs and search, as the studio's header h
     )
     expect(html).not.toContain("Sections")
     expect(html).not.toContain('data-sidebar="group-label"')
-    expect([...html.matchAll(/data-platform-link="([a-z-]+)"/g)]).toHaveLength(8)
+    expect([...html.matchAll(/data-platform-link="([a-z-]+)"/g)]).toHaveLength(9)
   })
 
   it("every page's header has the labelled Docs button to /docs and the labelled search field; Invite person stays on the Overview", async () => {
@@ -383,7 +384,7 @@ describe("the platform admin's header: Docs and search, as the studio's header h
     expect(audit[0]).toMatchObject({ group: "Platform admin", label: "Audit trails", href: "/platform/audit" })
     expect(audit.some((h) => h.group === "Studio" && h.href === "/audits")).toBe(true)
     expect(searchPlatform(index, "docs").map((h) => [h.label, h.href])).toContainEqual(["Studio: Docs", "/docs"])
-    // Licences is found as the firms section's tab, never as a section; an empty search lists the eight sections only.
+    // Licences is found as the firms section's tab, never as a section; an empty search lists the nine sections only.
     for (const q of ["licences", "licence review", "verify licence"])
       expect(searchPlatform(index, q).filter((h) => h.group === "Platform admin").map((h) => [h.label, h.href]), q).toEqual([["Regulated firms → Licences", "/platform/firms?tab=licences"]])
     expect(searchPlatform(index, "").filter((h) => h.group === "Platform admin").map((h) => h.label)).toEqual(PLATFORM_SECTIONS.map((x) => x.label))

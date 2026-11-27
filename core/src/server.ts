@@ -85,6 +85,7 @@ import { registerOpsTools } from "./ops.js";
 import { registerPlatformAdminTools } from "./platform-admin.js";
 import { registerPlatformKeyTools } from "./platform-keys.js";
 import { registerPlatformSettingTools } from "./platform-settings.js";
+import { registerBenchmarkTools } from "./benchmarks.js";
 import { registerAppRemovalTools } from "./app-removal.js";
 import { registerModuleTools } from "./modules.js";
 import { effectiveStages, registerPromotionAdminTools, registerPromotionTools } from "./promotions.js";
@@ -294,6 +295,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     const esignHooks = typeof (ctx.esign as Partial<EsignSettings> | null | undefined)?.setKey === "function" ? (ctx.esign as EsignSettings) : null;
     registerPlatformKeyTools(server, store, user!, ctx.platformKeys ?? esignHooks?.keys ?? null, esignHooks);
     registerPlatformSettingTools(server, store, user!, ctx.operationalSettings ?? null);
+    // Agent benchmarks (benchmarks.ts): started only by an admin, with an explicit cap.
+    registerBenchmarkTools(server, store, user!, ctx.benchmarks ?? null);
   }
 
   return server;

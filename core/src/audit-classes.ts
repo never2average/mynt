@@ -304,6 +304,9 @@ const WORKSPACE = [
   "workspace_demotion_offboard",
   "workspace_offboard_superseded",
   "retry_offboard",
+  // agent benchmark runs an admin started or stopped (benchmarks.ts): Mynt's own running, and its own spend
+  "start_benchmark_run",
+  "stop_benchmark_run",
   "workspace_archive_waiting",
   "workspace_archive_done",
   "workspace_migrated",

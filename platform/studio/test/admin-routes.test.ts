@@ -137,11 +137,11 @@ describe("who gets in", () => {
   it("an admin gets each section at its own address, and each detail at /platform/<section>/<id>", async () => {
     type El = { props: { tab: string; id: string | null } };
     expect(((await overviewPage.default()) as El).props).toMatchObject({ tab: "overview", id: null });
-    for (const section of ["workspaces", "firms", "vendors", "audit", "risk-models", "risk-register", "settings"]) {
+    for (const section of ["workspaces", "firms", "vendors", "audit", "risk-models", "risk-register", "benchmarks", "settings"]) {
       const el = (await sectionPage.default({ params: Promise.resolve({ section }) })) as El;
       expect(el.props).toMatchObject({ tab: section, id: null });
     }
-    for (const section of ["workspaces", "firms", "audit", "risk-models", "risk-register"]) {
+    for (const section of ["workspaces", "firms", "audit", "risk-models", "risk-register", "benchmarks"]) {
       const el = (await detailPage.default({ params: Promise.resolve({ section, id: FIRM }) })) as El;
       expect(el.props).toMatchObject({ tab: section, id: FIRM });
     }

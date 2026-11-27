@@ -35,6 +35,7 @@ import { SolanaService } from "./solana/service.js";
 import { EsignSettings } from "./esign-settings.js";
 import { installPlatformKeys, PlatformKeyVault } from "./platform-keys.js";
 import { OperationalSettings } from "./platform-settings.js";
+import { BenchmarkService } from "./benchmarks.js";
 import { solanaConfigFromEnv } from "./solana/service.js";
 import { turnkeyFromEnv } from "./solana/custody/turnkey.js";
 import { CovenantService } from "./covenants.js";
@@ -177,9 +178,11 @@ const openServices = async () => {
   const desk = await DeskService.open(db, store, sandboxes, github, deskConfig);
   desk.managedHost = builds.managedHost; // never a firm's workspace (so never an exploration's either)
   // The connector agent shares the builds' sandbox host and model backend. Channels plug in later.
-  const bd = await BdService.open(db, sandboxes, bdConfigFromEnv(buildConfig, env));
+  const bdConfig = bdConfigFromEnv(buildConfig, env);
+  const bd = await BdService.open(db, sandboxes, bdConfig);
   // The governance desk: review agents steered by workspaces/governance-review; admins decide.
-  const review = await ReviewService.open(db, store, sandboxes, reviewConfigFromEnv(buildConfig, env), desk);
+  const reviewConfig = reviewConfigFromEnv(buildConfig, env);
+  const review = await ReviewService.open(db, store, sandboxes, reviewConfig, desk);
   // The desk's algorithm explorations: explorer agents steered by workspaces/algorithm-explorer; Mynt scores.
   const explore = await ExploreService.open(db, store, sandboxes, github, exploreConfigFromEnv(deskConfig, env), desk, review);
   // Developers' hosting: a VM each, fetching their verified commits with a read-only GitHub token.
@@ -198,6 +201,9 @@ const openServices = async () => {
   // Every agent's model calls are metered at the proxy, against its run's cap.
   const meter = await AgentMeter.open(db);
   for (const s of [builds, bd, desk, review, explore, gate]) s.meter = meter;
+  // Agent benchmarks: the same services again, over their own tables, run only when an admin starts a run.
+  const benchmarks = await BenchmarkService.open(db, store, { sandboxes, repos: github, buildConfig, deskConfig, reviewConfig, bdConfig });
+  benchmarks.meter = meter;
   // Each product's financial health: encrypted to its licence provider and liquidity providers, fingerprinted on chain.
   const healthConfig = productHealthConfigFromEnv();
   const productHealth = await ProductHealthService.open(db, store, healthConfig, {
@@ -224,7 +230,7 @@ const openServices = async () => {
   // environment's ESIGN_PROVIDER, SIGNWELL_API_KEY, SIGNWELL_WEBHOOK_ID and ESIGN_TEST_MODE as overrides. Off until
   // then, and the manual flow stays.
   const esign = await EsignSettings.open(store, { keys: platformKeys });
-  return { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env };
+  return { benchmarks, store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env };
 };
 
 const parseRoles = (): Role[] => {
@@ -271,13 +277,13 @@ const [command = "serve", sub] = positionals;
 if (values.help) {
   console.log(USAGE);
 } else if (command === "serve") {
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env } = await openServices();
+  const { benchmarks, store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env } = await openServices();
   const token = process.env.FINANCIAL_PRODUCTS_TOKEN;
   const user = token ? ((await store.userByToken(token)) ?? die("FINANCIAL_PRODUCTS_TOKEN is not a valid token")) : null;
-  await createServer(store, user, { clerkAdmin: clerkAdmin(env), identity: identity(store, env), builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings }).connect(new StdioServerTransport());
+  await createServer(store, user, { clerkAdmin: clerkAdmin(env), identity: identity(store, env), benchmarks, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings }).connect(new StdioServerTransport());
 } else if (command === "serve-http") {
   const port = Number(values.port);
-  const { store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env } = await openServices();
+  const { benchmarks, store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env } = await openServices();
   // This process runs deploys, so it alone recovers ones a previous run of it left behind.
   solana.recovery = true;
   builds.startWorker();
@@ -287,6 +293,7 @@ if (values.help) {
   explore.startWorker();
   review.startWorker();
   gate.startWorker();
+  benchmarks.startWorker();
   productHealth.startWorker();
   liquidity.startWorker();
   covenants.startWorker(); // on its own timer: a rule about missing snapshots has to fire when the health worker never ran
@@ -309,7 +316,7 @@ if (values.help) {
         .finally(() => setTimeout(tick, wait));
     setTimeout(tick, 60_000);
   }
-  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(env), identity: identity(store, env), workspaceSync, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings }).listen(port, values.host, () =>
+  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(env), identity: identity(store, env), workspaceSync, benchmarks, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings }).listen(port, values.host, () =>
     console.error(`mynt MCP listening on http://${values.host}:${port}/mcp${clerk ? " (Clerk whitelist auth)" : ""}`),
   );
   // Workspace offboardings with a step still to do (a provider was down), and Mynt invites made by workspace invites

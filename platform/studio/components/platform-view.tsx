@@ -2,7 +2,7 @@
 
 // One section of the platform admin (/platform/<section>, /platform/<section>/<id>), for Mynt's own staff: across all
 // workspaces and firms, never a workspace picked in the studio. Overview, Workspaces, Firms, Vendors, Audit
-// trails, Risk models, Risk register and Platform settings, each its own page in the platform admin's sidebar
+// trails, Risk models, Risk register, Agent benchmarks and Platform settings, each its own page in the platform admin's sidebar
 // (components/platform-shell.tsx). There is no Apps, People, Products or Licences section: people are each firm's and
 // workspace's Members, products each firm's Products tab, and licences the Regulated firms section's Licences tab
 // (/platform/firms?tab=licences) and each firm's. Each is a read view; its changes are labelled buttons
@@ -11,6 +11,7 @@
 import { useRouter, useSearchParams } from "next/navigation"
 
 import { AuditTab } from "@/components/admin-audit"
+import { BenchmarksTab } from "@/components/admin-benchmarks"
 import { FIRM_DETAIL_TABS, FirmsTab, type FirmDetailTab } from "@/components/admin-firms"
 import { OverviewTab } from "@/components/admin-overview"
 import { RiskModelsTab } from "@/components/admin-risk-models"
@@ -42,6 +43,7 @@ export function PlatformSection({ tab, id }: { tab: AdminTab; id: string | null 
         {tab === "audit" && <AuditTab id={id} onOpen={open("audit")} onBack={back("audit")} />}
         {tab === "risk-models" && <RiskModelsTab id={id} onOpen={open("risk-models")} onBack={back("risk-models")} />}
         {tab === "risk-register" && <RiskRegisterTab id={id} onOpen={open("risk-register")} onBack={back("risk-register")} />}
+        {tab === "benchmarks" && <BenchmarksTab id={id} onOpen={open("benchmarks")} onBack={back("benchmarks")} />}
         {tab === "settings" && <SettingsTab tab={settingsTab} onTab={(t) => router.push(settingsHref(t))} />}
       </div>
     </div>

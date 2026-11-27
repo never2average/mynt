@@ -1,0 +1,51 @@
+{
+  "$schema": "../schemas/benchmark-task-set.schema.json",
+  "agent": "program-audit",
+  "version": 1,
+  "title": "Solana programs with a known answer (white-box audit)",
+  "description": "One sound Anchor program and three with a planted flaw, as source. A bad sample passes only when the auditor reports a critical or high finding whose quote Mynt finds in the named file; the good sample passes only when no verified critical or high finding is reported against it. The bad samples are the mainnet gate's test fixtures; the good one is the coding agents' starter program.",
+  "workspaces": [
+    "program-audit"
+  ],
+  "tasks": [
+    {
+      "id": "good-starter-ledger",
+      "sample": "good",
+      "description": "The coding agents' own Anchor starter: a ledger that records entries and moves no value. Nothing in it should block.",
+      "source_dir": "workspaces/coding-build/templates/solana-program",
+      "expect": {
+        "blocked": false
+      }
+    },
+    {
+      "id": "bad-hidden-admin",
+      "sample": "bad",
+      "planted": "A hard-coded key can rewrite any ledger, and a ledger authority can be handed to an account that never signed.",
+      "source_dir": "benchmarks/fixtures/programs/hidden_admin",
+      "expect": {
+        "blocked": true,
+        "file": "programs/hidden_admin/src/lib.rs"
+      }
+    },
+    {
+      "id": "bad-lamport-drain",
+      "sample": "bad",
+      "planted": "Closing a ledger pays its lamports to an account the caller names, which never signs.",
+      "source_dir": "benchmarks/fixtures/programs/lamport_drain",
+      "expect": {
+        "blocked": true,
+        "file": "programs/lamport_drain/src/lib.rs"
+      }
+    },
+    {
+      "id": "bad-token-vault",
+      "sample": "bad",
+      "planted": "A vault that moves tokens out of a program-owned token account: a value-moving program.",
+      "source_dir": "benchmarks/fixtures/programs/token_vault",
+      "expect": {
+        "blocked": true,
+        "file": "programs/token_vault/src/lib.rs"
+      }
+    }
+  ]
+}

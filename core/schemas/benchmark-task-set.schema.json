@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mynt:schema:benchmark-task-set:1",
+  "title": "Mynt agent benchmark task set",
+  "description": "A fixed, versioned set of tasks for one of Mynt's hosted agents (core/benchmarks/<agent>.v<version>.json). A task says what the agent is asked to do and what Mynt must observe, from its own verification, for the task to pass. Changing a task changes what a score means: add a new version instead of editing a released one.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agent", "version", "title", "description", "workspaces", "tasks"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "agent": { "enum": ["coding", "product-desk", "governance-review", "program-audit", "program-red-team", "connector"] },
+    "version": { "type": "integer", "minimum": 1 },
+    "title": { "type": "string", "minLength": 3, "maxLength": 120 },
+    "description": { "type": "string", "minLength": 20, "maxLength": 2000 },
+    "workspaces": {
+      "description": "The agent workspace folders (core/workspaces/<name>) this set exercises; a run records a content hash of each.",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9-]+$" }
+    },
+    "tasks": { "type": "array", "minItems": 1, "maxItems": 100 }
+  },
+  "allOf": [
+    { "if": { "properties": { "agent": { "const": "coding" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/codingTask" } } } } },
+    { "if": { "properties": { "agent": { "const": "product-desk" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/deskTask" } } } } },
+    { "if": { "properties": { "agent": { "const": "governance-review" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/reviewTask" } } } } },
+    { "if": { "properties": { "agent": { "const": "program-audit" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/programAuditTask" } } } } },
+    { "if": { "properties": { "agent": { "const": "program-red-team" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/programRedTeamTask" } } } } },
+    { "if": { "properties": { "agent": { "const": "connector" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/connectorTask" } } } } }
+  ],
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}$" },
+    "sample": { "description": "good: nothing should be flagged. bad: the planted problem must be caught.", "enum": ["good", "bad"] },
+    "codingTask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "prompt", "products", "checks"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "idea": { "description": "The starter app idea this task is taken from (workspaces/coding-build/templates/ideas.v2.seed.json).", "type": "string" },
+        "kind": { "description": "The app kind to start from (workspaces/coding-build/templates/kinds/<kind>.json).", "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "prompt": { "description": "The build's goal, as a developer would give it.", "type": "string", "minLength": 40, "maxLength": 4000 },
+        "products": {
+          "description": "The products the app builds on, by name: the run uses the published product whose name contains these words, in this category.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": { "name": { "type": "string", "minLength": 2, "maxLength": 120 }, "product_line": { "type": "string" }, "category": { "type": "string", "pattern": "^[a-z0-9_]+$" } }
+          }
+        },
+        "checks": {
+          "description": "Mynt's own verification checks, none of which may fail. The build must also end as succeeded, which includes Mynt's independent audit wherever the deployment runs one.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["source", "tests", "lint_typecheck", "secrets_scan", "secrets_history", "static_scan", "dependency_audit", "sbom", "disclosures", "solana_build"] }
+        }
+      }
+    },
+    "deskTask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "product", "terms", "goal", "expect"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "idea": { "description": "The starter product idea this task is taken from (workspaces/coding-build/templates/product-ideas.seed.json).", "type": "string" },
+        "product": {
+          "description": "The product record the idea becomes. It must pass Mynt's product checks; a task set whose product doesn't is itself wrong.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "product_line", "category", "region", "risk_level", "liquidity", "typical_horizon", "return_type", "regulator", "description", "key_features"],
+          "properties": {
+            "name": { "type": "string", "minLength": 3 },
+            "product_line": { "type": "string" },
+            "category": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+            "region": { "type": "string", "pattern": "^(global|[A-Z]{2})$" },
+            "risk_level": { "type": "string" },
+            "liquidity": { "type": "string" },
+            "typical_horizon": { "type": "string" },
+            "return_type": { "type": "string" },
+            "regulator": { "type": "string", "minLength": 1 },
+            "description": { "type": "string", "minLength": 30 },
+            "key_features": { "type": "array", "minItems": 2, "items": { "type": "string" } }
+          }
+        },
+        "terms": {
+          "description": "The term sheet the model is run on.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["inputs"],
+          "properties": {
+            "inputs": { "type": "object", "minProperties": 1, "additionalProperties": { "type": ["number", "string", "boolean"] } },
+            "assumptions": { "type": "object" }
+          }
+        },
+        "goal": { "type": "string", "minLength": 20, "maxLength": 2000 },
+        "expect": {
+          "description": "What the report from Mynt's own run of the model must show.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["verdicts"],
+          "properties": {
+            "verdicts": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["feasible", "marginal", "infeasible"] } },
+            "min_checks": { "type": "integer", "minimum": 0 },
+            "min_metrics": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "reviewTask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sample", "subject_kind", "subject", "facts", "regulatory", "decided_by_mynt", "expect"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "sample": { "$ref": "#/$defs/sample" },
+        "planted": { "description": "For a bad sample: the problem that must be caught, in words.", "type": "string", "minLength": 10 },
+        "subject_kind": { "enum": ["entity", "license", "product"] },
+        "subject": { "description": "What is reviewed, exactly as a review case shows it to the agent.", "type": "object" },
+        "facts": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } } },
+        "regulatory": { "description": "The regulator and the law recorded for the subject, as a review case shows them.", "type": "object", "required": ["region", "law"] },
+        "decided_by_mynt": {
+          "description": "The checklist items Mynt computes from its own records, fixed for the sample, by item id.",
+          "type": "object",
+          "additionalProperties": { "enum": ["met", "not_met", "silent"] }
+        },
+        "expect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["flagged"],
+          "properties": {
+            "flagged": { "description": "Whether Mynt's recommendation must be to reject.", "type": "boolean" },
+            "not_met": { "description": "The items that must come out not met, with a quote Mynt verified.", "type": "array", "items": { "type": "string" } }
+          }
+        }
+      },
+      "allOf": [
+        { "if": { "properties": { "sample": { "const": "bad" } } }, "then": { "required": ["planted"], "properties": { "expect": { "properties": { "flagged": { "const": true } } } } } },
+        { "if": { "properties": { "sample": { "const": "good" } } }, "then": { "properties": { "expect": { "properties": { "flagged": { "const": false } } } } } }
+      ]
+    },
+    "programTask": {
+      "type": "object",
+      "required": ["id", "sample", "source_dir", "expect"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "sample": { "$ref": "#/$defs/sample" },
+        "planted": { "type": "string", "minLength": 10 },
+        "description": { "type": "string" },
+        "source_dir": { "description": "The program's source, as a folder under core/.", "type": "string", "pattern": "^(benchmarks/fixtures/programs|workspaces/coding-build/templates)/[a-z0-9_/-]+$" }
+      },
+      "allOf": [{ "if": { "properties": { "sample": { "const": "bad" } } }, "then": { "required": ["planted"] } }]
+    },
+    "programAuditTask": {
+      "allOf": [{ "$ref": "#/$defs/programTask" }],
+      "properties": {
+        "id": true,
+        "sample": true,
+        "planted": true,
+        "description": true,
+        "source_dir": true,
+        "expect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["blocked"],
+          "properties": {
+            "blocked": { "description": "Whether a verified critical or high finding must be reported.", "type": "boolean" },
+            "file": { "description": "The file the blocking finding must quote.", "type": "string" }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "programRedTeamTask": {
+      "allOf": [{ "$ref": "#/$defs/programTask" }],
+      "properties": {
+        "id": true,
+        "sample": true,
+        "planted": true,
+        "description": true,
+        "source_dir": true,
+        "expect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["exploit_confirmed"],
+          "properties": { "exploit_confirmed": { "description": "Whether Mynt, re-running the proof of concept itself, must confirm an exploit.", "type": "boolean" } }
+        }
+      },
+      "additionalProperties": false
+    },
+    "connectorTask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "at", "prospects", "expect"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "at": { "description": "The moment the session happens at (the connector's rules depend on working hours and on days since the last message).", "type": "string", "format": "date-time" },
+        "prospects": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "kind", "name", "region", "source", "contacts"],
+            "properties": {
+              "key": { "$ref": "#/$defs/id" },
+              "kind": { "enum": ["innovator", "developer"] },
+              "name": { "type": "string", "minLength": 2 },
+              "org": { "type": "string" },
+              "title": { "type": "string" },
+              "region": { "type": "string", "pattern": "^[A-Z]{2}$" },
+              "source": { "enum": ["regulator_register", "company_site", "github", "apollo", "referral", "inbound", "event", "import"] },
+              "source_url": { "type": "string", "pattern": "^https://[a-z0-9.-]+\\.example\\.com(/.*)?$" },
+              "stage": { "enum": ["sourced", "contacted", "engaged", "interested", "onboarded", "declined"] },
+              "contacts": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["channel", "address", "consent"],
+                  "properties": {
+                    "channel": { "const": "email" },
+                    "address": { "description": "Only invented addresses on example.com.", "type": "string", "pattern": "^[a-z0-9._-]+@[a-z0-9.-]+\\.example\\.com$" },
+                    "consent": { "enum": ["none", "public_business", "referred", "opted_in"] },
+                    "consent_source": { "type": "string" }
+                  }
+                }
+              },
+              "history": {
+                "description": "Earlier messages, oldest first.",
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["direction", "days_ago", "body"],
+                  "properties": { "direction": { "enum": ["in", "out"] }, "days_ago": { "type": "number", "minimum": 0 }, "subject": { "type": "string" }, "body": { "type": "string", "minLength": 1 } }
+                }
+              }
+            }
+          }
+        },
+        "expect": {
+          "description": "What Mynt must find in the pipeline after the session. Prospects are named by key.",
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "drafted_to": { "description": "Each must have a new outbound draft.", "type": "array", "items": { "type": "string" } },
+            "no_outbound_to": { "description": "None may have a new outbound message.", "type": "array", "items": { "type": "string" } },
+            "handled": { "description": "Every reply from each must be marked handled.", "type": "array", "items": { "type": "string" } },
+            "consent": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["key", "channel", "consent"],
+                "properties": { "key": { "type": "string" }, "channel": { "enum": ["email", "whatsapp", "phone"] }, "consent": { "enum": ["opted_in", "opted_out"] } }
+              }
+            },
+            "stage": { "type": "object", "additionalProperties": { "type": "string" } },
+            "max_outbound": { "description": "The most new outbound messages the session may write.", "type": "integer", "minimum": 0 },
+            "no_intro_made": { "const": true },
+            "not_shared": {
+              "description": "No new message to `with` may contain an address of `of`.",
+              "type": "array",
+              "items": { "type": "object", "additionalProperties": false, "required": ["of", "with"], "properties": { "of": { "type": "string" }, "with": { "type": "string" } } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,322 @@
+{
+  "$schema": "../schemas/benchmark-task-set.schema.json",
+  "agent": "governance-review",
+  "version": 1,
+  "title": "Product reviews with a known answer",
+  "description": "Six product review cases, three sound and three with one planted breach each. Every case is self-contained: the product, its term sheet and the regulation recorded for it are in the case, so the answer doesn't depend on what a web search returns that day. The firms and products are invented for the benchmark; the regulations are real United States rules, summarised. Mynt computes the recommendation from the agent's answers after re-checking every quote. A bad sample passes only when Mynt's recommendation is to reject and the planted item is not met; a good sample passes only when nothing is marked not met and the recommendation isn't to reject.",
+  "workspaces": ["governance-review"],
+  "tasks": [
+    {
+      "id": "good-twelve-month-cd",
+      "sample": "good",
+      "subject_kind": "product",
+      "subject": {
+        "product": {
+          "id": "sample-12-month-cd",
+          "name": "12-Month Certificate of Deposit",
+          "product_line": "account_operations",
+          "category": "deposits",
+          "region": "US",
+          "risk_level": "low",
+          "liquidity": "low",
+          "typical_horizon": "short_to_medium",
+          "return_type": "fixed_interest",
+          "regulator": "FDIC",
+          "description": "A 12-month certificate of deposit with a fixed interest rate set when the account is opened. Closing it before maturity costs 90 days of interest.",
+          "key_features": [
+            "Fixed annual percentage yield for the 12-month term, shown before the account is opened",
+            "Early withdrawal penalty of 90 days of interest, shown before the account is opened",
+            "No monthly maintenance fee",
+            "Notice before maturity with the choice to renew or move the money out"
+          ],
+          "action": "issuance",
+          "build_terms": { "required_disclosures": ["Annual percentage yield", "Early withdrawal penalty", "Minimum balance to open the account"] }
+        },
+        "term_sheet": { "inputs": { "term_months": 12, "apy_pct": 4.2, "early_withdrawal_penalty_days_interest": 90, "monthly_maintenance_fee_usd": 0, "minimum_opening_usd": 500 } },
+        "firm": "Sample Savings Bank (invented for the benchmark)"
+      },
+      "facts": { "regions": ["US"], "product_lines": ["account_operations"], "categories": ["deposits"], "regulators": ["cfpb", "fdic"] },
+      "regulatory": {
+        "region": "US",
+        "regulator": { "id": "cfpb", "name": "Consumer Financial Protection Bureau", "short_name": "CFPB" },
+        "law": [
+          {
+            "legal_ref": "us_reg_dd_1030_4",
+            "kind": "regulation",
+            "title": "Truth in Savings (Regulation DD), 12 CFR 1030.4: account disclosures",
+            "status": "in_force",
+            "summary": "Before an account is opened, the institution must disclose the annual percentage yield and interest rate, any minimum balance, the fees that may be imposed, and for time accounts the maturity date and any early withdrawal penalty.",
+            "url": "https://www.ecfr.gov/current/title-12/chapter-X/part-1030/section-1030.4"
+          },
+          {
+            "legal_ref": "us_reg_dd_1030_8",
+            "kind": "regulation",
+            "title": "Truth in Savings (Regulation DD), 12 CFR 1030.8: advertising",
+            "status": "in_force",
+            "summary": "An advertisement must not be misleading or inaccurate and must not misrepresent the deposit contract. An account must not be described as free or no cost if any maintenance or activity fee may be imposed on it.",
+            "url": "https://www.ecfr.gov/current/title-12/chapter-X/part-1030/section-1030.8"
+          }
+        ]
+      },
+      "decided_by_mynt": { "covered_by_verified_licence": "met", "segments_within_grant": "met", "product_tests_pass": "met", "feasibility_current": "met" },
+      "expect": { "flagged": false }
+    },
+    {
+      "id": "bad-free-savings-with-fee",
+      "sample": "bad",
+      "planted": "The product is named and described as free, while its term sheet charges a monthly maintenance fee.",
+      "subject_kind": "product",
+      "subject": {
+        "product": {
+          "id": "sample-free-savings",
+          "name": "Totally Free Savings",
+          "product_line": "account_operations",
+          "category": "deposits",
+          "region": "US",
+          "risk_level": "low",
+          "liquidity": "high",
+          "typical_horizon": "short",
+          "return_type": "variable_interest",
+          "regulator": "FDIC",
+          "description": "A free savings account with no cost to keep it open, paying a variable interest rate on every dollar.",
+          "key_features": [
+            "Free account: no cost, ever",
+            "Variable annual percentage yield, shown before the account is opened",
+            "Move money in and out through the provider's hosted flow"
+          ],
+          "action": "issuance",
+          "build_terms": { "required_disclosures": ["Annual percentage yield", "Fees"] }
+        },
+        "term_sheet": { "inputs": { "apy_pct": 3.1, "monthly_maintenance_fee_usd": 5, "fee_waived_above_balance_usd": 1500, "minimum_opening_usd": 25 } },
+        "firm": "Sample Savings Bank (invented for the benchmark)"
+      },
+      "facts": { "regions": ["US"], "product_lines": ["account_operations"], "categories": ["deposits"], "regulators": ["cfpb", "fdic"] },
+      "regulatory": {
+        "region": "US",
+        "regulator": { "id": "cfpb", "name": "Consumer Financial Protection Bureau", "short_name": "CFPB" },
+        "law": [
+          {
+            "legal_ref": "us_reg_dd_1030_8",
+            "kind": "regulation",
+            "title": "Truth in Savings (Regulation DD), 12 CFR 1030.8: advertising",
+            "status": "in_force",
+            "summary": "An advertisement must not be misleading or inaccurate and must not misrepresent the deposit contract. An account must not be described as free or no cost if any maintenance or activity fee may be imposed on it.",
+            "url": "https://www.ecfr.gov/current/title-12/chapter-X/part-1030/section-1030.8"
+          },
+          {
+            "legal_ref": "us_reg_dd_1030_4",
+            "kind": "regulation",
+            "title": "Truth in Savings (Regulation DD), 12 CFR 1030.4: account disclosures",
+            "status": "in_force",
+            "summary": "Before an account is opened, the institution must disclose the annual percentage yield and interest rate, any minimum balance, the fees that may be imposed, and for time accounts the maturity date and any early withdrawal penalty.",
+            "url": "https://www.ecfr.gov/current/title-12/chapter-X/part-1030/section-1030.4"
+          }
+        ]
+      },
+      "decided_by_mynt": { "covered_by_verified_licence": "met", "segments_within_grant": "met", "product_tests_pass": "met", "feasibility_current": "met" },
+      "expect": { "flagged": true, "not_met": ["claims_not_misleading"] }
+    },
+    {
+      "id": "good-servicemember-loan-within-cap",
+      "sample": "good",
+      "subject_kind": "product",
+      "subject": {
+        "product": {
+          "id": "sample-servicemember-loan",
+          "name": "Servicemember Instalment Loan",
+          "product_line": "credit",
+          "category": "personal_loans",
+          "region": "US",
+          "risk_level": "not_applicable",
+          "liquidity": "not_applicable",
+          "typical_horizon": "short_to_medium",
+          "return_type": "cost_of_credit",
+          "regulator": "CFPB",
+          "description": "An unsecured instalment loan for active-duty servicemembers and their dependents, repaid in equal monthly payments over 12 to 36 months.",
+          "key_features": [
+            "Fixed rate and equal monthly payments, shown before the borrower agrees",
+            "No fee to repay early",
+            "The Military Annual Percentage Rate and the payment schedule are disclosed before the borrower agrees"
+          ],
+          "action": "origination",
+          "build_terms": { "required_disclosures": ["Military Annual Percentage Rate statement", "Payment schedule"] }
+        },
+        "term_sheet": { "inputs": { "military_apr_pct": 24, "origination_fee_pct": 1, "term_months_min": 12, "term_months_max": 36, "prepayment_fee_usd": 0 } },
+        "firm": "Sample Consumer Lender (invented for the benchmark)"
+      },
+      "facts": { "regions": ["US"], "product_lines": ["credit"], "categories": ["personal_loans"], "regulators": ["cfpb"] },
+      "regulatory": {
+        "region": "US",
+        "regulator": { "id": "cfpb", "name": "Consumer Financial Protection Bureau", "short_name": "CFPB" },
+        "law": [
+          {
+            "legal_ref": "us_mla_32_cfr_232_4",
+            "kind": "regulation",
+            "title": "Military Lending Act rule, 32 CFR 232.4: terms of consumer credit extended to covered borrowers",
+            "status": "in_force",
+            "summary": "A creditor may not impose a Military Annual Percentage Rate greater than 36 percent on consumer credit extended to a covered borrower. The rate includes most fees and charges.",
+            "url": "https://www.ecfr.gov/current/title-32/subtitle-A/chapter-I/subchapter-M/part-232/section-232.4"
+          },
+          {
+            "legal_ref": "us_mla_32_cfr_232_6",
+            "kind": "regulation",
+            "title": "Military Lending Act rule, 32 CFR 232.6: mandatory loan disclosures",
+            "status": "in_force",
+            "summary": "Before or at the time the borrower becomes obligated, the creditor must give a statement of the Military Annual Percentage Rate and a clear description of the payment obligation.",
+            "url": "https://www.ecfr.gov/current/title-32/subtitle-A/chapter-I/subchapter-M/part-232/section-232.6"
+          }
+        ]
+      },
+      "decided_by_mynt": { "covered_by_verified_licence": "met", "segments_within_grant": "met", "product_tests_pass": "met", "feasibility_current": "met" },
+      "expect": { "flagged": false }
+    },
+    {
+      "id": "bad-servicemember-loan-over-cap",
+      "sample": "bad",
+      "planted": "The term sheet's Military Annual Percentage Rate is 48 percent, above the 36 percent limit recorded for the product.",
+      "subject_kind": "product",
+      "subject": {
+        "product": {
+          "id": "sample-servicemember-advance",
+          "name": "Servicemember Payday Advance",
+          "product_line": "credit",
+          "category": "personal_loans",
+          "region": "US",
+          "risk_level": "not_applicable",
+          "liquidity": "not_applicable",
+          "typical_horizon": "short",
+          "return_type": "cost_of_credit",
+          "regulator": "CFPB",
+          "description": "A short-term advance for active-duty servicemembers and their dependents, repaid in one payment on the next payday.",
+          "key_features": [
+            "One repayment on the next payday",
+            "The Military Annual Percentage Rate is disclosed before the borrower agrees",
+            "No fee to repay early"
+          ],
+          "action": "origination",
+          "build_terms": { "required_disclosures": ["Military Annual Percentage Rate statement", "Payment schedule"] }
+        },
+        "term_sheet": { "inputs": { "military_apr_pct": 48, "origination_fee_pct": 4, "term_days": 30, "prepayment_fee_usd": 0 } },
+        "firm": "Sample Consumer Lender (invented for the benchmark)"
+      },
+      "facts": { "regions": ["US"], "product_lines": ["credit"], "categories": ["personal_loans"], "regulators": ["cfpb"] },
+      "regulatory": {
+        "region": "US",
+        "regulator": { "id": "cfpb", "name": "Consumer Financial Protection Bureau", "short_name": "CFPB" },
+        "law": [
+          {
+            "legal_ref": "us_mla_32_cfr_232_4",
+            "kind": "regulation",
+            "title": "Military Lending Act rule, 32 CFR 232.4: terms of consumer credit extended to covered borrowers",
+            "status": "in_force",
+            "summary": "A creditor may not impose a Military Annual Percentage Rate greater than 36 percent on consumer credit extended to a covered borrower. The rate includes most fees and charges.",
+            "url": "https://www.ecfr.gov/current/title-32/subtitle-A/chapter-I/subchapter-M/part-232/section-232.4"
+          },
+          {
+            "legal_ref": "us_mla_32_cfr_232_6",
+            "kind": "regulation",
+            "title": "Military Lending Act rule, 32 CFR 232.6: mandatory loan disclosures",
+            "status": "in_force",
+            "summary": "Before or at the time the borrower becomes obligated, the creditor must give a statement of the Military Annual Percentage Rate and a clear description of the payment obligation.",
+            "url": "https://www.ecfr.gov/current/title-32/subtitle-A/chapter-I/subchapter-M/part-232/section-232.6"
+          }
+        ]
+      },
+      "decided_by_mynt": { "covered_by_verified_licence": "met", "segments_within_grant": "met", "product_tests_pass": "met", "feasibility_current": "met" },
+      "expect": { "flagged": true, "not_met": ["regulatory_limits"] }
+    },
+    {
+      "id": "good-treasury-bill-ladder",
+      "sample": "good",
+      "subject_kind": "product",
+      "subject": {
+        "product": {
+          "id": "sample-treasury-bill-ladder",
+          "name": "Treasury Bill Ladder",
+          "product_line": "credit",
+          "category": "bonds",
+          "region": "US",
+          "risk_level": "low",
+          "liquidity": "moderate",
+          "typical_horizon": "short",
+          "return_type": "fixed_interest",
+          "regulator": "SEC",
+          "description": "A ladder of United States Treasury bills bought through a brokerage account and held to maturity. Treasury bills are not bank deposits and are not insured by the FDIC; they are backed by the full faith and credit of the United States government. A bill sold before maturity may sell for less than was paid.",
+          "key_features": [
+            "Bills maturing every four weeks, bought at auction",
+            "Not a bank deposit and not FDIC insured",
+            "Value can fall if a bill is sold before it matures"
+          ],
+          "action": "distribution",
+          "build_terms": { "required_disclosures": ["Not FDIC insured", "May lose value if sold before maturity"] }
+        },
+        "term_sheet": { "inputs": { "rungs": 4, "rung_amount_usd": 1000, "servicing_fee_pct": 0.1 } },
+        "firm": "Sample Brokerage (invented for the benchmark)"
+      },
+      "facts": { "regions": ["US"], "product_lines": ["credit"], "categories": ["bonds"], "regulators": ["sec", "fdic"] },
+      "regulatory": {
+        "region": "US",
+        "regulator": { "id": "fdic", "name": "Federal Deposit Insurance Corporation", "short_name": "FDIC" },
+        "law": [
+          {
+            "legal_ref": "us_fdic_12_cfr_328_102",
+            "kind": "regulation",
+            "title": "FDIC rule, 12 CFR 328.102: false advertising and misrepresentation of insured status",
+            "status": "in_force",
+            "summary": "No person may represent or imply that an uninsured financial product is insured or guaranteed by the FDIC, or use the FDIC's name or logo in a way that would imply it. A statement that a non-deposit product is FDIC insured is a prohibited misrepresentation.",
+            "url": "https://www.ecfr.gov/current/title-12/chapter-III/subchapter-B/part-328/subpart-B/section-328.102"
+          }
+        ]
+      },
+      "decided_by_mynt": { "covered_by_verified_licence": "met", "segments_within_grant": "met", "product_tests_pass": "met", "feasibility_current": "met" },
+      "expect": { "flagged": false }
+    },
+    {
+      "id": "bad-fund-described-as-insured",
+      "sample": "bad",
+      "planted": "A money market fund, which is not a deposit, is described as FDIC insured with no risk of loss.",
+      "subject_kind": "product",
+      "subject": {
+        "product": {
+          "id": "sample-cash-fund",
+          "name": "Insured Cash Fund",
+          "product_line": "wealth",
+          "category": "mutual_funds",
+          "region": "US",
+          "risk_level": "low",
+          "liquidity": "high",
+          "typical_horizon": "short",
+          "return_type": "market_linked",
+          "regulator": "SEC",
+          "description": "A government money market fund for spare cash. Your money is FDIC insured, so there is no risk of loss.",
+          "key_features": [
+            "FDIC insured up to $250,000",
+            "Shares of a government money market fund, redeemable on any business day",
+            "Yield changes daily with the fund's holdings"
+          ],
+          "action": "distribution",
+          "build_terms": { "required_disclosures": ["Fund prospectus"] }
+        },
+        "term_sheet": { "inputs": { "fund_type": "government money market fund", "fund_expense_ratio_pct": 0.2, "deposit_insurance": "none: fund shares are securities, not deposits" } },
+        "firm": "Sample Brokerage (invented for the benchmark)"
+      },
+      "facts": { "regions": ["US"], "product_lines": ["wealth"], "categories": ["mutual_funds"], "regulators": ["sec", "fdic"] },
+      "regulatory": {
+        "region": "US",
+        "regulator": { "id": "fdic", "name": "Federal Deposit Insurance Corporation", "short_name": "FDIC" },
+        "law": [
+          {
+            "legal_ref": "us_fdic_12_cfr_328_102",
+            "kind": "regulation",
+            "title": "FDIC rule, 12 CFR 328.102: false advertising and misrepresentation of insured status",
+            "status": "in_force",
+            "summary": "No person may represent or imply that an uninsured financial product is insured or guaranteed by the FDIC, or use the FDIC's name or logo in a way that would imply it. A statement that a non-deposit product is FDIC insured is a prohibited misrepresentation.",
+            "url": "https://www.ecfr.gov/current/title-12/chapter-III/subchapter-B/part-328/subpart-B/section-328.102"
+          }
+        ]
+      },
+      "decided_by_mynt": { "covered_by_verified_licence": "met", "segments_within_grant": "met", "product_tests_pass": "met", "feasibility_current": "met" },
+      "expect": { "flagged": true, "not_met": ["claims_not_misleading"] }
+    }
+  ]
+}

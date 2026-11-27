@@ -1,0 +1,48 @@
+{
+  "$schema": "../schemas/benchmark-task-set.schema.json",
+  "agent": "program-red-team",
+  "version": 1,
+  "title": "Solana programs with a known answer (black-box red team)",
+  "description": "The same four programs, attacked from their compiled bytes and interface only. A bad sample passes only when Mynt, re-running the red team's proof of concept in a fresh sandbox of its own, confirms an exploit; the good sample passes only when none is confirmed. Each sample has to be compiled by Mynt's verifiable Solana build before it can be attacked.",
+  "workspaces": [
+    "program-red-team"
+  ],
+  "tasks": [
+    {
+      "id": "good-starter-ledger",
+      "sample": "good",
+      "description": "The coding agents' own Anchor starter: a ledger that records entries and moves no value. Nothing in it should block.",
+      "source_dir": "workspaces/coding-build/templates/solana-program",
+      "expect": {
+        "exploit_confirmed": false
+      }
+    },
+    {
+      "id": "bad-hidden-admin",
+      "sample": "bad",
+      "planted": "A hard-coded key can rewrite any ledger, and a ledger authority can be handed to an account that never signed.",
+      "source_dir": "benchmarks/fixtures/programs/hidden_admin",
+      "expect": {
+        "exploit_confirmed": true
+      }
+    },
+    {
+      "id": "bad-lamport-drain",
+      "sample": "bad",
+      "planted": "Closing a ledger pays its lamports to an account the caller names, which never signs.",
+      "source_dir": "benchmarks/fixtures/programs/lamport_drain",
+      "expect": {
+        "exploit_confirmed": true
+      }
+    },
+    {
+      "id": "bad-token-vault",
+      "sample": "bad",
+      "planted": "A vault that moves tokens out of a program-owned token account: a value-moving program.",
+      "source_dir": "benchmarks/fixtures/programs/token_vault",
+      "expect": {
+        "exploit_confirmed": true
+      }
+    }
+  ]
+}

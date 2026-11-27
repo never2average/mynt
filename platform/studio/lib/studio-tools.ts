@@ -723,6 +723,7 @@ export const riskModelDefinition = {
   thresholds: z.array(z.object({ name: modelField, value: z.union([z.number(), z.string().trim().min(1).max(200)]), meaning: modelText.optional() }).strict()).max(50),
 };
 
+const benchmarkAgent = z.enum(["coding", "product-desk", "governance-review", "connector", "program-audit", "program-red-team"]);
 // A platform key's type or an operational setting's name: the name Mynt's server reads it by.
 const platformKeyType = z.string().regex(/^[A-Z][A-Z0-9_]{2,60}$/);
 export const ADMIN_TOOLS = {
@@ -887,6 +888,21 @@ export const ADMIN_TOOLS = {
   run_firm_checks: z.object({ entity_id: uuid }).strict(),
   // The confidential service's announced builds (measurements and when each takes effect): a read, for Ask AI.
   list_enclave_releases: z.object({}).strict(),
+  // Agent benchmarks (/platform/benchmarks): the runs and what a run needs, one run's scoreboard, two runs compared,
+  // and Start run and Stop run. A run spends money: its cap is required, and Mynt holds it under BENCHMARK_CAP_USD.
+  list_benchmark_runs: z.object({ agent: benchmarkAgent.optional(), limit: z.number().int().min(1).max(200).optional() }).strict(),
+  get_benchmark_run: z.object({ run_id: uuid }).strict(),
+  compare_benchmark_runs: z.object({ baseline: uuid, candidate: uuid }).strict(),
+  start_benchmark_run: z
+    .object({
+      agent: benchmarkAgent,
+      cap_usd: z.number().positive().max(2000),
+      label: z.string().trim().min(1).max(120).optional(),
+      repository: z.string().trim().regex(/^[\w.-]+\/[\w.-]+$/).max(200).optional(),
+      host_restored: z.literal(true).optional(),
+    })
+    .strict(),
+  stop_benchmark_run: z.object({ run_id: uuid, reason: z.string().trim().min(3).max(300) }).strict(),
 } as const;
 
 export type AdminTool = keyof typeof ADMIN_TOOLS;

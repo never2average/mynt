@@ -19,7 +19,7 @@ Mynt Studio has a platform admin at `/platform` for Mynt's own staff. It covers 
 
 The platform admin has its own layout, not Studio's.
 
-- Its sidebar is titled "Mynt platform admin" and lists eight sections, each at its own address. There is no workspace switcher and there are no app folders.
+- Its sidebar is titled "Mynt platform admin" and lists nine sections, each at its own address. There is no workspace switcher and there are no app folders.
 - The labelled Back to Studio at the foot of the sidebar returns to Studio.
 - The header has the section's name, a search box ("Search...", Cmd+K) that opens the command bar, which searches the platform admin and asks its Ask AI, a Docs button and the theme switcher. On the Overview it also has Invite person. There is no scope tag.
 
@@ -32,9 +32,10 @@ The platform admin has its own layout, not Studio's.
 | Audit trails | `/platform/audit` |
 | Risk models | `/platform/risk-models` |
 | Risk register | `/platform/risk-register` |
+| Agent benchmarks | `/platform/benchmarks` |
 | Platform settings | `/platform/settings` |
 
-An opened workspace, firm, audit entry, risk model or risk is `/platform/<section>/<id>`.
+An opened workspace, firm, audit entry, risk model, risk or benchmark run is `/platform/<section>/<id>`.
 
 There are no Apps, People, Products or Licences sections. People are managed on each firm's and each workspace's Members tab, and a firm's products are its page's Products tab. `/platform/apps`, `/platform/people` and `/platform/products`, and anything under them, are 404s. Licences are reviewed on the Regulated firms section's Licences tab and on each firm's page.
 
@@ -219,6 +220,27 @@ The signals come from `ops_status`, so they show what it reports and no more:
 Drifted products are not available until `ops_status` counts them across firms.
 
 The register's routes are `GET /api/admin/risks?area=<area>` and `POST /api/admin/risks`. One risk's are `GET` and `POST /api/admin/risks/<riskId>`.
+
+### Agent benchmarks section
+
+Agent benchmarks (`/platform/benchmarks`) is where a Mynt admin measures the hosted agents. What a run does, how it is scored and capped, and the regression gate are in [Agent benchmarks](benchmarks.md).
+
+The page is one table of runs, newest first: the agent, the run's label, its status, tasks passed out of tasks scored, the pass rate, infrastructure failures, cost against the cap, the model and when it started. Above it are a search box and **Start run**. A figure nothing measured reads "Not measured" with the reason.
+
+With no runs yet, the page says so and lists, for each agent, how many tasks its set has, what a run needs, and whether one could start now. Where it couldn't, it says why.
+
+**Start run** opens a sheet: the agent, the cap in US dollars (required; the sheet shows the most it may be, `BENCHMARK_CAP_USD`), a label, and for the product desk the benchmark repository. It says plainly that the run spends money. Starting calls `start_benchmark_run`; a refusal is shown in the sheet in Mynt's own words.
+
+A run opens at `/platform/benchmarks/<id>`: a card with the run's facts (agent, task set, model, workspace folders' hashes, cap and what it has counted, why it stopped), then four tabs, each a table.
+
+| Tab | Shows |
+| --- | --- |
+| Tasks | Every task: outcome, the check that failed, cost, duration |
+| Failures | The tasks that failed, with the failure class (agent, infrastructure or harness) and Mynt's detail |
+| Cost | Each task's cost, its parts where they were recorded, and its budget |
+| Compare | This run against another run of the same agent, chosen from a list: each task's change, the deltas, and the regression gate's verdict |
+
+A run that is going has **Stop run**, which opens a sheet asking for the reason.
 
 ### Search and Ask AI
 
@@ -675,6 +697,7 @@ The settings that aren't secrets (`core/src/platform-settings.ts`), one row each
 | `DESK_MONTHLY_CAP_USD` | 50 | A number from 1 to 50000 |
 | `REVIEW_CASE_CAP_USD` | 3 | A number from 0.5 to 200 |
 | `REVIEW_MONTHLY_CAP_USD` | 60 | A number from 1 to 50000 |
+| `BENCHMARK_CAP_USD` | 25 | A number from 1 to 2000 |
 
 The precedence is the same as for keys: the server's environment where it sets the setting, then what an admin set in Mynt, then Mynt's default. The Source column says which. A setting the server's environment sets is a read-only row: "Set on the server; overrides what's set in Mynt".
 

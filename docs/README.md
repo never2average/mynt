@@ -51,6 +51,7 @@ The [reference index](reference.md) has a longer reading order for each role and
 | [liquidity-and-treasury.md](reference/liquidity-and-treasury.md) | Pools, the withdrawal queue and on-chain treasuries |
 | [solana-programs.md](reference/solana-programs.md) | On-chain programs, the mainnet gate and custody |
 | [confidential-computing.md](reference/confidential-computing.md) | The confidential service |
+| [benchmarks.md](reference/benchmarks.md) | Measuring the hosted agents: task sets, runs, the cap, the regression gate |
 | [operations.md](reference/operations.md) | Running a Mynt server |
 | [studio.md](reference/studio.md) | Mynt Studio, page by page |
 

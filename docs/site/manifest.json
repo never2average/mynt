@@ -214,6 +214,13 @@
           ]
         },
         {
+          "slug": "concepts/agent-benchmarks",
+          "title": "Agent benchmarks",
+          "sources": [
+            { "file": "docs/reference/benchmarks.md", "heading": "Agent benchmarks" }
+          ]
+        },
+        {
           "slug": "concepts/architecture",
           "title": "Architecture",
           "sources": [
