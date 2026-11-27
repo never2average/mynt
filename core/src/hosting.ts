@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { operationalSetting } from "./platform-settings.js";
-import type { Db } from "./db.js";
+import { inTransaction, type Db } from "./db.js";
 import { defaultGraceMs, failureMessage, GraceTracker } from "./transient.js";
 import { seal, open } from "./vault.js";
 import { boxOutput, type HostingCommandKind } from "./boxes.js";
@@ -167,6 +167,26 @@ export interface HostedApp {
   error?: string | null;
   // A compose app: the services Mynt serves, each on its own VM port and address.
   services?: HostedService[];
+  // Set on a copy that went online beside another (deployCandidate): it is served at an address of its own.
+  address_tag?: string;
+  updated_at: string;
+}
+// A second copy of an app, put online beside the one serving so it can be tested before anything is switched to it
+// (deployCandidate). It has a VM and an address of its own; promoteCandidate makes it the copy the app is served from,
+// dropCandidate removes it. One at a time per app.
+export interface HostedCandidate {
+  id: string;
+  app_id: string;
+  tenant_id: string;
+  build_id: string;
+  repository: string;
+  commit_sha: string;
+  port: number;
+  status: "deploying" | "running" | "failed" | "promoted" | "removed";
+  error: string | null;
+  services?: HostedService[];
+  address_tag: string;
+  created_at: string;
   updated_at: string;
 }
 export interface HostedService {
@@ -236,6 +256,36 @@ const TABLES = `
   ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS deployed_by uuid;
   -- Whose the tenant's current VM login is.
   ALTER TABLE financial_products.hosting_tenants ADD COLUMN IF NOT EXISTS access_granted_to uuid;
+  -- A copy that went online beside another keeps the address it was tested at (see hosted_candidates).
+  ALTER TABLE financial_products.hosted_apps ADD COLUMN IF NOT EXISTS address_tag text;
+  -- A second copy of an app, online beside the one serving while it is tested (direct hosting only): its own VM and
+  -- its own address. 'running' means it answers; 'promoted' that it became the serving copy (its VM is then the
+  -- app's); 'failed' and 'removed' that it is gone. replaced_vm_id and replaced_routes are what the switch left
+  -- behind (the copy that served until then), removed once calls in flight to it have had time to finish.
+  CREATE TABLE IF NOT EXISTS financial_products.hosted_candidates (
+    id uuid PRIMARY KEY,
+    app_id uuid NOT NULL REFERENCES financial_products.apps(id),
+    tenant_id uuid NOT NULL REFERENCES financial_products.hosting_tenants(id),
+    build_id uuid NOT NULL,
+    repository text NOT NULL,
+    commit_sha text NOT NULL,
+    port integer NOT NULL,
+    app_key_sealed text NOT NULL,
+    status text NOT NULL CHECK (status IN ('deploying', 'running', 'failed', 'promoted', 'removed')),
+    error text,
+    egress jsonb,
+    compose_file text,
+    services jsonb,
+    vm_id text,
+    runtime text,
+    address_tag text NOT NULL,
+    deployed_by uuid,
+    replaced_vm_id text,
+    replaced_routes jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS hosted_candidates_active_idx ON financial_products.hosted_candidates (app_id) WHERE status IN ('deploying', 'running');
 `;
 
 // gVisor's release, pinned and checked against its published SHA-512.
@@ -367,8 +417,30 @@ const toHostedApp = (r: Record<string, unknown>): HostedApp => ({
   ...(r.error ? { error: r.error as string } : {}),
   ...(r.services ? { services: (typeof r.services === "string" ? JSON.parse(r.services) : r.services) as HostedService[] } : {}),
   ...(r.deployed_by ? { deployed_by: r.deployed_by as string } : {}),
+  ...(r.address_tag ? { address_tag: r.address_tag as string } : {}),
   updated_at: iso(r.updated_at)!,
 });
+const toCandidate = (r: Record<string, unknown>): HostedCandidate => ({
+  id: r.id as string,
+  app_id: r.app_id as string,
+  tenant_id: r.tenant_id as string,
+  build_id: r.build_id as string,
+  repository: r.repository as string,
+  commit_sha: r.commit_sha as string,
+  port: Number(r.port),
+  status: r.status as HostedCandidate["status"],
+  error: (r.error as string | null) ?? null,
+  ...(r.services ? { services: (typeof r.services === "string" ? JSON.parse(r.services) : r.services) as HostedService[] } : {}),
+  address_tag: r.address_tag as string,
+  created_at: iso(r.created_at)!,
+  updated_at: iso(r.updated_at)!,
+});
+// Which record a deploy job works on: the copy an app is served from (hosted_apps, by app), or a second copy beside
+// it (hosted_candidates, by its own id).
+type CopyRef = { table: "hosted_apps"; key: "app_id"; id: string } | { table: "hosted_candidates"; key: "id"; id: string };
+const servingRef = (appId: string): CopyRef => ({ table: "hosted_apps", key: "app_id", id: appId });
+const candidateRef = (id: string): CopyRef => ({ table: "hosted_candidates", key: "id", id });
+const parsed = <V>(v: unknown, otherwise: V): V => ((typeof v === "string" ? JSON.parse(v) : v) ?? otherwise) as V;
 
 // What a VM runs at first boot: it installs its runtime, makes its own WireGuard key, registers, brings up
 // the tunnel with all traffic through it, and starts the agent loop that reconciles apps from its policy.
@@ -517,8 +589,16 @@ export class HostingService {
   async sampleUsage() {
     if (!isDirect(this.provider)) return;
     await this.meter.start("hosting");
-    const rows = (await this.db.query("SELECT app_id::text AS app_id, vm_id FROM financial_products.hosted_apps WHERE vm_id IS NOT NULL")).rows as { app_id: string; vm_id: string }[];
+    // A second copy being tested beside the serving one runs on a VM of its own: its time counts for the app too.
+    const rows = (
+      await this.db.query(
+        `SELECT app_id::text AS app_id, vm_id FROM financial_products.hosted_apps WHERE vm_id IS NOT NULL
+         UNION SELECT app_id::text, vm_id FROM financial_products.hosted_candidates WHERE vm_id IS NOT NULL AND status IN ('deploying', 'running')`,
+      )
+    ).rows as { app_id: string; vm_id: string }[];
     for (const r of rows) await this.sampleVm(r.app_id, r.vm_id).catch((e) => console.error(`Hosting usage of ${r.app_id}: ${(e as Error).message}`));
+    // Whatever an earlier switch or a failed copy left behind and couldn't remove then.
+    await this.cleanupCopies().catch((e) => console.error(`Hosting cleanup: ${(e as Error).name}`));
   }
 
   private usageTimer: NodeJS.Timeout | null = null;
@@ -659,18 +739,19 @@ export class HostingService {
 
   // Each hosted app has a VM of its own: the edge can then add that app's key, and only that app's, to its calls
   // to Mynt. First boot installs gVisor from its pinned, checksummed release (the only host it may reach then).
-  private async appVm(p: DirectHostingProvider, hosted: HostedApp): Promise<{ vmId: string; runtime: string }> {
-    const row = await this.one("SELECT vm_id, runtime FROM financial_products.hosted_apps WHERE app_id = $1", [hosted.app_id]);
+  private async appVm(p: DirectHostingProvider, hosted: HostedApp, ref: CopyRef = servingRef(hosted.app_id)): Promise<{ vmId: string; runtime: string }> {
+    const row = await this.one(`SELECT vm_id, runtime FROM financial_products.${ref.table} WHERE ${ref.key} = $1`, [ref.id]);
     if (row?.vm_id) return { vmId: row.vm_id as string, runtime: String(row.runtime ?? "runc") };
-    const vm = await p.createVm(`mynt-a-${hosted.app_id.slice(0, 8)}`);
-    await this.db.query("UPDATE financial_products.hosted_apps SET vm_id = $2 WHERE app_id = $1", [hosted.app_id, vm.id]);
+    // A second copy gets a VM of its own, named for the address it answers at.
+    const vm = await p.createVm(`mynt-a-${hosted.app_id.slice(0, 8)}${ref.table === "hosted_candidates" ? `-${hosted.address_tag}` : ""}`);
+    await this.db.query(`UPDATE financial_products.${ref.table} SET vm_id = $2 WHERE ${ref.key} = $1`, [ref.id, vm.id]);
     // A new machine: its run time counts from zero.
     await this.sampleVm(hosted.app_id, vm.id, true).catch(() => undefined);
     await p.setEgress(vm.id, [GVISOR_HOST]);
     const r = await p.run(vm.id, DIRECT_SETUP, { timeoutMs: 240_000 });
     if (r.exitCode !== 0) throw new Error(`VM setup failed: ${boxOutput(r.stderr || r.stdout).slice(-300)}`);
     const runtime = /runtime: runsc/.test(r.stdout) ? "runsc" : "runc";
-    await this.db.query("UPDATE financial_products.hosted_apps SET runtime = $2 WHERE app_id = $1", [hosted.app_id, runtime]);
+    await this.db.query(`UPDATE financial_products.${ref.table} SET runtime = $2 WHERE ${ref.key} = $1`, [ref.id, runtime]);
     return { vmId: vm.id, runtime };
   }
 
@@ -704,11 +785,12 @@ export class HostingService {
     return { composeFile: null, check: null };
   }
 
-  // Where an app is served.
-  appDomain(appId: string, expose = "web") {
-    const base = this.config?.appsDomain ? `${appId.slice(0, 8)}.${this.config.appsDomain}` : isDirect(this.provider) ? `mynt-${appId.slice(0, 8)}.style.dev` : null;
-    if (!base || expose === "web") return base;
-    return this.config?.appsDomain ? `${appId.slice(0, 8)}-${expose}.${this.config.appsDomain}` : `mynt-${appId.slice(0, 8)}-${expose}.style.dev`;
+  // Where an app is served. `tag`: a copy that went online beside another answers at an address of its own (the tag
+  // starts with a digit, which a service's expose name never does, so the two can't name the same address).
+  appDomain(appId: string, expose = "web", tag: string | null = null) {
+    const label = [appId.slice(0, 8), ...(tag ? [tag] : []), ...(expose === "web" ? [] : [expose])].join("-");
+    if (this.config?.appsDomain) return `${label}.${this.config.appsDomain}`;
+    return isDirect(this.provider) ? `mynt-${label}.style.dev` : null;
   }
 
   // Runs a script on a direct VM as a detached job and waits for it, so a long build isn't cut off at the
@@ -746,8 +828,8 @@ export class HostingService {
   }
 
   // An app's VM reaches exactly its allowlist; calls to Mynt's API get the app's key added at the edge.
-  private async syncEgress(p: DirectHostingProvider, vmId: string, appId: string) {
-    const row = await this.one("SELECT egress, app_key_sealed FROM financial_products.hosted_apps WHERE app_id = $1", [appId]);
+  private async syncEgress(p: DirectHostingProvider, vmId: string, ref: CopyRef) {
+    const row = await this.one(`SELECT egress, app_key_sealed FROM financial_products.${ref.table} WHERE ${ref.key} = $1`, [ref.id]);
     const hosts = ((typeof row?.egress === "string" ? JSON.parse(row.egress) : row?.egress) ?? []) as string[];
     const mynt = this.config?.publicUrl ? new URL(this.config.publicUrl).host : null;
     const inject = mynt ? { [mynt]: { [EDGE_KEY_HEADER]: this.appKey(row).key } } : {};
@@ -763,12 +845,19 @@ export class HostingService {
     sandbox: boolean,
     plan: { composeFile: string | null; check: ComposeCheck | null },
     settings: Record<string, string> = {},
+    ref: CopyRef = servingRef(hosted.app_id),
   ) {
-    const fail = (message: string) =>
-      this.db.query("UPDATE financial_products.hosted_apps SET status = 'stopped', error = $2, updated_at = now() WHERE app_id = $1", [hosted.app_id, message.slice(0, 1000)]);
+    const second = ref.table === "hosted_candidates";
+    // The serving copy stops with the reason. A second copy that didn't start is removed, VM and all: the copy that
+    // serves is untouched by it.
+    const fail = async (message: string) => {
+      if (!second) return void (await this.db.query("UPDATE financial_products.hosted_apps SET status = 'stopped', error = $2, updated_at = now() WHERE app_id = $1", [hosted.app_id, message.slice(0, 1000)]));
+      await this.db.query("UPDATE financial_products.hosted_candidates SET status = 'failed', error = $2, app_key_sealed = '', updated_at = now() WHERE id = $1 AND status = 'deploying'", [ref.id, message.slice(0, 1000)]);
+      await this.cleanupCopies().catch(() => undefined);
+    };
     try {
-      const { vmId, runtime } = await this.appVm(p, hosted);
-      await this.syncEgress(p, vmId, hosted.app_id);
+      const { vmId, runtime } = await this.appVm(p, hosted, ref);
+      await this.syncEgress(p, vmId, ref);
       const token = await this.sourceToken(hosted.deployed_by ?? tenant.developer_id ?? "", hosted.repository);
       const services = hosted.services ?? [];
       const origin = this.config?.publicUrl ?? "";
@@ -790,8 +879,12 @@ export class HostingService {
         ...settings,
       });
       if (r.exitCode !== 0) return void (await fail(boxOutput(r.output, [appKey, token ?? "", ...Object.values(settings)]).slice(-1000) || "The build was killed by its time limit"));
-      for (const x of services.length ? services : [{ port: hosted.port, domain: this.appDomain(hosted.app_id) }]) if (x.domain) await p.setRoute(vmId, x.domain, x.port);
-      await this.db.query("UPDATE financial_products.hosted_apps SET status = 'running', error = NULL, updated_at = now() WHERE app_id = $1 AND commit_sha = $2", [hosted.app_id, hosted.commit_sha]);
+      for (const x of services.length ? services : [{ port: hosted.port, domain: this.appDomain(hosted.app_id, "web", hosted.address_tag ?? null) }]) if (x.domain) await p.setRoute(vmId, x.domain, x.port);
+      // A second copy that was dropped while it deployed stays dropped.
+      await this.db.query(`UPDATE financial_products.${ref.table} SET status = 'running', error = NULL, updated_at = now() WHERE ${ref.key} = $1 AND commit_sha = $2${second ? " AND status = 'deploying'" : ""}`, [
+        ref.id,
+        hosted.commit_sha,
+      ]);
     } catch (e) {
       await fail((e as Error).message);
     }
@@ -880,14 +973,12 @@ export class HostingService {
     if (unknown.length) throw new Error(`Not a hosted setting: ${unknown.join(", ")}`);
     if (plan.check?.errors.length) throw new Error(`The compose file isn't accepted: ${plan.check.errors.join("; ")}`);
     if (plan.composeFile && !isDirect(this.provider)) throw new Error("Compose apps need direct hosting (Freestyle)");
-    const ports = (await this.hostedApps(tenant.id)).filter((h) => h.app_id !== app.id).flatMap((h) => [h.port, ...(h.services ?? []).map((x) => x.port)]);
-    const free = () => {
-      let n = 9000;
-      while (ports.includes(n)) n++;
-      ports.push(n);
-      return n;
-    };
-    const services: HostedService[] = (plan.check?.exposed ?? []).map((e) => ({ service: e.service, expose: e.expose, port: free(), domain: this.appDomain(app.id, e.expose) }));
+    // Deploying in place replaces the serving copy, so a second copy still being tested beside it is dropped.
+    await this.dropCandidate(app.id, "A newer deploy replaced it");
+    const free = await this.freePorts(tenant.id, app.id);
+    // A copy that was switched to keeps the address it has.
+    const tag = ((await this.one("SELECT address_tag FROM financial_products.hosted_apps WHERE app_id = $1", [app.id]))?.address_tag as string | null | undefined) ?? null;
+    const services: HostedService[] = (plan.check?.exposed ?? []).map((e) => ({ service: e.service, expose: e.expose, port: free(), domain: this.appDomain(app.id, e.expose, tag) }));
     const port = services[0]?.port ?? free();
     const r = await this.one(
       `INSERT INTO financial_products.hosted_apps (app_id, tenant_id, build_id, repository, commit_sha, port, app_key_sealed, status, deployed_by)
@@ -908,16 +999,168 @@ export class HostingService {
     return hosted;
   }
 
+  // The next free ports on a tenant, past those its other apps hold (and second copies of them being tested, which
+  // take the app's place when they are switched to).
+  private async freePorts(tenantId: string, appId: string) {
+    const ports = (await this.hostedApps(tenantId)).filter((h) => h.app_id !== appId).flatMap((h) => [h.port, ...(h.services ?? []).map((x) => x.port)]);
+    for (const c of (await this.db.query("SELECT port, services FROM financial_products.hosted_candidates WHERE tenant_id = $1 AND app_id <> $2 AND status IN ('deploying', 'running')", [tenantId, appId])).rows)
+      ports.push(Number(c.port), ...parsed<HostedService[]>(c.services, []).map((x) => x.port));
+    return () => {
+      let n = 9000;
+      while (ports.includes(n)) n++;
+      ports.push(n);
+      return n;
+    };
+  }
+
+  // ---- a second copy beside the one serving ----
+  //
+  // For an app that others call (a service, services.ts): the build put online must not take over until Mynt has
+  // tested it. deployCandidate puts it online on a VM of its own, at an address of its own, while the serving copy
+  // goes on answering. promoteCandidate then makes it the serving copy in one transaction (with whatever points at
+  // it), and the copy that served until then is removed once calls in flight to it have had time to finish;
+  // dropCandidate removes the second copy instead, and the serving one never noticed. Direct hosting only: the
+  // gateway mode has one VM per tenant and one container per app.
+
+  // How long the copy that served until a switch stays up for calls already in flight to it (a vendor call may take
+  // ten seconds).
+  drainMs = 15_000;
+
+  async candidate(id: string): Promise<HostedCandidate | undefined> {
+    const r = await this.one("SELECT * FROM financial_products.hosted_candidates WHERE id::text = $1", [id]);
+    return r && toCandidate(r);
+  }
+
+  // An app's second copies, newest first: the one being tested, and those that were switched to, failed or removed.
+  async candidatesOf(appId: string, limit = 20): Promise<HostedCandidate[]> {
+    return (await this.db.query("SELECT * FROM financial_products.hosted_candidates WHERE app_id::text = $1 ORDER BY created_at DESC LIMIT $2", [appId, limit])).rows.map((r) => toCandidate(r as Record<string, unknown>));
+  }
+
+  async deployCandidate(
+    tenant: Tenant,
+    app: { id: string },
+    build: { id: string; repository: string; commit_sha: string },
+    appKey: string,
+    sandbox: boolean,
+    egress: string[] = [],
+    plan: { composeFile: string | null; check: ComposeCheck | null } = { composeFile: null, check: null },
+    deployedBy: string | null = null,
+    settings: Record<string, string> = {},
+  ): Promise<HostedCandidate> {
+    const p = this.provider;
+    if (!isDirect(p)) throw new Error("A second copy beside the one serving needs direct hosting: the gateway mode runs one container per app on one VM");
+    const unknown = Object.keys(settings).filter((k) => !HOSTED_SETTINGS.includes(k));
+    if (unknown.length) throw new Error(`Not a hosted setting: ${unknown.join(", ")}`);
+    if (plan.check?.errors.length) throw new Error(`The compose file isn't accepted: ${plan.check.errors.join("; ")}`);
+    // One at a time: a newer build takes the place of one still being tested.
+    await this.dropCandidate(app.id, "A newer build was put online in its place");
+    const id = randomUUID();
+    const tag = `0${id.slice(0, 8)}`;
+    const free = await this.freePorts(tenant.id, app.id);
+    const services: HostedService[] = (plan.check?.exposed ?? []).map((e) => ({ service: e.service, expose: e.expose, port: free(), domain: this.appDomain(app.id, e.expose, tag) }));
+    const port = services[0]?.port ?? free();
+    const row = (await this.one(
+      `INSERT INTO financial_products.hosted_candidates (id, app_id, tenant_id, build_id, repository, commit_sha, port, app_key_sealed, status, egress, compose_file, services, address_tag, deployed_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'deploying', $9, $10, $11, $12, $13) RETURNING *`,
+      [id, app.id, tenant.id, build.id, build.repository, build.commit_sha, port, seal(appKey, sandbox) + (sandbox ? ":sandbox" : ":live"), JSON.stringify(egress), plan.composeFile, services.length ? JSON.stringify(services) : null, tag, deployedBy],
+    ))!;
+    const copy: HostedApp = { app_id: app.id, tenant_id: tenant.id, build_id: build.id, repository: build.repository, commit_sha: build.commit_sha, port, status: "deploying", ...(services.length ? { services } : {}), address_tag: tag, ...(deployedBy ? { deployed_by: deployedBy } : {}), updated_at: iso(row.updated_at)! };
+    this.pending = this.deployDirect(p, tenant, copy, appKey, sandbox, plan, settings, candidateRef(id));
+    return toCandidate(row);
+  }
+
+  /**
+   * The switch: the second copy becomes the one the app is served from. `apply` runs in the same transaction, so what
+   * points at the copy (a service's offering and its signing secret) changes with it or not at all. Null when there
+   * is nothing to switch (the copy isn't running any more, or the app was taken offline meanwhile).
+   */
+  async promoteCandidate(candidateId: string, apply: (tx: Pick<Db, "query">, c: HostedCandidate) => Promise<void> = async () => undefined): Promise<HostedCandidate | null> {
+    const done = await inTransaction(this.db, async (tx) => {
+      const c = (await tx.query("SELECT * FROM financial_products.hosted_candidates WHERE id = $1 AND status = 'running' FOR UPDATE", [candidateId])).rows[0] as Record<string, unknown> | undefined;
+      if (!c) return null;
+      const old = (await tx.query("SELECT vm_id, services, address_tag FROM financial_products.hosted_apps WHERE app_id = $1 FOR UPDATE", [c.app_id])).rows[0] as Record<string, unknown> | undefined;
+      if (!old) return null;
+      const routes = parsed<HostedService[]>(old.services, []).map((x) => x.domain);
+      await tx.query(
+        `UPDATE financial_products.hosted_apps SET tenant_id = $2, build_id = $3, repository = $4, commit_sha = $5, port = $6, app_key_sealed = $7, status = 'running', error = NULL, egress = $8,
+           compose_file = $9, services = $10, vm_id = $11, runtime = $12, address_tag = $13, deployed_by = $14, updated_at = now() WHERE app_id = $1`,
+        [c.app_id, c.tenant_id, c.build_id, c.repository, c.commit_sha, c.port, c.app_key_sealed, c.egress == null ? null : JSON.stringify(parsed(c.egress, [])), c.compose_file, c.services == null ? null : JSON.stringify(parsed(c.services, [])), c.vm_id, c.runtime, c.address_tag, c.deployed_by],
+      );
+      // The VM is the app's now. What served until this moment is kept by name, to be removed after the drain.
+      await tx.query("UPDATE financial_products.hosted_candidates SET status = 'promoted', vm_id = NULL, app_key_sealed = '', replaced_vm_id = $2, replaced_routes = $3, updated_at = now() WHERE id = $1", [
+        candidateId,
+        old.vm_id ?? null,
+        JSON.stringify(routes.length ? routes : [this.appDomain(c.app_id as string, "web", (old.address_tag as string | null) ?? null)]),
+      ]);
+      const promoted = toCandidate({ ...c, status: "promoted" });
+      await apply(tx, promoted);
+      return promoted;
+    });
+    if (!done) return null;
+    await new Promise((r) => setTimeout(r, this.drainMs));
+    await this.cleanupCopies().catch((e) => console.error(`Hosting cleanup after a switch: ${(e as Error).name}`));
+    return done;
+  }
+
+  /** Removes an app's second copy, if one is deploying or being tested: its routes and its VM. The serving copy is untouched. */
+  async dropCandidate(appId: string, why: string, to: "failed" | "removed" = "removed"): Promise<HostedCandidate | null> {
+    const r = await this.one(
+      "UPDATE financial_products.hosted_candidates SET status = $2, error = COALESCE(error, $3), app_key_sealed = '', updated_at = now() WHERE app_id::text = $1 AND status IN ('deploying', 'running') RETURNING *",
+      [appId, to, why.slice(0, 1000)],
+    );
+    if (!r) return null;
+    await this.cleanupCopies().catch((e) => console.error(`Hosting cleanup of a second copy: ${(e as Error).name}`));
+    return toCandidate(r);
+  }
+
+  // Removes what second copies left behind: the VM and routes of one that failed or was dropped, and, after a switch,
+  // the copy that served until then (once drainMs has passed). A removal the provider didn't confirm stays recorded
+  // and is tried again (each deploy, each drop, and the usage worker's rounds), so no VM is left running unnoticed.
+  async cleanupCopies(): Promise<void> {
+    const p = this.provider;
+    if (!isDirect(p)) return;
+    const gone = (await this.db.query("SELECT id, app_id::text AS app_id, vm_id, services, address_tag FROM financial_products.hosted_candidates WHERE status IN ('failed', 'removed') AND vm_id IS NOT NULL")).rows;
+    for (const c of gone) {
+      const services = parsed<HostedService[]>(c.services, []);
+      for (const domain of services.length ? services.map((x) => x.domain) : [this.appDomain(c.app_id as string, "web", c.address_tag as string)]) if (domain) await p.removeRoute(domain).catch(() => undefined);
+      await this.sampleVm(c.app_id as string, c.vm_id as string).catch(() => undefined);
+      try {
+        await p.deleteVm(c.vm_id as string);
+        await this.db.query("UPDATE financial_products.hosted_candidates SET vm_id = NULL WHERE id = $1", [c.id]);
+      } catch {
+        // kept, and tried again
+      }
+    }
+    const replaced = (
+      await this.db.query(
+        "SELECT id, app_id::text AS app_id, replaced_vm_id, replaced_routes FROM financial_products.hosted_candidates WHERE status = 'promoted' AND replaced_vm_id IS NOT NULL AND updated_at <= now() - make_interval(secs => $1::double precision)",
+        [this.drainMs / 1000],
+      )
+    ).rows;
+    for (const c of replaced) {
+      for (const domain of parsed<(string | null)[]>(c.replaced_routes, [])) if (domain) await p.removeRoute(domain).catch(() => undefined);
+      await this.sampleVm(c.app_id as string, c.replaced_vm_id as string).catch(() => undefined);
+      try {
+        await p.deleteVm(c.replaced_vm_id as string);
+        await this.db.query("UPDATE financial_products.hosted_candidates SET replaced_vm_id = NULL, replaced_routes = NULL WHERE id = $1", [c.id]);
+      } catch {
+        // kept, and tried again
+      }
+    }
+  }
+
   async undeploy(appId: string): Promise<boolean> {
-    const r = (await this.db.query("DELETE FROM financial_products.hosted_apps WHERE app_id = $1 RETURNING tenant_id, services, vm_id", [appId])).rows[0] as
-      | { tenant_id: string; services: unknown; vm_id: string | null }
+    // A second copy being tested goes with it: there is nothing left for it to take over from.
+    await this.dropCandidate(appId, "The app was taken offline");
+    const r = (await this.db.query("DELETE FROM financial_products.hosted_apps WHERE app_id = $1 RETURNING tenant_id, services, vm_id, address_tag", [appId])).rows[0] as
+      | { tenant_id: string; services: unknown; vm_id: string | null; address_tag: string | null }
       | undefined;
     if (!r) return false;
     const services = ((typeof r.services === "string" ? JSON.parse(r.services) : r.services) ?? []) as HostedService[];
     const p = this.provider;
     if (isDirect(p)) {
       // Deleting the app's VM ends it, its rules (egress, the key) and its routes.
-      for (const domain of services.length ? services.map((x) => x.domain) : [this.appDomain(appId)]) if (domain) await p.removeRoute(domain).catch(() => undefined);
+      for (const domain of services.length ? services.map((x) => x.domain) : [this.appDomain(appId, "web", r.address_tag ?? null)]) if (domain) await p.removeRoute(domain).catch(() => undefined);
       // Its last run time, before the VM (and its usage) goes.
       if (r.vm_id) await this.sampleVm(appId, r.vm_id).catch(() => undefined);
       if (r.vm_id) await p.deleteVm(r.vm_id).catch(() => undefined);
@@ -932,8 +1175,12 @@ export class HostingService {
   async suspend(tenantId: string): Promise<Tenant | undefined> {
     const r = await this.one("UPDATE financial_products.hosting_tenants SET status = 'suspended', updated_at = now() WHERE id = $1 RETURNING *", [tenantId]);
     const p = this.provider;
-    if (r && isDirect(p)) for (const v of await this.appVms(tenantId)) await p.pause(v.vm_id).catch(() => undefined);
-    else if (r?.vm_id && p && !isDirect(p)) await p.powerOff(r.vm_id as string).catch(() => undefined);
+    if (r && isDirect(p)) {
+      for (const v of await this.appVms(tenantId)) await p.pause(v.vm_id).catch(() => undefined);
+      // Second copies being tested are removed outright: nothing of a suspended tenant keeps running.
+      for (const c of (await this.db.query("SELECT app_id::text AS app_id FROM financial_products.hosted_candidates WHERE tenant_id = $1 AND status IN ('deploying', 'running')", [tenantId])).rows)
+        await this.dropCandidate(c.app_id as string, "The workspace's hosting was suspended");
+    } else if (r?.vm_id && p && !isDirect(p)) await p.powerOff(r.vm_id as string).catch(() => undefined);
     return r && toTenant(r);
   }
 

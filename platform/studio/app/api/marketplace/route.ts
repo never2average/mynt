@@ -7,6 +7,7 @@ import { asDeveloper, json } from "@/lib/studio-route";
 export const dynamic = "force-dynamic";
 
 const APP_ID = /^[A-Za-z0-9_-]{1,200}$/;
+const OFFERING_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // The regions of an app's products (get_product), for Browse vendors: the Marketplace opens filtered to them.
 async function appRegions(mynt: Client, productIds: string[]): Promise<string[]> {
@@ -29,11 +30,20 @@ async function appRegions(mynt: Client, productIds: string[]): Promise<string[]>
 export async function GET(req: Request) {
   const appId = new URL(req.url).searchParams.get("app");
   if (appId !== null && !APP_ID.test(appId)) return json({ error: "bad_request" }, 400);
+  // ?offering=<id>: that offering too when it isn't in the list, which is how a service in testing is reached (its
+  // builder gives the id). Anything that isn't an offering id is only a details link, as before.
+  const named = new URL(req.url).searchParams.get("offering");
+  const offeringId = named && OFFERING_ID.test(named) ? named.toLowerCase() : null;
   return asDeveloper("loading the marketplace", async (mynt) => {
     const tools = await listMyntTools(mynt);
     if (!tools.some((t) => t.name === "list_vendor_offerings")) return json({ supported: false });
     const terms = tools.find((t) => t.name === "subscribe_vendor_service")?.inputSchema as { properties?: Record<string, unknown> } | undefined;
     const offerings = fromOfferings(await callStudioTool(mynt, "list_vendor_offerings", {}));
+    if (offeringId && !offerings.some((o) => o.id === offeringId)) {
+      const accepts = (tools.find((t) => t.name === "list_vendor_offerings")?.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+      // A Mynt from before services could be tested in Staging takes no offering_id: nothing is added.
+      if (accepts && "offering_id" in accepts) offerings.push(...fromOfferings(await callStudioTool(mynt, "list_vendor_offerings", { offering_id: offeringId })).filter((o) => o.id === offeringId && o.inTesting));
+    }
     const apps = appsFrom(await callStudioTool(mynt, "list_my_apps", {}));
     let forApp: ForApp | null = null;
     if (appId) {

@@ -286,6 +286,8 @@ export const STUDIO_TOOLS = {
       region: z.string().regex(/^[A-Z]{2}$/).optional(),
       service_type: z.string().regex(/^[a-z][a-z0-9_]{0,59}$/).optional(),
       category: z.enum(["identity", "kyc", "account_data", "analytics", "credit_bureau", "documents", "esign", "mandate", "fraud", "ramp", "other"]).optional(),
+      // One offering by its id: a service in testing, whose builder gave the id (never in the list otherwise).
+      offering_id: uuid.optional(),
     })
     .strict(),
   subscribe_vendor_service: z

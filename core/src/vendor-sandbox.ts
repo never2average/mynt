@@ -4,7 +4,7 @@ import { RateLimiter } from "./rate-limit.js";
 import type { Store } from "./store.js";
 import { fixtureValue } from "./vault.js";
 import { signBody, type VendorResult } from "./vendor-call.js";
-import { conformanceCases, conformanceSecret, getOffering, PRACTICE_REF, QUOTE_MAX_SECONDS, schemaProblems, serviceType, vendorLicenceGap, type CaseResult, type Offering, type ServiceType } from "./vendors.js";
+import { conformanceCases, conformanceSecret, getOffering, PRACTICE_REF, QUOTE_MAX_SECONDS, redactTranscript, schemaProblems, serviceType, vendorLicenceGap, type CaseResult, type Offering, type ServiceType } from "./vendors.js";
 
 // Mynt's vendor sandbox: a practice endpoint Mynt serves itself for every offering, so a vendor that has no test
 // endpoint yet can see the conformance test pass (and read exactly what Mynt sends and expects) before wiring its own.
@@ -382,7 +382,16 @@ export async function runPractice(store: Store, o: Offering, t: ServiceType, by:
   );
   const passed = cases.length > 0 && cases.every((c) => c.passed);
   const id = randomUUID();
-  await store.db.query(`INSERT INTO ${T}.vendor_practice_runs (id, offering_id, kind, passed, cases, run_by) VALUES ($1, $2, 'practice', $3, $4, $5)`, [id, o.id, passed, JSON.stringify(cases), by]);
+  // Kept with the run, as it is shown: fixture requests and the sandbox's answers, the signature's digest left out and
+  // the secret (and anything shaped like one) scrubbed.
+  await store.db.query(`INSERT INTO ${T}.vendor_practice_runs (id, offering_id, kind, passed, cases, run_by, transcript) VALUES ($1, $2, 'practice', $3, $4, $5, $6)`, [
+    id,
+    o.id,
+    passed,
+    JSON.stringify(cases),
+    by,
+    JSON.stringify(redactTranscript(transcript, [secret])),
+  ]);
   // The real test also checks the vendor's licences; a practice run only says so.
   const gap = await vendorLicenceGap(store, o, t);
   const endpoint = vendorSandboxUrl(o.id);

@@ -315,8 +315,38 @@ export function ServiceOverview({ service, onAction }: { service: ServiceView; o
           ["Endpoint", endpointWords(service)],
           ["Price", priceWords(service.offering.price)],
           ["Standard terms", service.terms.current ? `v${service.terms.current.version}` : "None yet"],
+          ["Build serving", short(service.hosted?.online ? service.hosted.buildId : null) ?? "None yet"],
+          // A new build never replaces the serving one before Mynt has passed it.
+          ["New build", service.newBuild ? <span key="n" data-new-build={service.newBuild.status}>{`${short(service.newBuild.buildId)} · ${service.newBuild.statusWords}`}</span> : "None being tested"],
+          [
+            "Sandbox testing",
+            service.testing.open ? (
+              <span key="t" data-sandbox-testing="open">
+                Open. Offering id <code className="text-xs break-all">{service.testing.offeringId}</code>
+              </span>
+            ) : (
+              <span key="t" data-sandbox-testing="closed">
+                {service.testing.words || "Not open"}
+              </span>
+            ),
+          ],
         ]}
       />
+      {service.newBuild && (
+        <p className="rounded-lg border bg-muted/40 px-3 py-2 text-sm" role="status" data-new-build-note>
+          {`Build ${short(service.newBuild.buildId)} is online beside build ${short(service.newBuild.servingBuildId) ?? NOT_RECORDED}. ${service.newBuild.note}`}
+        </p>
+      )}
+      {service.testing.open && service.testing.how && (
+        <p className="rounded-lg border bg-muted/40 px-3 py-2 text-sm" role="status" data-sandbox-testing-note>
+          {`${service.testing.words}. ${service.testing.how}`}
+        </p>
+      )}
+      {service.firmOnly && (
+        <p className="rounded-lg border bg-muted/40 px-3 py-2 text-sm" role="status" data-firm-only>
+          {service.firmOnly}
+        </p>
+      )}
       {service.offering.statusNote && (
         <p className="rounded-lg border bg-muted/40 px-3 py-2 text-sm" role="status" data-status-note>
           {service.offering.statusNote}
@@ -407,7 +437,39 @@ export function ContractTab({ service }: { service: ServiceView }) {
 
 // ---- Conformance ----
 
-/** One run, opened from its row: its cases (a practice run keeps only its failures; its transcript shows in Run practice test). */
+const pretty = (v: unknown) => (v === null || v === undefined ? "Nothing" : typeof v === "string" ? v : JSON.stringify(v, null, 2))
+
+/** A run's transcript as a table: what Mynt sent for each case, what came back, and what Mynt expected. Already redacted. */
+export function TranscriptTable({ run }: { run: ServiceRun }) {
+  const t = run.transcript ?? []
+  return (
+    <section className="flex flex-col gap-1.5" data-run-transcript={run.runId}>
+      <h3 className="text-sm font-semibold">Transcript</h3>
+      <p className="text-xs text-muted-foreground">What Mynt sent and what came back. The signing secret, the signature&apos;s digest and any credential are left out.</p>
+      <div className="overflow-auto rounded-lg border">
+        <AdminTable
+          head={["Case", "Mynt sent", "It answered", "Mynt expected"]}
+          rowKeys={t.map((x, i) => `${x.case}:${i}`)}
+          rows={t.map((x) => [
+            x.case.replace(/_/g, " "),
+            <pre key="q" className="max-w-md min-w-56 text-xs break-words whitespace-pre-wrap" data-transcript-request>
+              {`${x.method} ${x.path}\n${x.headers.map(([k, v]) => `${k}: ${v}`).join("\n")}\n\n${pretty(x.body)}`}
+            </pre>,
+            <pre key="a" className="max-w-md min-w-56 text-xs break-words whitespace-pre-wrap" data-transcript-response>
+              {`${x.httpStatus === null ? `No answer${x.error ? ` (${x.error})` : ""}` : `HTTP ${x.httpStatus}`}\n\n${pretty(x.answer)}`}
+            </pre>,
+            <span key="e" className="block min-w-40 whitespace-normal">
+              {x.expected}
+            </span>,
+          ])}
+          empty="Nothing was sent in this run."
+        />
+      </div>
+    </section>
+  )
+}
+
+/** One run, opened from its row: its cases, then its transcript (real runs and practice runs alike). */
 export function RunSheet({ run, service, onClose, onAction }: { run: ServiceRun | null; service: ServiceView; onClose: () => void; onAction: (a: ServiceAction) => void }) {
   const practice = run?.kind === "practice"
   const rows = run ? (run.cases ?? run.failures.map((f) => ({ case: f.case, passed: false, httpStatus: null, problems: f.problems }))) : []
@@ -416,14 +478,25 @@ export function RunSheet({ run, service, onClose, onAction }: { run: ServiceRun 
       id="service-run"
       open={run !== null}
       onClose={onClose}
-      title={practice ? "Practice run" : "Conformance run"}
-      description={practice ? "Mynt's test against its own sandbox for this service type. It never counts as conformance." : "Mynt's own test of the service at its hosted address: each case, and what was wrong where one failed."}
+      title={practice ? "Practice run" : run?.newBuild ? "Conformance run on a new build" : "Conformance run"}
+      description={
+        practice
+          ? "Mynt's test against its own sandbox for this service type. It never counts as conformance."
+          : run?.newBuild
+            ? "Mynt's own test of a new build, online beside the build that was serving. The serving build kept answering throughout."
+            : "Mynt's own test of the service at its hosted address: each case, and what was wrong where one failed."
+      }
     >
       {run && (
         <div className="flex flex-col gap-3" data-run-detail={run.runId}>
           <p className="text-sm">
             {when(run.at)} · {run.passed ? "Passed" : "Didn't pass"} · {casesWords(run)} cases passed · Build {short(runBuild(service, run)) ?? NOT_RECORDED}
           </p>
+          {run.outcome && (
+            <p className="rounded-lg border bg-muted/40 px-3 py-2 text-sm" role="status" data-run-outcome>
+              {run.outcome}
+            </p>
+          )}
           <div className="overflow-auto rounded-lg border">
             <AdminTable
               head={["Case", "Result", "HTTP", "Problems"]}
@@ -432,13 +505,21 @@ export function RunSheet({ run, service, onClose, onAction }: { run: ServiceRun 
               empty={run.passed ? "Every case passed. Mynt keeps the cases of real runs only." : "Mynt kept no cases for this run."}
             />
           </div>
-          {practice && (
+          {run.transcript ? (
+            <TranscriptTable run={run} />
+          ) : practice ? (
             <div className="flex flex-col gap-2" data-practice-transcript-note>
-              <p className="text-sm text-muted-foreground">Mynt doesn&apos;t keep a practice run&apos;s transcript. Run practice test shows it, with the signing secret left out, right after a run.</p>
+              <p className="text-sm text-muted-foreground">
+                {run.transcriptNote ?? "Mynt kept no transcript for this practice run."} Run practice test shows it, with the signing secret left out, right after a run.
+              </p>
               <div>
                 <ActionButton action="practice" onAction={onAction} />
               </div>
             </div>
+          ) : (
+            <p className="text-sm text-muted-foreground" data-transcript-note>
+              {`Transcript: ${run.transcriptNote ?? `${NOT_RECORDED}. Mynt kept none for this run.`}`}
+            </p>
           )}
         </div>
       )}
@@ -449,18 +530,22 @@ export function RunSheet({ run, service, onClose, onAction }: { run: ServiceRun 
 export function ConformanceTab({ service, onAction }: { service: ServiceView; onAction: (a: ServiceAction) => void }) {
   const [open, setOpen] = useState<ServiceRun | null>(null)
   const runs = service.conformance.runs
-  const last = runs.find((r) => r.kind === "conformance") ?? null
+  // The run that stands is one against the build that serves: a test of a new build that didn't take over isn't it.
+  const last = runs.find((r) => r.kind === "conformance" && !r.newBuild) ?? null
+  const notSwitched = runs.find((r) => r.newBuild) ?? null
   return (
     <div className="flex flex-col gap-4" data-service-conformance>
       <Card
         id="conformance"
         title="Conformance"
-        subtitle="Mynt tests each build that goes online before the service is listed. Practice runs are against Mynt's sandbox and never count."
+        subtitle="Mynt tests each build before it serves anyone. A new build goes online beside the one serving and takes over only if it passes. Practice runs are against Mynt's sandbox and never count."
         fields={[
           ["Status", service.offering.statusWords || "Not known"],
           ["Needs conformance", <span key="n" data-conformance-needed={service.conformance.needed}>{service.conformance.needed ? "Yes: the build online hasn't passed Mynt's test" : "No"}</span>],
           ["Last real run", last ? `${last.passed ? "Passed" : "Didn't pass"} ${when(last.at)}` : "Not run yet"],
           ["Build tested", short(service.conformance.testedBuildId) ?? NOT_RECORDED],
+          ["New build", service.newBuild ? `${short(service.newBuild.buildId)} · ${service.newBuild.statusWords}` : "None being tested"],
+          ["Last new build that didn't take over", notSwitched ? <span key="x" data-not-switched={notSwitched.runId}>{`${short(notSwitched.buildId) ?? NOT_RECORDED} · ${when(notSwitched.at)}`}</span> : "None"],
         ]}
         actions={
           <>
@@ -479,13 +564,13 @@ export function ConformanceTab({ service, onAction }: { service: ServiceView; on
               {when(r.at)}
             </button>,
             <span key="k" data-run-kind={r.kind}>
-              {r.kind === "practice" ? "Practice" : "Conformance"}
+              {r.kind === "practice" ? "Practice" : r.newBuild ? "Conformance, new build" : "Conformance"}
             </span>,
             <span key="b" data-run-build>
               {short(runBuild(service, r)) ?? NOT_RECORDED}
             </span>,
             <span key="r" data-run-result={r.passed ? "passed" : "failed"}>
-              {r.passed ? "Passed" : "Didn't pass"}
+              {r.newBuild ? (r.passed ? "Passed, didn't take over" : "Didn't pass: removed") : r.passed ? "Passed" : "Didn't pass"}
             </span>,
             casesWords(r),
             r.runBy ?? (r.kind === "conformance" ? "Mynt" : "—"),
@@ -562,12 +647,15 @@ export function SubscribersTab({ service }: { service: ServiceView }) {
         title="Subscribers"
         subtitle="The firms and apps that plugged this service in, with the terms version each accepted."
         fields={[
-          ["Subscriptions", String(new Set(subs.map((s) => s.subscriptionId)).size)],
-          ["Live", String(new Set(subs.filter((s) => s.environment === "Live").map((s) => s.subscriptionId)).size)],
+          // Withheld is not none: a member from another firm is told so, never shown 0.
+          ["Subscriptions", service.firmOnly ? "Not shown" : String(new Set(subs.map((s) => s.subscriptionId)).size)],
+          ["Live", service.firmOnly ? "Not shown" : String(new Set(subs.filter((s) => s.environment === "Live").map((s) => s.subscriptionId)).size)],
+          ["Sandbox testing", service.testing.open ? `Open by offering id ${service.testing.offeringId}` : service.testing.words || "Not open"],
         ]}
       />
       <TableBox id="subscribers">
         <AdminTable
+          unavailable={service.firmOnly}
           head={["Firm", "App", "Terms version accepted", "Since", "Live / sandbox", "Agreement status"]}
           rowKeys={subs.map((s, i) => `${s.subscriptionId}:${i}`)}
           rows={subs.map((s) => [
@@ -580,7 +668,7 @@ export function SubscribersTab({ service }: { service: ServiceView }) {
             </span>,
             s.agreementStatus ? s.agreementStatus.replace(/_/g, " ") : s.subscriptionStatus === "active" ? "No agreement recorded" : "Ended",
           ])}
-          empty="No subscribers yet. Builders subscribe from the Marketplace once the service is in Production with standard terms."
+          empty="No subscribers yet. In Staging, builders you give the offering id to subscribe in the sandbox. In Production, with standard terms, builders subscribe from the Marketplace."
         />
       </TableBox>
     </div>

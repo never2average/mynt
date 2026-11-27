@@ -653,7 +653,7 @@ With `FREESTYLE_API_KEY` set, Mynt drives [Freestyle](https://www.freestyle.sh) 
 
 **The builder logs in.** `vm_access` returns SSH commands for their own Linux user (in the docker group, no sudo) on each of their apps' VMs, valid for a few hours. They work as VS Code Remote-SSH hosts too, and new logins revoke the last.
 
-**A service's signing secret.** A [service](services.md#the-endpoint-and-the-signing-secret) is handed its vendor signing secret as `MYNT_VENDOR_SIGNING_SECRET` in the deploy job's environment, the only hosted setting besides Mynt's own. Calls from Mynt to a service's address never pass the edge rule that adds a key: that rule covers only a project's own calls out to Mynt.
+**A service's signing secret.** A [service](services.md#the-endpoint-and-the-signing-secret) is handed its vendor signing secret as `MYNT_VENDOR_SIGNING_SECRET` in the deploy job's environment, the only hosted setting besides Mynt's own. A new build of a service goes online on a second VM beside the one serving, with a secret of its own, and takes over only after Mynt's test passes (see [A new build and conformance](services.md#a-new-build-and-conformance)). Calls from Mynt to a service's address never pass the edge rule that adds a key: that rule covers only a project's own calls out to Mynt.
 
 **The kill switch** pauses every app VM. `undeploy_app` deletes the app's VM, which takes its rules and key with it.
 

@@ -41,6 +41,8 @@ export const APP_REMOVAL_STEPS: { table: string; where: string; list?: string }[
   { table: "app_releases", where: "t.app_id = $1", list: "version" },
   { table: "requests", where: "t.app_id = $1" },
   { table: "hosting_commands", where: "t.app_id = $1" },
+  // The record of second copies that were tested beside the serving one (hosting.ts): history only, once their VMs are gone.
+  { table: "hosted_candidates", where: "t.app_id = $1" },
   { table: "solana_program_events", where: `t.program IN ${PROGRAMS}` },
   { table: "solana_program_versions", where: `t.program IN ${PROGRAMS}` },
   { table: "solana_program_flags", where: `t.program IN ${PROGRAMS}` },
@@ -116,6 +118,11 @@ const ENTANGLED: { table: string; where: string; why: string }[] = [
     why: "another program's versions were deployed from one of this app's builds",
   },
   { table: "hosted_apps", where: `t.build_id IN ${BUILDS} AND t.app_id <> $1`, why: "another hosted app runs one of this app's builds" },
+  {
+    table: "hosted_candidates",
+    where: "t.app_id = $1 AND (t.status IN ('deploying', 'running') OR t.vm_id IS NOT NULL OR t.replaced_vm_id IS NOT NULL)",
+    why: "a copy of it on Mynt's hosting hasn't been removed yet (Mynt retries; try again shortly)",
+  },
 ];
 
 // Single-column foreign keys into the tables remove_app deletes from, and which of their rows go.

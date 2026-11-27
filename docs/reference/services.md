@@ -103,13 +103,24 @@ The app starter (`templates/mynt-app/`) is unchanged: an app never serves a serv
 
 **The signing secret reaches the service only as a hosted setting.**
 
-- Each service has one signing secret, sealed with `MYNT_VAULT_KEY`.
+- The build that serves has one signing secret, sealed with `MYNT_VAULT_KEY`.
 - `deploy_app` hands it to the service as `MYNT_VENDOR_SIGNING_SECRET`, in the deploy job's environment, never in the job's text. It is scrubbed from a failed deploy's output.
-- It is never shown: not by `create_service`, `get_service`, `list_my_offerings`, nor to the browser. It is never in the repository.
+- It is never shown: not by `create_service`, `get_service`, `list_my_offerings`, nor to the browser. It is never in the repository, and never in a run's transcript.
 - Every subscriber's calls are signed with it. `reveal_subscription_secret` and `rotate_subscription_secret` refuse a service's subscriptions and say why.
-- It is handed over under direct hosting (see [Direct hosting on Freestyle](apps-and-builds.md#direct-hosting-on-freestyle)). Gateway mode does not carry it.
+- A new build that goes online beside the serving one gets a new secret of its own (see [A new build and conformance](#a-new-build-and-conformance)).
 
 Mynt's [outbound safety](vendors-and-marketplace.md#outbound-safety) rules apply to a service as to any vendor: HTTPS on port 443, and never a private, loopback or reserved address. A hosted address is the hosting provider's, not Mynt's own.
+
+### Hosting a service needs direct hosting
+
+A service is hosted under direct hosting only (see [Direct hosting on Freestyle](apps-and-builds.md#direct-hosting-on-freestyle)). On a Mynt that hosts through its gateway, `create_service` and `deploy_app` for a service refuse and say why. Nothing is half-created or half-deployed.
+
+Gateway mode cannot host a service, for four reasons in how it works:
+
+- A service is a Compose project, and gateway mode runs single-container apps only.
+- The VM's agent is a script fixed when the VM first booted. It starts each app with its Mynt key and Mynt's address and nothing else, so there is no way to hand over the signing secret.
+- Mynt never learns that a build is running there, so it cannot test a build the moment it answers.
+- It has one VM per workspace and one container per app, so a new build cannot go online beside the one serving.
 
 ## Stages
 
@@ -118,12 +129,22 @@ A service moves through the same stages as an app, in the same sidebar folders.
 | Stage | Means |
 | --- | --- |
 | Idea | A draft. Its offering exists and is not listed |
-| Staging | Built and online. Mynt runs its conformance test; practice runs are for information |
-| Production | Listed in the Marketplace |
+| Staging | Built and online. Mynt runs its conformance test; practice runs are for information. Once a build has passed, it is open to sandbox testing by its offering id |
+| Production | Listed in the Marketplace, and live-subscribable |
 
 Production is the listing. `promote_app` to production lists the offering, and `demote_app` back to staging unlists it. `update_vendor_offering { listed }` is refused on a service's offering.
 
-A service in staging is not in the Marketplace. Subscribing to one needs it listed.
+### Testing a service in Staging
+
+A service in Staging whose build has passed Mynt's conformance test is **in testing**: builders can subscribe to it and call it in the sandbox, before it is listed.
+
+- **By its offering id only.** It is never in the Marketplace list. Its builder gives the offering id to whoever should test it (`get_service` returns it as `testing.offering_id`, and the Studio shows it). `list_vendor_offerings { offering_id }` shows that one offering, marked `availability: "in_testing"` and `sandbox_only: true`.
+- **Subscribing.** `subscribe_vendor_service { offering_id }`, as for a listed offering: the same licence prerequisites, and the vendor's standard terms accepted by version when it has any on file.
+- **Sandbox only.** Sandbox sessions call it. Live sessions never do: `set_subscription_live` refuses and says why, and a live call is refused whatever the subscription says.
+- **Promotion carries subscribers over.** Moving the service to Production lists it. The same subscriptions go on working in the sandbox and can then be turned live with `set_subscription_live`.
+- **Moving back.** `demote_app` to Staging stops live calls and takes it off the list. Its subscriptions stay, sandbox only again.
+
+`list_my_vendor_subscriptions` shows each subscription's `availability` (`listed` or `in_testing`, with the words "In testing: sandbox only until its builder moves it to Production").
 
 ### Promotion checks
 
@@ -145,21 +166,54 @@ A service has no checks for target states, licence coverage by product, sponsor 
 
 ## A new build and conformance
 
-Every build that goes online is tested before it serves anyone.
+Every build that goes online is tested before it serves anyone, and subscribers never wait for that.
 
-1. `deploy_app` puts the offering back to draft ("Needs conformance") at once. Nothing calls it, and it leaves the Marketplace list. An admin's suspension stays as it is.
-2. When the build answers, Mynt runs its conformance test itself, with nobody asking. It is recorded with no person as its runner, and audited as `service_conformance_after_deploy`.
-3. A pass makes the offering `conformance_passed`. For a service in Production it makes it `listed` again, with nobody listing it.
-4. A failure leaves it off. The service's stage stays, and its conformance check fails until a build passes. `run_conformance` runs the test again by hand.
+**Who puts a build online.** Only an owner or admin of the service's workspace, at the firm that offers it. A build put online is handed a signing secret and, once it passes, receives subscribers' requests, so being a member of the workspace is not enough. The same people take it offline (`undeploy_app`), restart it (`restart_app`) and run commands in it (`app_run`). Every member reads its status and logs.
 
-Mynt hosts one copy of a service, so it cannot keep the previous build serving while the new one is tested. The gap is the deploy plus the test. Under gateway mode step 2 is not automatic: run `run_conformance`.
+### When a build is serving
+
+While a build serves subscribers (the offering is `conformance_passed` or `listed`), a new build never replaces it directly.
+
+1. `deploy_app` puts the new build online **beside** the serving one: a second copy, on a VM and at an address of its own. The offering keeps its endpoint, its secret, its status and its place in the Marketplace. `get_service` shows the new build as `new_build`.
+2. When the new copy answers, Mynt runs its conformance test against it, with nobody asking.
+3. **A pass switches.** The offering's endpoint, its signing secret and the hosted copy change in one transaction. The service never leaves the list. The copy that served until then is removed 15 seconds later, so calls already in flight to it finish. Audited as `service_build_switched`.
+4. **A failure changes nothing for subscribers.** The new copy is removed, VM and address. The serving build keeps serving and stays listed. The failed test is kept with its cases and transcript, and shown in `get_service` as a run with `new_build: true`, `switched: false` and its `outcome` in words. Audited as `service_build_not_switched`. A build that never starts is handled the same way.
+
+For a service in Production, passing conformance is not enough to take over. The new build must also meet the other checks a promotion to Production runs, read for that build: verified by Mynt, no critical or high audit finding, standard terms with their scope, and the licence. A build that passes conformance but fails one of these is removed like a failed one, and its run says which check stopped it.
+
+One new build is tested at a time. Putting another online replaces the one still being tested. Taking the service offline, or archiving it, removes it.
+
+**The new copy's signing secret.** The new copy gets a new secret of its own, not the serving copy's. Code Mynt has not tested yet never holds the secret that authenticates calls to the build subscribers rely on, so a build that leaks its settings cannot be used to forge requests to the serving one. Each build's secret ends with it. This costs nothing in availability: the endpoint and the secret are stored, switched and read together, so every call is signed for the copy it is sent to. The secret reaches the copy as before: a hosted setting in the deploy job's environment, never returned, scrubbed from output.
+
+**The address.** Each copy answers at an address Mynt derives for it, so the service's address changes when Mynt switches to a new build. Nobody types or stores it: Mynt calls the offering's endpoint, which it sets itself.
+
+**If the host does not confirm a removal.** A VM the hosting provider did not confirm as deleted stays on Mynt's record and is tried again at each deploy and on the usage worker's rounds.
+
+### When nothing is serving
+
+A first build, or one put online while the offering is a draft, offline or suspended, goes online in place.
+
+1. `deploy_app` points the offering at it as a draft ("Needs conformance"). An admin's suspension stays as it is.
+2. When the build answers, Mynt runs its conformance test itself. It is recorded with no person as its runner, and audited as `service_conformance_after_deploy`.
+3. A pass makes the offering `conformance_passed`. For a service in Production it makes it `listed` again, when the build also meets the other production checks above. If it does not, `run_conformance` answers with `not_listed`, the checks that stopped it.
+4. A failure leaves it a draft. `run_conformance` runs the test again by hand.
 
 Conformance is always Mynt's own, run from outside the service. Nothing the service or a coding agent runs counts.
 
+### Transcripts
+
+Mynt keeps each run's transcript: for every case, the request it sent (method, path, headers, body), the answer (status and body) and what it expected. This covers real runs, tests of new builds and practice runs. `get_service` returns it on each run as `transcript`.
+
+- Requests are Mynt's fixtures, never a customer's data.
+- The signature's digest is left out (`v1=<redacted>`). The signing secret, any credential and anything shaped like one are replaced before the transcript is stored, including in the service's own answers.
+- The path is kept, never the address.
+- An answer over 8 KB is not kept; the transcript says how long it was.
+- A run from before transcripts were kept has `transcript: null` and a `transcript_note` saying so.
+
 ## Offline, archive and removal
 
-- **Offline.** `undeploy_app` suspends the offering with the reason ("isn't online"), and products that hand off through it drift. It is not an admin's suspension: an admin cannot lift it, and it comes back when the service is put online again and passes.
-- **Archive.** `archive_service { service_id }` takes the offering off the Marketplace and stops calls at once. Its builds, conformance runs, terms and agreements stay. `archive_service { archived: false }` restores it as a draft, to be put online and tested again. Only an owner or admin of its workspace, at its firm, archives or restores.
+- **Offline.** `undeploy_app` suspends the offering with the reason ("isn't online"), and products that hand off through it drift. Only an owner or admin of its workspace, at its firm, takes it offline. It is not an admin's suspension: an admin cannot lift it, and it comes back when the service is put online again and passes. A new build being tested beside it is removed too.
+- **Archive.** `archive_service { service_id }` takes the offering off the Marketplace and stops calls at once. A new build being tested is removed. Its builds, conformance runs, terms and agreements stay. `archive_service { archived: false }` restores it as a draft, to be put online and tested again. Only an owner or admin of its workspace, at its firm, archives or restores.
 - **Removal.** An admin's `remove_app` refuses a service that isn't archived, because suspending its offering as a side effect would pause other firms' products. Once archived, removal unlinks the offering and keeps it as the vendor's and its subscribers' record.
 
 ## Reading a service
@@ -170,12 +224,16 @@ Conformance is always Mynt's own, run from outside the service. Nothing the serv
 | --- | --- |
 | `stage`, `archived`, `offering`, `hosted` | Where it stands, and the offering's status in words |
 | `contract` | The service type's contract, with the input, params and output as field tables (`field`, `type`, `required`, `description`) and the endpoint in full once it is online |
-| `conformance` | Real and practice runs, newest first, with each real run's cases; whether a test is needed; the build the standing pass ran against |
+| `new_build` | A new build online beside the serving one while Mynt tests it, or `null` |
+| `testing` | Whether builders can test it in the sandbox by its offering id, with the id and how |
+| `conformance` | Real runs, tests of new builds that did not take over, and practice runs, newest first, each with its cases, its transcript and the build it tested; whether a test is needed; the build the standing pass ran against |
 | `terms` | The current standard terms and every version Mynt knows |
 | `subscribers` | Each subscribing firm and app, the terms version accepted, since when, live or sandbox, and the agreement's status |
 | `reliability` | Calls, error rate and incidents over the window, from Mynt's own records |
-| `activity` | Builds, deploys, stage moves, conformance runs and terms changes |
+| `activity` | Builds, deploys, stage moves, conformance runs, switches to a new build and terms changes |
 | `checklist`, `progress` | What is left, in order |
+
+`subscribers`, `checklist` and `progress` are for the offering firm's own people and Mynt's admins. A member of the workspace who belongs to another firm gets `subscribers: null`, an empty checklist and `firm_only` saying so.
 
 ### Reliability
 
@@ -183,7 +241,7 @@ Reliability is read from Mynt's count of calls per subscription and day (`vendor
 
 - `calls` and `error_rate` are `null`, with `not_measured` saying why, when nobody has called the service in the window. They are never shown as 0.
 - `response_time_ms` is `null` for subscribers' calls: Mynt records whether each call succeeded, not how long it took. `in_last_conformance_run` gives the median and maximum of Mynt's own timed conformance requests.
-- `incidents` lists failed conformance runs, times the service went offline, suspensions and archiving.
+- `incidents` lists failed conformance runs, new builds that did not take over, times the service went offline, suspensions and archiving.
 
 ### The checklist
 

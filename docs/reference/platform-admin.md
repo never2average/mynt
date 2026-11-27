@@ -461,7 +461,7 @@ It is also refused, naming the table, when a table can't be cleaned safely:
 
 Customer-facing and runtime tables:
 
-`webhook_deliveries`, `webhooks`, `vendor_action_runs`, `ramp_link_requests`, `money_movements` (sandbox only), `client_evidence`, `handoffs`, `client_sessions`, `api_keys`, `app_events`, `customer_vault`, `test_consumers`, `app_journeys`, `app_releases`, `requests` (access requests), `hosting_commands`.
+`webhook_deliveries`, `webhooks`, `vendor_action_runs`, `ramp_link_requests`, `money_movements` (sandbox only), `client_evidence`, `handoffs`, `client_sessions`, `api_keys`, `app_events`, `customer_vault`, `test_consumers`, `app_journeys`, `app_releases`, `requests` (access requests), `hosting_commands`, `hosted_candidates` (the record of a service's builds that were tested beside the serving one; removal is refused while one of them still has a VM on Mynt's hosting).
 
 Solana tables:
 
