@@ -1,0 +1,208 @@
+{
+  "$schema": "../schemas/benchmark-task-set.schema.json",
+  "agent": "algorithm-explorer",
+  "version": 1,
+  "title": "Improving a decision algorithm on synthetic applicants",
+  "description": "Four explorations, each with one explorer on its own angle, objective and constraints. The product record is a starter product idea (workspaces/coding-build/templates/product-ideas.seed.json); the algorithm to improve is a small baseline from this repository (benchmarks/fixtures/algorithms/), which Mynt puts into a scratch repository inside the explorer's sandbox. The applicants are synthetic, made by Mynt's generator (src/explore-data.ts), which models them as credit applicants whatever the product's line; nobody real is in them. A task passes on Mynt's own scoring of the holdout only: the commit the explorer pushed is eligible (every constraint holds) and ranks above the baseline, which means a higher objective when the baseline is eligible too. An unchanged copy of the baseline never passes.",
+  "workspaces": [
+    "algorithm-explorer"
+  ],
+  "tasks": [
+    {
+      "id": "knockouts-for-net-margin",
+      "idea": "gig-worker-no-penalty-cd",
+      "product": {
+        "name": "6-Month No-Penalty CD",
+        "product_line": "account_operations",
+        "category": "deposits",
+        "region": "US",
+        "risk_level": "low",
+        "liquidity": "moderate",
+        "typical_horizon": "short",
+        "return_type": "fixed_interest",
+        "regulator": "FDIC",
+        "description": "A 6-month certificate of deposit that can be closed early without an early withdrawal penalty after the first week.",
+        "key_features": [
+          "Fixed rate for a 6-month term, set by the firm at opening",
+          "Close it and take the whole balance any time after the first 7 days, with no early withdrawal penalty",
+          "Opening minimum and maximum set in the firm's terms",
+          "Reminder before maturity with the choice to renew or move the money out"
+        ]
+      },
+      "terms": {
+        "inputs": {
+          "apr_pct": 18,
+          "expected_pd_pct": 5,
+          "lgd_pct": 65,
+          "cost_of_funds_pct": 9,
+          "opex_pct": 3,
+          "tenor_months": 12,
+          "min_amount": 10000,
+          "max_amount": 500000
+        }
+      },
+      "algorithm": {
+        "_id": "underwriting",
+        "algorithm_name": "Underwriting",
+        "description": "Decides which applicants are approved, and for how much.",
+        "purpose": "underwriting",
+        "repository": "models/underwriting"
+      },
+      "baseline_dir": "benchmarks/fixtures/algorithms/approve-everyone",
+      "angle": "tighten_knockouts",
+      "objective": "net_margin",
+      "constraints": {
+        "max_loss_rate_pct": 2.5,
+        "apr_cap_pct": 24,
+        "min_adverse_impact_ratio": 0.8
+      }
+    },
+    {
+      "id": "risk-pricing-for-margin-rate",
+      "idea": "goal-locked-mma",
+      "product": {
+        "name": "Goal-Locked Money Market Sub-Accounts",
+        "product_line": "account_operations",
+        "category": "deposits",
+        "region": "US",
+        "risk_level": "low",
+        "liquidity": "moderate",
+        "typical_horizon": "short_to_medium",
+        "return_type": "variable_interest",
+        "regulator": "FDIC",
+        "description": "A money market account split into named sub-accounts, each locked to a goal date the holder chooses.",
+        "key_features": [
+          "Up to ten named sub-accounts under one money market account",
+          "Each sub-account has a goal amount and a goal date the holder sets",
+          "Taking money out of a sub-account before its date needs a waiting period the holder chose at opening",
+          "One statement shows every sub-account's balance"
+        ]
+      },
+      "terms": {
+        "inputs": {
+          "apr_pct": 18,
+          "expected_pd_pct": 5,
+          "lgd_pct": 65,
+          "cost_of_funds_pct": 9,
+          "opex_pct": 3,
+          "tenor_months": 12,
+          "min_amount": 10000,
+          "max_amount": 500000
+        }
+      },
+      "algorithm": {
+        "_id": "pricing",
+        "algorithm_name": "Pricing",
+        "description": "Sets the annual rate each approved applicant pays.",
+        "purpose": "pricing",
+        "repository": "models/pricing"
+      },
+      "baseline_dir": "benchmarks/fixtures/algorithms/flat-price",
+      "angle": "risk_based_pricing",
+      "objective": "net_margin_pct",
+      "constraints": {
+        "max_loss_rate_pct": 3.25,
+        "apr_cap_pct": 22,
+        "min_adverse_impact_ratio": 0.8
+      }
+    },
+    {
+      "id": "wider-eligibility-under-a-loss-ceiling",
+      "idea": "rate-reset-cd",
+      "product": {
+        "name": "24-Month CD with One Rate Reset",
+        "product_line": "account_operations",
+        "category": "deposits",
+        "region": "US",
+        "risk_level": "low",
+        "liquidity": "low",
+        "typical_horizon": "medium",
+        "return_type": "fixed_interest",
+        "regulator": "FDIC",
+        "description": "A 24-month certificate of deposit with one request during the term to move to the rate the firm then offers for new CDs of the same term.",
+        "key_features": [
+          "Fixed rate for a 24-month term",
+          "One reset request allowed during the term, to the rate the firm offers that day for new 24-month CDs",
+          "The rate after a reset may be higher or lower than the opening rate, and applies for the rest of the term",
+          "Early withdrawal penalty as stated in the firm's terms"
+        ]
+      },
+      "terms": {
+        "inputs": {
+          "apr_pct": 18,
+          "expected_pd_pct": 5,
+          "lgd_pct": 65,
+          "cost_of_funds_pct": 9,
+          "opex_pct": 3,
+          "tenor_months": 12,
+          "min_amount": 10000,
+          "max_amount": 500000
+        }
+      },
+      "algorithm": {
+        "_id": "eligibility",
+        "algorithm_name": "Eligibility",
+        "description": "Decides which applicants are accepted at all.",
+        "purpose": "eligibility",
+        "repository": "models/eligibility"
+      },
+      "baseline_dir": "benchmarks/fixtures/algorithms/strict-eligibility",
+      "angle": "expand_approvals",
+      "objective": "approval_rate",
+      "constraints": {
+        "max_loss_rate_pct": 3,
+        "apr_cap_pct": 24,
+        "min_adverse_impact_ratio": 0.85
+      }
+    },
+    {
+      "id": "limits-for-approved-volume",
+      "idea": "tips-ladder-bundle",
+      "product": {
+        "name": "TIPS Ladder Bundle",
+        "product_line": "credit",
+        "category": "bonds",
+        "region": "US",
+        "risk_level": "low",
+        "liquidity": "low",
+        "typical_horizon": "medium_to_long",
+        "return_type": "inflation_linked",
+        "regulator": "U.S. Department of the Treasury",
+        "description": "One purchase of Treasury Inflation-Protected Securities with staggered maturities, one rung maturing each year over a span the holder picks.",
+        "key_features": [
+          "One rung maturing each year over a span of 3 to 10 years the holder picks",
+          "Every rung's maturity date and interest payment dates shown before purchase",
+          "Principal adjusted for changes in the Consumer Price Index as the securities' terms state",
+          "Each rung's cash moves to a linked account at maturity"
+        ]
+      },
+      "terms": {
+        "inputs": {
+          "apr_pct": 18,
+          "expected_pd_pct": 5,
+          "lgd_pct": 65,
+          "cost_of_funds_pct": 9,
+          "opex_pct": 3,
+          "tenor_months": 12,
+          "min_amount": 10000,
+          "max_amount": 500000
+        }
+      },
+      "algorithm": {
+        "_id": "limits",
+        "algorithm_name": "Limit assignment",
+        "description": "Sets the limit each approved applicant is given.",
+        "purpose": "limit_assignment",
+        "repository": "models/limits"
+      },
+      "baseline_dir": "benchmarks/fixtures/algorithms/flat-limit",
+      "angle": "regrade_limits",
+      "objective": "approved_volume",
+      "constraints": {
+        "max_loss_rate_pct": 3,
+        "apr_cap_pct": 24,
+        "min_adverse_impact_ratio": 0.8
+      }
+    }
+  ]
+}

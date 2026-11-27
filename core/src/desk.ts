@@ -13,6 +13,7 @@ import type { RepoAccess } from "./github.js";
 import { refuseManagedRepository, type GitRepoHost } from "./git-host.js";
 import { approvalColumns, reapprovalOnConflict, requireApproved } from "./repo-approvals.js";
 import { REPO_DIR, startRepoRun } from "./repo-run.js";
+import { packScratchCommit, prepareScratchRepo, SCRATCH_REPOSITORY, SCRATCH_TOKEN, scratchHead, startScratchRun } from "./scratch-repo.js";
 import { findLicenses, normalizeModel } from "./regulatory.js";
 import type { ProductRecord, Store, User } from "./store.js";
 
@@ -31,6 +32,10 @@ export interface DeskConfig extends AgentHostConfig {
   runCapUsd: number; // a code run: machine time only
   monthlyCapUsd: number; // per firm
   sandboxType: string;
+  // Agent benchmarks only (benchmarks.ts sets it on its own instance; never read from the environment or a setting):
+  // no firm repository, no GitHub App and no pull request. The agent works in a scratch repository inside its own
+  // sandbox, and Mynt moves what it pushed to the clean sandbox itself (scratch-repo.ts).
+  scratchWorkspace?: boolean;
 }
 
 export function deskConfigFromEnv(host: AgentHostConfig, env = process.env): DeskConfig {
@@ -150,7 +155,11 @@ export class DeskService {
 
   // Code runs need a sandbox host and the GitHub App; agent tasks also need a model backend.
   get enabled() {
-    return !!this.sandboxes && !!this.repos;
+    return !!this.sandboxes && (!!this.repos || this.scratch);
+  }
+
+  private get scratch() {
+    return this.config.scratchWorkspace === true;
   }
 
   get agentsEnabled() {
@@ -283,7 +292,8 @@ export class DeskService {
     if (!this.enabled) throw new Error("The product desk isn't enabled on this Mynt yet");
     if (o.kind === "agent" && !this.agentsEnabled) throw new Error("Desk agents aren't enabled on this Mynt yet");
     if (!user.entity_id) throw new Error("Join or create your firm first (create_entity)");
-    const ws = await this.approvedWorkspace(user.entity_id);
+    if (this.scratch && o.kind === "run") throw new Error("A scratch workspace holds no models between jobs, so there is nothing for a code run to run");
+    const ws = this.scratch ? { repository: SCRATCH_REPOSITORY } : await this.approvedWorkspace(user.entity_id);
     let termsH: string | null = null;
     if (o.product_id) {
       const p = await this.store.getProduct(o.product_id);
@@ -335,16 +345,13 @@ export class DeskService {
 
   // A sandbox job that clones the workspace (at `ref`) and runs the desk runner, credentials removed first.
   private async startRun(j: Row, sandbox: string, ref: string | null) {
-    const ws = await this.jobWorkspace(j);
+    // A real firm's job: its approved workspace is checked before anything else, as it always was.
+    const ws = this.scratch ? null : await this.jobWorkspace(j);
     const p = (await this.store.getProduct(j.product_id as string))!;
     const t = (await this.terms(j.product_id as string))!;
-    return startRepoRun(this.sandboxes!, this.repos!, sandbox, {
-      repository: ws.repository,
-      installationId: ws.installation_id,
-      ref,
+    const run = {
       dir: DIR,
       outcome: `${JOB}/outcome.json`,
-      cloneFailure: { outcome: "error", model: null, error: "Couldn't clone the workspace repository", log: "" },
       files: {
         [`${DIR}/desk-runner.mjs`]: DESK_RUNNER,
         [`${JOB}/product.json`]: JSON.stringify({ ...p.product, action: p.action }),
@@ -352,7 +359,27 @@ export class DeskService {
         ...(j.model ? { [`${JOB}/model.txt`]: String(j.model) } : {}),
       },
       command: `node ${DIR}/desk-runner.mjs ${WORKSPACE} ${JOB}`,
+    };
+    if (!ws) {
+      // Mynt reads what the branch holds and packs that commit out of the agent's sandbox itself.
+      const head = await this.pushedHead(j);
+      const bundle = await packScratchCommit(this.sandboxes!, j.sandbox_id as string, head, `desk-${String(j.id).slice(0, 8)}`);
+      return startScratchRun(this.sandboxes!, sandbox, { ...run, bundle, cloneFailure: { outcome: "error", model: null, error: "Couldn't move the agent's branch to Mynt's verification sandbox", log: "" } });
+    }
+    return startRepoRun(this.sandboxes!, this.repos!, sandbox, {
+      repository: ws.repository,
+      installationId: ws.installation_id,
+      ref,
+      ...run,
+      cloneFailure: { outcome: "error", model: null, error: "Couldn't clone the workspace repository", log: "" },
     });
+  }
+
+  // Scratch workspaces: the commit the agent's branch holds in its sandbox's repository, read by Mynt.
+  private async pushedHead(j: Row) {
+    const head = await scratchHead(this.sandboxes!, j.sandbox_id as string, j.branch as string);
+    if (!head) throw new Error(`The desk agent never pushed its branch ${String(j.branch)}, so there is no model for Mynt to run`);
+    return head;
   }
 
   private async runOutcome(sandbox: string, processId: string) {
@@ -392,7 +419,10 @@ export class DeskService {
     const sandboxes = this.sandboxes!;
     if (j.status === "queued") {
       let env: Record<string, string> = {};
-      if (j.kind === "agent") {
+      if (j.kind === "agent" && this.scratch) {
+        // No firm repository and no token: a placeholder stands where one would be, and it opens nothing.
+        env = { GITHUB_REPOSITORY: SCRATCH_REPOSITORY, GITHUB_TOKEN: SCRATCH_TOKEN, MYNT_BRANCH: `mynt/desk-${String(j.id).slice(0, 8)}` };
+      } else if (j.kind === "agent") {
         const ws = await this.jobWorkspace(j);
         const { token } = await this.repos!.tokenFor(ws.repository, ws.installation_id);
         env = { GITHUB_REPOSITORY: ws.repository, GITHUB_TOKEN: token, MYNT_BRANCH: `mynt/desk-${String(j.id).slice(0, 8)}` };
@@ -417,6 +447,7 @@ export class DeskService {
         const token = `mynt_desk_${randomBytes(24).toString("base64url")}`;
         await this.update(j.id as string, { token_hash: hash(token) });
         await sandboxes.writeFile(j.sandbox_id as string, `${DIR}/desk-runner.mjs`, DESK_RUNNER);
+        if (this.scratch) await prepareScratchRepo(sandboxes, j.sandbox_id as string);
         const pid = await launchAgent(sandboxes, this.config, j.sandbox_id as string, {
           prompt: "Do the job in job/spec.json, following CLAUDE.md and its skills.",
           budgetUsd: Number(j.cap_usd) - total,
@@ -458,10 +489,11 @@ export class DeskService {
       if (!agent.ok) throw new Error(`Desk agent ${agent.state?.error ?? agent.state?.last_subtype ?? "exited"}`);
       if (!j.product_id) {
         // A task with no product (e.g. a shared library): Mynt opens the PR with the agent's summary.
-        const pr = await this.openPr(j, agent.state?.summary ?? "", null);
+        const pr = this.scratch ? null : await this.openPr(j, agent.state?.summary ?? "", null);
         return this.end(j, "finished", { pr_url: pr, phase_message: agent.state?.summary?.slice(0, 500) ?? "Done" });
       }
       // Mynt runs the agent's branch itself, in a clean sandbox with no agent and no credentials left.
+      if (this.scratch) await this.pushedHead(j); // nothing pushed: the job ends here, before a second sandbox
       const v = await this.newSandbox(j, "verify");
       await this.update(j.id as string, { status: "verifying", verify_sandbox_id: v, phase_message: "Mynt is running the new model itself" });
       return;
@@ -480,7 +512,8 @@ export class DeskService {
         return this.end(j, "failed", { outcome: o, error: `Mynt couldn't run the agent's model: ${o.outcome === "missing_inputs" ? `missing ${o.missing.map((m) => m.key).join(", ")}` : o.outcome === "error" ? o.error : "no model applies"}` });
       }
       await this.saveReport(j, o, j.branch as string);
-      const pr = await this.openPr(j, (await agentState(sandboxes, j.sandbox_id as string, j.process_id as string)).state?.summary ?? "", o);
+      // A scratch workspace has nowhere to open a pull request: the report is the whole result.
+      const pr = this.scratch ? null : await this.openPr(j, (await agentState(sandboxes, j.sandbox_id as string, j.process_id as string)).state?.summary ?? "", o);
       return this.end(j, "finished", { outcome: o, model: o.model, pr_url: pr, phase_message: `${o.report.verdict}: ${o.report.summary}`.slice(0, 500) });
     }
   }

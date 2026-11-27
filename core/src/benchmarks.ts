@@ -6,6 +6,7 @@ import type { AgentRun } from "./agent-proxy.js";
 import { BdService, type BdConfig } from "./bd.js";
 import { compareRuns, GATE_DEFAULTS, regressionGate, scoreboard, type FailureClass, type RunSummary, type TaskResult } from "./benchmark-compare.js";
 import {
+  baselineFiles,
   BENCHMARK_AGENTS,
   sourceCommit,
   taskSetFor,
@@ -16,6 +17,7 @@ import {
   type CodingTask,
   type ConnectorTask,
   type DeskTask,
+  type ExplorerTask,
   type ReviewTask,
   type TaskSet,
 } from "./benchmark-tasks.js";
@@ -25,6 +27,7 @@ import type { Db } from "./db.js";
 import { DeskService, type DeskConfig } from "./desk.js";
 import type { DeskOutcome } from "./desk-runner.js";
 import type { Fetcher } from "./evidence.js";
+import { DEFAULT_EXPLORERS, ExploreService, exploreConfigFromEnv, type ExploreConfig } from "./explore.js";
 import type { RepoAccess } from "./github.js";
 import { operationalSetting } from "./platform-settings.js";
 import { runProductTests } from "./product-tests.js";
@@ -48,6 +51,9 @@ import { serialLoop } from "./worker.js";
 //     real queues, lists, statistics or monthly budgets, and no real job is ever in a benchmark's;
 //   - whatever must exist in the shared records (an app to build, a draft product to model) belongs to a benchmark
 //     account of its own, which nobody can sign in as;
+//   - the product desk and the algorithm explorer work in scratch repositories inside their own sandboxes
+//     (scratch-repo.ts): their instances are given no GitHub App at all, so no repository of anyone's can be read,
+//     pushed to or sent a pull request, whatever a run is asked;
 //   - the connector's instance is made here with no way to reach any channel (see `connector` below), over a pipeline
 //     of its own holding only invented people.
 // A run has a hard cap (the caller's, never more than BENCHMARK_CAP_USD): each task may spend at most what's left of
@@ -58,7 +64,7 @@ type Row = Record<string, unknown>;
 
 // The tables each agent service owns: a benchmark instance gets a `bench_` twin of each (and of its indexes, whose
 // names start with the table's). Everything else (users, apps, products, the audit log) is the shared record.
-const OWNED = ["build_runs", "build_events", "build_activity", "repo_connections", "app_repositories", "managed_repository_names", "desk_jobs", "desk_reports", "desk_workspaces", "product_terms", "review_cases"];
+const OWNED = ["build_runs", "build_events", "build_activity", "repo_connections", "app_repositories", "managed_repository_names", "desk_jobs", "desk_reports", "desk_workspaces", "product_terms", "review_cases", "explore_jobs", "explore_variants"];
 const OWNED_NAME = new RegExp(`\\b(?:${OWNED.join("|")}|bd_[a-z]+)`, "g");
 export const benchSql = (sql: string) => sql.replace(OWNED_NAME, (name) => `bench_${name}`);
 
@@ -124,6 +130,7 @@ const TABLES = `
 
 const ACTIVE = ["queued", "running"];
 const MIN_TASK_USD = 0.5;
+const EXPLORE_PRODUCT = "benchmark-explore-";
 const IDENTITY = "benchmarks:identity";
 
 /** Why a run can't start or a tool can't answer, in words for the admin. */
@@ -136,6 +143,7 @@ export interface BenchmarkDeps {
   repos: RepoAccess | null;
   buildConfig: BuildConfig;
   deskConfig: DeskConfig;
+  exploreConfig?: ExploreConfig; // default: the deployment's, read from the desk's (as the server does)
   reviewConfig: ReviewConfig;
   bdConfig: BdConfig;
   fetcher?: Fetcher; // the governance desk's page fetcher (tests give a stand-in)
@@ -161,15 +169,12 @@ interface Outcome {
   // The whole run must stop (the host can't run anything more), with this reason.
   stop_run?: string;
 }
-interface StartOptions {
-  repository?: string;
-}
 interface Adapter {
   // What a real run of this agent needs, in words (shown before the first run).
   needs: string[];
   model(): string | null;
   // Why a run can't start here; null when it can.
-  unavailable(opts: StartOptions): Promise<string | null>;
+  unavailable(): Promise<string | null>;
   // The most one task may spend, and what Mynt may spend on top of it (kept free in the run's cap).
   maxTaskUsd(): number;
   reserveUsd(): number;
@@ -187,7 +192,7 @@ const usd = (v: unknown) => (v === null || v === undefined ? null : cents(Number
 // A failure that is the infrastructure's, not the agent's: the sandbox host out of allowance or capacity, a
 // provider's outage, a sandbox that never came up, the runner unable to install or start, Mynt's own verification
 // not reporting.
-const INFRASTRUCTURE = /Sandbox (error|cancelled)|Verification sandbox (error|cancelled)|Couldn't start the agent|Couldn't install Claude Code|Verification didn't produce a report|Couldn't prepare the auditor's copy|Couldn't place the program|Couldn't create a Python environment|\b(no|insufficient|out of) capacity\b|service unavailable/i;
+const INFRASTRUCTURE = /Couldn't prepare the benchmark's scratch repository|Couldn't (read|pack|move) the (benchmark's scratch repository|pushed branch|agent's branch)|Couldn't check out commit|Sandbox (error|cancelled)|Verification sandbox (error|cancelled)|Couldn't start the agent|Couldn't install Claude Code|Verification didn't produce a report|Couldn't prepare the auditor's copy|Couldn't place the program|Couldn't create a Python environment|\b(no|insufficient|out of) capacity\b|service unavailable/i;
 export function failureClassOf(error: string | null | undefined): FailureClass {
   const e = error ?? "";
   return isQuotaExhausted(e) || isTransient(e) || INFRASTRUCTURE.test(e) ? "infrastructure" : "agent";
@@ -201,6 +206,7 @@ export class BenchmarkService {
   builds!: BuildService;
   desk!: DeskService;
   review!: ReviewService;
+  explore!: ExploreService;
   connector!: BdService;
   private bench: Db;
   private connectorClock = new Date();
@@ -223,7 +229,16 @@ export class BenchmarkService {
       Object.create(base, Object.fromEntries(Object.entries(values).map(([k, v]) => [k, typeof v === "function" ? { get: v as () => unknown } : { value: v }]))) as C;
     // No repository host: a benchmark build pushes nowhere and opens no pull request; Mynt verifies the packaged source.
     s.builds = await BuildService.open(s.bench, store, deps.sandboxes, null, over(deps.buildConfig, { monthlyCapUsd: NO_MONTHLY, workspaceMonthlyCapUsd: null, solanaSnapshot: false }));
-    s.desk = await DeskService.open(s.bench, store, deps.sandboxes, deps.repos, over(deps.deskConfig, { monthlyCapUsd: NO_MONTHLY }));
+    // No GitHub App is handed to the benchmark's desk or explorer, whatever the deployment has: they work in scratch
+    // repositories inside their own sandboxes, so there is no token to mint and nowhere to open a pull request.
+    s.desk = await DeskService.open(s.bench, store, deps.sandboxes, null, over(deps.deskConfig, { monthlyCapUsd: NO_MONTHLY, scratchWorkspace: true }));
+    s.explore = await ExploreService.open(s.bench, store, deps.sandboxes, null, deps.exploreConfig ?? exploreConfigFromEnv(deps.deskConfig), s.desk, null);
+    // The algorithm each exploration starts from: the task's baseline, from the repository's own fixture files.
+    s.explore.scratchSeed = (job) => {
+      const task = (taskSets().filter((t) => t.agent === "algorithm-explorer").flatMap((t) => t.tasks) as ExplorerTask[]).find((t) => `${EXPLORE_PRODUCT}${t.id}` === job.product_id);
+      if (!task) throw new Error(`No algorithm-explorer task is behind product '${String(job.product_id)}'`);
+      return baselineFiles(task.baseline_dir);
+    };
     s.review = await ReviewService.open(s.bench, store, deps.sandboxes, over(deps.reviewConfig, { monthlyCapUsd: NO_MONTHLY, autoOpen: false }), s.desk, deps.fetcher);
     // The connector, dry run only. Its channel senders are the empty object written here: there is no parameter,
     // setting or environment variable through which a benchmark could be handed a way to email or message anyone,
@@ -231,21 +246,22 @@ export class BenchmarkService {
     s.connector = await BdService.open(
       s.bench,
       deps.sandboxes,
-      over(deps.bdConfig, { enabled: true, monthlyCapUsd: NO_MONTHLY, everyHours: Number.MAX_SAFE_INTEGER, runCapUsd: () => s.connectorCapUsd }),
+      // The connector's own per-session cap still holds: a task's cap can lower it, never raise it.
+      over(deps.bdConfig, { enabled: true, monthlyCapUsd: NO_MONTHLY, everyHours: Number.MAX_SAFE_INTEGER, runCapUsd: () => Math.min(s.connectorCapUsd, deps.bdConfig.runCapUsd) }),
       {},
       () => s.connectorClock,
     );
-    s.adapters = { coding: s.coding(), "product-desk": s.productDesk(), "governance-review": s.governance(), connector: s.connectorAdapter(), "program-audit": s.program("program-audit"), "program-red-team": s.program("program-red-team") };
+    s.adapters = { coding: s.coding(), "product-desk": s.productDesk(), "algorithm-explorer": s.explorer(), "governance-review": s.governance(), connector: s.connectorAdapter(), "program-audit": s.program("program-audit"), "program-red-team": s.program("program-red-team") };
     return s;
   }
 
   set meter(m: AgentMeter | null) {
-    for (const x of [this.builds, this.desk, this.review, this.connector]) x.meter = m;
+    for (const x of [this.builds, this.desk, this.review, this.explore, this.connector]) x.meter = m;
   }
 
   // The run behind a live benchmark agent's token, for the agent proxy (the same budgets and metering as any run).
   async agentRun(token: string): Promise<AgentRun | null> {
-    return (await this.builds.agentRun(token)) ?? (await this.desk.agentRun(token)) ?? (await this.review.agentRun(token)) ?? (await this.connector.agentRun(token));
+    return (await this.builds.agentRun(token)) ?? (await this.desk.agentRun(token)) ?? (await this.review.agentRun(token)) ?? (await this.explore.agentRun(token)) ?? (await this.connector.agentRun(token));
   }
 
   // A benchmark connector run's token: its MCP tools are the benchmark's own connector, never the real one.
@@ -388,20 +404,15 @@ export class BenchmarkService {
     const config = this.deps.deskConfig;
     return {
       needs: [
-        "A sandbox host with allowance left, the agents' model backend, PUBLIC_URL, and Mynt's GitHub App.",
-        "A repository set aside for benchmarks, with Mynt's GitHub App installed on it, named when the run starts: the desk agent pushes a branch per task there and Mynt opens a pull request for each.",
+        "A sandbox host with allowance left, the agents' model backend, and PUBLIC_URL.",
+        "No repository and no GitHub App: the desk agent works in a scratch repository inside its own sandbox, Mynt moves the branch it pushed to a clean sandbox itself and runs it there, and no pull request is opened.",
         "The task set's regions and categories defined on this Mynt: a product that doesn't pass Mynt's product checks here is recorded as not run.",
       ],
       model: () => config.model,
-      unavailable: async (opts) => {
-        if (!this.deps.repos) return "Mynt's GitHub App isn't configured, and the desk agent works in a repository";
-        if (!opts.repository) return "a product-desk run needs `repository`: a repository set aside for benchmarks, with Mynt's GitHub App installed on it";
-        if (!(await this.deps.repos.installationFor(opts.repository))) return `Mynt's GitHub App isn't installed on ${opts.repository}`;
-        return null;
-      },
+      unavailable: async () => null,
       maxTaskUsd: () => config.jobCapUsd,
       reserveUsd: () => 0,
-      start: async (run, t, capUsd) => {
+      start: async (_run, t, capUsd) => {
         const task = t as DeskTask;
         const user = await this.identity();
         const entityId = await this.firm(user);
@@ -414,11 +425,6 @@ export class BenchmarkService {
         if (existing) await this.store.saveProduct(product, existing.status);
         else await this.store.insertDraft(user.id, product, { entity_id: entityId });
         await this.desk.setTerms(product.id, user.id, task.terms);
-        const repository = String((run.options as StartOptions).repository);
-        // The admin who started the run named this repository for it: that is its approval, in the benchmark's own
-        // desk_workspaces (the start is audited with the repository's name).
-        await this.desk.connectWorkspace(entityId, user.id, repository);
-        await this.bench.query(`UPDATE ${T}.desk_workspaces SET approval = 'approved', approval_note = $2, decided_by = $3, decided_at = now() WHERE entity_id = $1`, [entityId, `Benchmark run ${run.id}`, run.started_by]);
         const job = await this.desk.start({ ...user, entity_id: entityId }, { kind: "agent", product_id: product.id, goal: task.goal, cap_usd: capUsd });
         return job.id as string;
       },
@@ -461,10 +467,115 @@ export class BenchmarkService {
           failed_check,
           detail: passed ? null : (shortfalls.join("; ") || error || `The job ended ${j.status}`).slice(0, 1000),
           checks,
-          observed: { job_status: j.status, verdict: report?.verdict ?? null, model: j.model ?? null, pr_url: j.pr_url ?? null, metrics: report ? Object.keys(report.metrics ?? {}).length : null },
+          observed: { job_status: j.status, verdict: report?.verdict ?? null, model: j.model ?? null, commit: ran ? (o.commit ?? null) : null, metrics: report ? Object.keys(report.metrics ?? {}).length : null },
           cost_usd: usd(j.cost_usd),
           cost_parts: null,
           cost_note: "The desk records one figure per job: model spend and sandbox time together",
+          started_at: iso(j.created_at),
+          finished_at: iso(j.finished_at),
+          ...(isQuotaExhausted(error) ? { stop_run: QUOTA_MESSAGE } : {}),
+        };
+      },
+    };
+  }
+
+  // The algorithm explorer: one explorer per task, on the task's baseline algorithm. Scored only from Mynt's own
+  // scoring of the pinned commits on the holdout (the job's leaderboard), never from what the explorer says it got.
+  private explorer(): Adapter {
+    const config = () => this.explore.config;
+    const ENDED = ["finished", "failed", "stopped", "over_budget"];
+    type Entry = { k: number; scored: boolean; eligible: boolean; commit: string | null; objective: { metric: string; value: number | null }; constraints: Record<string, string> | null; error: string | null };
+    return {
+      needs: [
+        "A sandbox host with allowance left, the agents' model backend, and PUBLIC_URL.",
+        "No repository and no GitHub App: Mynt puts the task's baseline algorithm into a scratch repository inside the explorer's sandbox, pins what the explorer pushed there, and scores that commit and the baseline on a holdout only Mynt holds.",
+        "The task set's regions and categories defined on this Mynt: a product that doesn't pass Mynt's product checks here is recorded as not run.",
+      ],
+      model: () => this.deps.deskConfig.model,
+      unavailable: async () => null,
+      // An exploration's cap is shared by its explorers; a task has one explorer, so it gets one explorer's share.
+      maxTaskUsd: () => Math.floor((config().capUsd / DEFAULT_EXPLORERS) * 100) / 100,
+      reserveUsd: () => 0,
+      start: async (_run, t, capUsd) => {
+        const task = t as ExplorerTask;
+        const user = await this.identity();
+        const entityId = await this.firm(user);
+        const product = { id: `${EXPLORE_PRODUCT}${task.id}`, ...task.product } as FinancialProduct;
+        const failed = runProductTests(product, await this.store.referenceData(true)).checks.filter((c) => c.status === "fail");
+        if (failed.length) throw new NotRunnable(`The product doesn't pass Mynt's product checks here: ${failed.map((c) => `${c.name} (${c.message})`).join("; ")}`);
+        const existing = await this.store.getProduct(product.id);
+        if (existing && existing.owner_id !== user.id) throw new NotRunnable(`A product '${product.id}' that isn't the benchmark's already exists`);
+        if (existing) await this.store.saveProduct(product, existing.status);
+        else await this.store.insertDraft(user.id, product, { entity_id: entityId });
+        await this.store.setDefinition(product.id, { core_algorithms: [task.algorithm] });
+        await this.desk.setTerms(product.id, user.id, task.terms);
+        const job = await this.explore.start({ ...user, entity_id: entityId }, { product_id: product.id, algorithm_id: task.algorithm._id, objective: task.objective, constraints: task.constraints, explorers: 1, cap_usd: capUsd, angles: [task.angle] });
+        return job.id as string;
+      },
+      tick: () => this.explore.tick(),
+      stop: async (jobId, reason) => void (await this.explore.stop(jobId, reason)),
+      poll: async (_run, jobId) => {
+        const j = await this.explore.get(jobId);
+        if (!j) return lost("the exploration's record is gone");
+        if (!ENDED.includes(j.status as string)) return null;
+        const error = (j.error as string | null) ?? "";
+        const board = (j.leaderboard as Entry[] | null) ?? [];
+        const base = board.find((e) => e.k === 0) ?? null;
+        const mine = board.find((e) => e.k === 1) ?? null;
+        const variant = (j.variants as Row[]).find((v) => Number(v.k) === 1) ?? null;
+        const pushed = !!variant?.commit_sha;
+        const failing = Object.entries(mine?.constraints ?? {}).filter(([, status]) => status === "fail").map(([name]) => name);
+        // Better than the baseline as Mynt's leaderboard ranks them: an eligible variant is above a baseline that
+        // fails a constraint; against an eligible baseline the objective must be higher (an unchanged copy isn't).
+        const [mv, bv] = [mine?.objective.value ?? null, base?.objective.value ?? null];
+        const beats = !!mine?.scored && !!base?.scored && mine.eligible && (!base.eligible || (mv !== null && bv !== null && mv > bv));
+        const metric = mine?.objective.metric ?? String(j.objective);
+        const checks: Check[] =
+          j.status !== "finished"
+            ? [{ name: "exploration_finished", status: "fail", detail: (error || `The exploration ended ${j.status}`).slice(0, 400) }]
+            : [
+                { name: "product_checks", status: "pass" },
+                // How the explorer exited doesn't decide the task: Mynt scores whatever its branch held, as it does for a firm.
+                { name: "explorer_exit", status: variant?.agent_ok ? "pass" : "warn", ...(variant?.agent_ok ? {} : { detail: String(variant?.error ?? "The explorer didn't end cleanly").slice(0, 400) }) },
+                { name: "branch_pushed", status: pushed ? "pass" : "fail", ...(pushed ? {} : { detail: "The explorer never pushed its branch, so there was nothing for Mynt to score" }) },
+                { name: "baseline_scored", status: base?.scored ? "pass" : "fail", ...(base?.scored ? {} : { detail: String(base?.error ?? "Mynt couldn't score the baseline").slice(0, 400) }) },
+                { name: "mynt_holdout_run", status: mine?.scored ? "pass" : pushed ? "fail" : "not_reported", ...(mine?.scored || !pushed ? {} : { detail: String(mine?.error ?? "Mynt couldn't run the pushed algorithm").slice(0, 400) }) },
+                { name: "constraints_hold", status: !mine?.scored ? "not_reported" : mine.eligible ? "pass" : "fail", ...(failing.length ? { detail: `Fails on the holdout: ${failing.join(", ")}` } : {}) },
+                {
+                  name: "beats_baseline",
+                  status: !mine?.scored || !base?.scored || !mine.eligible ? "not_reported" : beats ? "pass" : "fail",
+                  ...(mine?.scored && base?.scored ? { detail: `${metric} ${mv} against the baseline's ${bv}${base.eligible ? "" : " (the baseline fails a constraint on the holdout)"}` } : {}),
+                },
+              ];
+        const passed = j.status === "finished" && pushed && beats;
+        let failure_class: FailureClass | null = null;
+        let failed_check: string | null = null;
+        if (!passed) {
+          const first = checks.find((c) => c.status === "fail");
+          if (j.status === "stopped") failure_class = "harness";
+          else if (j.status === "over_budget") failure_class = "agent";
+          else if (j.status === "failed") failure_class = failureClassOf(error);
+          // The baseline is Mynt's own fixture, run by Mynt: when it can't be scored, that is never the explorer's doing.
+          else if (!base?.scored) failure_class = failureClassOf(base?.error) === "infrastructure" ? "infrastructure" : "harness";
+          else failure_class = first?.name === "mynt_holdout_run" ? failureClassOf(mine?.error) : "agent";
+          failed_check = failure_class !== "agent" ? failure_class : j.status === "over_budget" || OVER_CAP.test(error) ? "budget" : (first?.name ?? "exploration_failed");
+        }
+        const detail = checks.filter((c) => c.status === "fail").map((c) => `${c.name}${c.detail ? ` (${c.detail})` : ""}`).join("; ");
+        return {
+          passed,
+          failure_class,
+          failed_check,
+          detail: passed ? null : (detail || error || `The exploration ended ${j.status}`).slice(0, 1000),
+          checks,
+          observed: {
+            job_status: j.status,
+            objective: metric,
+            explorer: mine ? { commit: mine.commit, scored: mine.scored, eligible: mine.eligible, value: mv } : null,
+            baseline: base ? { commit: base.commit, scored: base.scored, eligible: base.eligible, value: bv } : null,
+          },
+          cost_usd: usd(j.cost_usd),
+          cost_parts: null,
+          cost_note: "An exploration records one figure: the explorer's model spend and every sandbox's time, Mynt's scoring sandboxes included",
           started_at: iso(j.created_at),
           finished_at: iso(j.finished_at),
           ...(isQuotaExhausted(error) ? { stop_run: QUOTA_MESSAGE } : {}),
@@ -688,9 +799,8 @@ export class BenchmarkService {
       const set = taskSetFor(agent);
       if (!set) continue;
       const a = this.adapters[agent];
-      // What only a start can check (the repository a desk run names) isn't held against readiness here.
-      const own = await a.unavailable({ repository: "" }).catch((e) => (e as Error).message);
-      const whyNot = agent.startsWith("program-") ? own : (host ?? (agent === "product-desk" && own?.startsWith("a product-desk run needs") ? null : own));
+      const own = await a.unavailable().catch((e) => (e as Error).message);
+      const whyNot = agent.startsWith("program-") ? own : (host ?? own);
       out.push({
         agent,
         task_set: set.file,
@@ -717,7 +827,7 @@ export class BenchmarkService {
    * Starts a run: only ever on an admin's explicit call, with an explicit cap. Refuses, saying why, when real
    * execution isn't possible. Audited by the caller's tool.
    */
-  async start(admin: User, o: { agent: BenchmarkAgent; cap_usd: number; label?: string; repository?: string; task_ids?: string[]; host_restored?: boolean }) {
+  async start(admin: User, o: { agent: BenchmarkAgent; cap_usd: number; label?: string; task_ids?: string[]; host_restored?: boolean }) {
     const set = taskSetFor(o.agent);
     if (!set) throw new BenchmarkRefusal(`There is no task set for ${o.agent}`);
     const adapter = this.adapters[o.agent];
@@ -725,7 +835,7 @@ export class BenchmarkService {
     if (!(o.cap_usd > 0)) throw refuse("a run needs an explicit cap in US dollars (cap_usd), the most it may spend");
     const ceiling = this.capCeilingUsd();
     if (o.cap_usd > ceiling) throw refuse(`its cap of US$${o.cap_usd} is over BENCHMARK_CAP_USD, the most one run may spend (US$${ceiling}); an admin can change that in the operational settings`);
-    const own = o.agent.startsWith("program-") ? await adapter.unavailable(o) : (this.hostMissing() ?? (await adapter.unavailable(o)));
+    const own = o.agent.startsWith("program-") ? await adapter.unavailable() : (this.hostMissing() ?? (await adapter.unavailable()));
     if (own) throw refuse(own);
     if (o.cap_usd < MIN_TASK_USD + adapter.reserveUsd()) throw refuse(`a cap of US$${o.cap_usd} is too small for even one task (at least US$${MIN_TASK_USD + adapter.reserveUsd()})`);
     const quota = o.host_restored ? null : await this.hostOutOfAllowance();
@@ -750,7 +860,7 @@ export class BenchmarkService {
         adapter.model(),
         JSON.stringify(Object.fromEntries(set.workspaces.map((w) => [w, workspaceRevision(w)]))),
         sourceCommit(),
-        JSON.stringify({ ...(o.repository ? { repository: o.repository.toLowerCase() } : {}), ...(o.task_ids?.length ? { task_ids: o.task_ids } : {}), ...(o.host_restored ? { host_restored: true } : {}) }),
+        JSON.stringify({ ...(o.task_ids?.length ? { task_ids: o.task_ids } : {}), ...(o.host_restored ? { host_restored: true } : {}) }),
         admin.id,
       ],
     );
@@ -1017,13 +1127,12 @@ export function registerBenchmarkTools(server: McpServer, store: Store, admin: U
     {
       title: "Start a benchmark run",
       description:
-        "Admin: run one agent's benchmark task set for real: each task goes through the same service, sandbox, budgets and verification by Mynt as production work, in a benchmark context of its own (its own queues and budgets; no real workspace's data or budget is touched). This spends money on the model and on sandboxes, up to cap_usd, which is required and may not be more than BENCHMARK_CAP_USD; the run stops, and says so, when the cap is reached. Refused with the reason when it can't run here (no sandbox host or model backend, the host's allowance used up, another run going, something the agent's run needs missing). One run at a time. Audited.",
+        "Admin: run one agent's benchmark task set for real: each task goes through the same service, sandbox, budgets and verification by Mynt as production work, in a benchmark context of its own (its own queues and budgets; no real workspace's data or budget is touched, and no repository: a run takes none). This spends money on the model and on sandboxes, up to cap_usd, which is required and may not be more than BENCHMARK_CAP_USD; the run stops, and says so, when the cap is reached. Refused with the reason when it can't run here (no sandbox host or model backend, the host's allowance used up, another run going, something the agent's run needs missing). One run at a time. Audited.",
       inputSchema: z
         .object({
           agent,
           cap_usd: z.number().positive().describe("The most this run may spend, in US dollars. Required: there is no default."),
           label: z.string().trim().max(120).optional().describe("What this run is for, e.g. 'baseline before changing the secure skill'"),
-          repository: z.string().trim().regex(/^[\w.-]+\/[\w.-]+$/).optional().describe("product-desk only: the repository set aside for benchmarks (owner/name), with Mynt's GitHub App installed"),
           task_ids: z.array(z.string()).max(100).optional().describe("Only these tasks (default: the whole set)"),
           host_restored: z.boolean().optional().describe("Say true once the sandbox host's allowance, used up when a build last ran, has been restored"),
         })
@@ -1032,7 +1141,7 @@ export function registerBenchmarkTools(server: McpServer, store: Store, admin: U
     async (o) =>
       attempt(async (b) => {
         const started = await b.start(admin, o);
-        await store.audit(admin.id, "start_benchmark_run", started.run.id, { agent: o.agent, task_set: started.run.task_set, tasks: started.tasks.length, cap_usd: o.cap_usd, label: o.label ?? null, repository: o.repository ?? null, host_restored: o.host_restored ?? false });
+        await store.audit(admin.id, "start_benchmark_run", started.run.id, { agent: o.agent, task_set: started.run.task_set, tasks: started.tasks.length, cap_usd: o.cap_usd, label: o.label ?? null, host_restored: o.host_restored ?? false });
         return { ...started, message: `Started: ${started.tasks.length} ${o.agent} task(s), one at a time, up to US$${o.cap_usd}. Follow it with get_benchmark_run.` };
       }),
   );

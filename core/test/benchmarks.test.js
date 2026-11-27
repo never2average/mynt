@@ -227,7 +227,7 @@ test("every agent has a task set, in JSON, that passes its schema and Mynt's own
   const sets = taskSets();
   assert.deepEqual(sets.map((s) => s.agent).sort(), [...BENCHMARK_AGENTS].sort());
   const size = Object.fromEntries(sets.map((s) => [s.agent, s.tasks.length]));
-  assert.deepEqual(size, { coding: 8, connector: 5, "governance-review": 6, "product-desk": 6, "program-audit": 4, "program-red-team": 4 });
+  assert.deepEqual(size, { "algorithm-explorer": 4, coding: 8, connector: 5, "governance-review": 6, "product-desk": 6, "program-audit": 4, "program-red-team": 4 });
   for (const s of sets) {
     assert.match(s.sha256, /^[0-9a-f]{64}$/);
     assert.deepEqual(taskSetErrors(s.file, JSON.parse(readFileSync(join(BENCHMARKS_DIR, s.file), "utf8"))), []);
@@ -452,8 +452,6 @@ test("a run starts only on an admin's explicit, capped call, and is refused in p
   await refused({ agent: "coding", cap_usd: 5, task_ids: ["no-such-task"] }, /no task 'no-such-task'/);
   await refused({ agent: "program-audit", cap_usd: 5 }, /can't run yet: the mainnet program gate reviews only a mainnet program's own verified build/);
   await refused({ agent: "program-red-team", cap_usd: 5 }, /can't run yet/);
-  await refused({ agent: "product-desk", cap_usd: 5 }, /needs `repository`/);
-  await refused({ agent: "product-desk", cap_usd: 5, repository: "someone/else" }, /GitHub App isn't installed on someone\/else/);
   assert.equal(await w.count("benchmark_runs"), 0);
   assert.equal(await w.count("audit_log", "action = 'start_benchmark_run'"), 0, "a refused start is not a start");
 
@@ -495,7 +493,7 @@ test("a run starts only on an admin's explicit, capped call, and is refused in p
   const r = await bare.as.call("start_benchmark_run", { agent: "coding", cap_usd: 5 });
   assert.match(r.data.error, /no sandbox host is configured on this Mynt/);
   const agents = (await bare.as.call("list_benchmark_runs", {})).data.agents;
-  assert.equal(agents.length, 6);
+  assert.equal(agents.length, 7);
   assert.ok(agents.every((a) => a.ready === false && a.why_not && a.needs.length));
   const off = await bare.client(bare.admin, {});
   assert.match((await off.call("list_benchmark_runs", {})).data.error, /aren't running on this Mynt/);
@@ -559,49 +557,8 @@ test("governance samples: a bad sample must be rejected on the planted item, a g
   assert.equal(await w.count("products", "id LIKE 'sample-%'"), 0);
 });
 
-test("a product-desk run: Mynt's own run of the agent's model decides, in the benchmark firm's own desk", async () => {
-  const w = await world();
-  const runId = await start(w, { agent: "product-desk", cap_usd: 20, repository: "mynt-bench/desk", task_ids: ["gig-worker-no-penalty-cd", "goal-locked-mma", "rate-reset-cd"] });
-  const report = (verdict, metrics = { margin_pct: 0.55, breakeven_balance_usd: 2100 }) => ({ outcome: "ran", model: "cd-economics", commit: "c".repeat(40), report: { verdict, summary: "Margin 0.55% per account", metrics, checks: [{ name: "reg_dd_disclosures", status: "pass", detail: "ok" }] }, log: "" });
-  const done = await drive(w, runId, async (taskId, s) => {
-    const name = s.opts.name;
-    if (name.startsWith("mynt-desk-agent-") && s.agentRunning && !s.played) {
-      s.played = true;
-      s.cost = 0.05;
-      w.sandboxes.finishAgent(s.id, "success", 1.2);
-    }
-    if (name.startsWith("mynt-desk-verify-") && s.procRunning) {
-      s.procRunning = false;
-      s.cost = 0.02;
-      const outcome = { "gig-worker-no-penalty-cd": report("feasible"), "goal-locked-mma": { outcome: "error", model: "mma", error: "The model exited with an error", log: "Traceback" }, "rate-reset-cd": report("marginal", { margin_pct: 0.1 }) }[taskId];
-      w.sandboxes.write(s.id, `${DESK_JOB}/outcome.json`, outcome);
-    }
-  });
-  assert.equal(done.run.status, "finished");
-  const [ok, broken, thin] = done.tasks;
-  assert.equal(ok.status, "passed", JSON.stringify(ok));
-  assert.deepEqual(ok.checks.map((c) => [c.name, c.status]), [["product_checks", "pass"], ["agent_finished", "pass"], ["mynt_model_run", "pass"], ["report_expectations", "pass"]]);
-  assert.equal(ok.cost_usd, 1.27);
-  assert.deepEqual([broken.status, broken.failure_class, broken.failed_check], ["failed", "agent", "mynt_model_run"]);
-  assert.match(broken.detail, /Mynt couldn't run the agent's model/);
-  assert.deepEqual([thin.status, thin.failed_check], ["failed", "report_expectations"]);
-  assert.match(thin.detail, /1 metrics, at least 2 expected/);
-  // The agent's job: the task's product and term sheet, in the product-desk workspace.
-  const agentBox = [...w.sandboxes.sandboxes.values()].find((s) => s.opts.name.startsWith("mynt-desk-agent-"));
-  const spec = JSON.parse(agentBox.files.get("/home/user/workspaces/product-desk/job/spec.json"));
-  assert.equal(spec.product.name, "6-Month No-Penalty CD");
-  assert.equal(spec.terms.inputs.apy_pct, 4.1);
-  assert.equal(agentBox.opts.env.GITHUB_REPOSITORY, "mynt-bench/desk");
-  assert.equal(w.repos.prs.length, 2, "Mynt opened the pull requests in the benchmark repository, for the models it could run");
-  // Isolation: the real desk has no job, workspace, term sheet or report; the drafts belong to the benchmark's firm.
-  for (const table of ["desk_jobs", "desk_workspaces", "desk_reports", "product_terms"]) assert.equal(await w.count(table), 0, table);
-  assert.equal(await w.count("bench_desk_jobs"), 3);
-  const drafts = (await w.pg.query(`SELECT p.id, p.status, e.name FROM ${T}.products p JOIN ${T}.entities e ON e.id = p.entity_id WHERE p.id LIKE 'benchmark-%' ORDER BY p.id`)).rows;
-  assert.deepEqual(drafts.map((d) => [d.status, d.name]), Array(3).fill(["draft", "Mynt benchmarks (not a firm)"]));
-  assert.equal(await w.count("entities"), 1);
-  const trail = (await w.pg.query(`SELECT details FROM ${T}.audit_log WHERE action = 'start_benchmark_run'`)).rows[0].details;
-  assert.equal(trail.repository, "mynt-bench/desk");
-});
+// The product desk's and the algorithm explorer's runs are in benchmarks-scratch.test.js: they work in scratch
+// repositories, with no GitHub App and no repository.
 
 test("a connector benchmark cannot email or message anyone, whatever the agent does", async () => {
   const w = await world();
@@ -763,7 +720,7 @@ test("the gate script exits non-zero on a regression, and the tools compare the 
   // Validating the task sets needs no run at all (what CI does).
   const valid = gate("--validate");
   assert.equal(valid.status, 0, valid.stderr + valid.stdout);
-  assert.match(valid.stdout, /6 task sets/);
+  assert.match(valid.stdout, /7 task sets/);
 
   // compare_benchmark_runs over two recorded runs.
   const w = await world();

@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { workspaceFiles, WORKSPACES_ROOT } from "./agent-host.js";
 import { appKinds } from "./app-kinds.js";
 import type { FinancialProduct } from "./catalog.js";
+import { DECISION_PURPOSES, explorationAngles } from "./explore.js";
+import { OBJECTIVES, type Objective } from "./explore-score.js";
 import { runProductTests } from "./product-tests.js";
 import { checklist, type Subject } from "./review.js";
 
@@ -23,7 +25,7 @@ export const BENCHMARKS_DIR = fileURLToPath(new URL("../benchmarks/", import.met
 export const CORE_DIR = fileURLToPath(new URL("../", import.meta.url));
 export const TASK_SET_SCHEMA_PATH = fileURLToPath(new URL("../schemas/benchmark-task-set.schema.json", import.meta.url));
 
-export const BENCHMARK_AGENTS = ["coding", "product-desk", "governance-review", "program-audit", "program-red-team", "connector"] as const;
+export const BENCHMARK_AGENTS = ["coding", "product-desk", "algorithm-explorer", "governance-review", "program-audit", "program-red-team", "connector"] as const;
 export type BenchmarkAgent = (typeof BENCHMARK_AGENTS)[number];
 
 export interface CodingTask {
@@ -41,6 +43,18 @@ export interface DeskTask {
   terms: { inputs: Record<string, number | string | boolean>; assumptions?: Record<string, unknown> };
   goal: string;
   expect: { verdicts: string[]; min_checks?: number; min_metrics?: number };
+}
+export interface ExplorerTask {
+  id: string;
+  idea?: string;
+  product: Omit<FinancialProduct, "id">;
+  terms: { inputs: Record<string, number | string | boolean>; assumptions?: Record<string, unknown> };
+  // The decision algorithm to improve, as it stands in the product's definition (core_algorithms).
+  algorithm: { _id: string; algorithm_name: string; description: string; purpose: string; repository: string };
+  baseline_dir: string; // the algorithm as pinned: a repository's files, with <repository>/model.json declaring `decide`
+  angle: string;
+  objective: Objective;
+  constraints: { max_loss_rate_pct: number; apr_cap_pct: number; min_adverse_impact_ratio: number };
 }
 export interface ReviewTask {
   id: string;
@@ -89,7 +103,7 @@ export interface ConnectorTask {
     not_shared?: { of: string; with: string }[];
   };
 }
-export type BenchmarkTask = CodingTask | DeskTask | ReviewTask | ProgramTask | ConnectorTask;
+export type BenchmarkTask = CodingTask | DeskTask | ExplorerTask | ReviewTask | ProgramTask | ConnectorTask;
 
 export interface TaskSet<T = BenchmarkTask> {
   agent: BenchmarkAgent;
@@ -128,6 +142,22 @@ export function programSources(sourceDir: string, root = CORE_DIR): Record<strin
   return out;
 }
 
+// Every file of an explorer task's baseline (the repository the exploration starts from), by path relative to it.
+export function baselineFiles(baselineDir: string, root = CORE_DIR): Record<string, string> {
+  const base = join(root, baselineDir);
+  const out: Record<string, string> = {};
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir).sort()) {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) {
+        if (!["node_modules", "__pycache__"].includes(name) && !name.startsWith(".")) walk(path);
+      } else out[relative(base, path)] = readFileSync(path, "utf8");
+    }
+  };
+  if (existsSync(base)) walk(base);
+  return out;
+}
+
 /** What's wrong with one task-set file: its schema first, then what the schema can't say. Empty when it's sound. */
 export function taskSetErrors(file: string, data: unknown): string[] {
   const validate = schemaValidator();
@@ -148,6 +178,21 @@ export function taskSetErrors(file: string, data: unknown): string[] {
       const t = task as DeskTask;
       const report = runProductTests({ id: `benchmark-${t.id}`, ...t.product } as FinancialProduct);
       for (const c of report.checks) if (c.status === "fail") errors.push(`${at}: the product fails Mynt's product checks (${c.name}: ${c.message})`);
+    } else if (set.agent === "algorithm-explorer") {
+      const t = task as ExplorerTask;
+      const report = runProductTests({ id: `benchmark-explore-${t.id}`, ...t.product } as FinancialProduct);
+      for (const c of report.checks) if (c.status === "fail") errors.push(`${at}: the product fails Mynt's product checks (${c.name}: ${c.message})`);
+      if (!DECISION_PURPOSES.includes(t.algorithm.purpose)) errors.push(`${at}: '${t.algorithm.purpose}' isn't a decision algorithm's purpose`);
+      if (!(OBJECTIVES as readonly string[]).includes(t.objective)) errors.push(`${at}: '${t.objective}' isn't an objective Mynt scores`);
+      if (!explorationAngles().some((a) => a.id === t.angle)) errors.push(`${at}: '${t.angle}' isn't an exploration angle`);
+      const files = baselineFiles(t.baseline_dir);
+      let model: { decide?: unknown } | null = null;
+      try {
+        model = JSON.parse(files[`${t.algorithm.repository}/model.json`] ?? "") as { decide?: unknown };
+      } catch {
+        errors.push(`${at}: no readable ${t.algorithm.repository}/model.json under ${t.baseline_dir}`);
+      }
+      if (model && (typeof model.decide !== "string" || !model.decide.trim())) errors.push(`${at}: the baseline's model.json declares no decide command`);
     } else if (set.agent === "governance-review") {
       const t = task as ReviewTask;
       const list = checklist(t.subject_kind);
