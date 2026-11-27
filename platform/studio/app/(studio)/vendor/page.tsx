@@ -27,7 +27,7 @@ export default function VendorPage() {
   const pick = useCallback(
     (b: Record<string, unknown>) =>
       b.onboarding && Array.isArray(b.offerings)
-        ? ({ onboarding: b.onboarding as Onboarding, offerings: b.offerings, serviceTypes: (b.serviceTypes as VendorData["serviceTypes"]) ?? [], licences: (b.licences as VendorData["licences"]) ?? [] } as VendorData)
+        ? ({ onboarding: b.onboarding as Onboarding, offerings: b.offerings, serviceTypes: (b.serviceTypes as VendorData["serviceTypes"]) ?? [], licences: (b.licences as VendorData["licences"]) ?? [], ...("requests" in b ? { requests: (b.requests as VendorData["requests"]) ?? null } : {}) } as VendorData)
         : undefined,
     [],
   );

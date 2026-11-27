@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { toProjects } from "@/lib/projects";
+import { toProjects, toServiceProjects } from "@/lib/projects";
 import { callStudioTool, listMyntTools } from "@/lib/studio-server";
 import { asDeveloper, json } from "@/lib/studio-route";
 import { NOT_SCOPED, scopeFor, workspaceSupport } from "@/lib/workspace-server";
@@ -20,6 +20,7 @@ export async function GET(req: NextRequest) {
     const apps = workspace ? { workspace_id: workspace } : {};
     const builds = workspace && support.buildsByWorkspace ? { workspace_id: workspace } : {};
     const [appList, buildList] = await Promise.all([callStudioTool(mynt, "list_my_apps", apps), callStudioTool(mynt, "list_builds", builds)]);
-    return json({ projects: toProjects(appList, buildList) });
+    // Services (list_my_apps' kind "service") are listed apart: never among the apps.
+    return json({ projects: toProjects(appList, buildList), services: toServiceProjects(appList, buildList) });
   });
 }

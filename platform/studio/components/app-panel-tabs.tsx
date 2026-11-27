@@ -652,7 +652,9 @@ export function CustomersTabView({ appId, data, onChanged }: { appId: string; da
 // Security & risk: the app's risk register (Add risk and Review risk, each a labelled button opening a sheet), its
 // information security (Mynt's build checks and security events), then the signals Mynt measures around it: fraud,
 // vendors, conduct and its products. Each is a table, or "Not available." with why; never a 0 for what isn't measured.
-export function SecurityView({ data, appId = "", onChanged }: { data: AppSecurity; appId?: string; onChanged?: () => void }) {
+// `signals: false` (a service's Security & risk): the register and infosec only. The signals are about an app's
+// customers, agreements and products, which a service doesn't have.
+export function SecurityView({ data, appId = "", onChanged, signals = true }: { data: AppSecurity; appId?: string; onChanged?: () => void; signals?: boolean }) {
   return (
     <div className="flex flex-col gap-5" data-app-security>
       <RiskRegisterSection subject={{ type: "app", id: appId }} data={data.register} onChanged={onChanged} />
@@ -678,9 +680,11 @@ export function SecurityView({ data, appId = "", onChanged }: { data: AppSecurit
         )}
       </Section>
       <Section id="app-security-events" title="Security events">
-        <Events events={data.events} reason={data.eventsReason} empty="No security events for this app." />
+        <Events events={data.events} reason={data.eventsReason} empty={signals ? "No security events for this app." : "No security events for this service."} />
         <ViewAll href="/audits?tab=security" />
       </Section>
+      {signals && (
+      <>
       <SignalSection id="fraud" title="Fraud" description="Fraud and velocity signals from the app's customer sessions." columns={SIGNAL_COLUMNS.fraud} signal={data.signals.fraud} empty="No fraud signals for this app." />
       <SignalSection
         id="vendors"
@@ -706,6 +710,8 @@ export function SecurityView({ data, appId = "", onChanged }: { data: AppSecurit
         signal={data.signals.products}
         empty="None of this app's products is paused or drifted."
       />
+      </>
+      )}
     </div>
   )
 }
@@ -792,19 +798,19 @@ export function ActivityView({ data }: { data: AppActivity }) {
   )
 }
 
-export function InfoTabBody({ tab, data, appId = "", onChanged }: { tab: InfoTab; data: TabData; appId?: string; onChanged?: () => void }) {
+export function InfoTabBody({ tab, data, appId = "", onChanged, signals = true }: { tab: InfoTab; data: TabData; appId?: string; onChanged?: () => void; signals?: boolean }) {
   if (!data.available) return <NotYetNote reason={data.reason} />
   if (tab === "products") return <ProductsTabView data={data as AppProducts} appId={appId} onChanged={onChanged} />
   if (tab === "agreements") return <AgreementsTabView appId={appId} data={data as AppAgreements} onChanged={onChanged} />
   if (tab === "customers") return <CustomersTabView appId={appId} data={data as AppCustomers} onChanged={onChanged} />
   if (tab === "pnl") return <PnlView pnl={data as AppPnl} />
-  if (tab === "security") return <SecurityView appId={appId} data={data as AppSecurity} onChanged={onChanged} />
+  if (tab === "security") return <SecurityView appId={appId} data={data as AppSecurity} onChanged={onChanged} signals={signals} />
   if (tab === "sdk") return <SdkView data={data as AppSdk} />
   return <ActivityView data={data as AppActivity} />
 }
 
 // One live tab: its content, when it was read, and a labelled Refresh.
-export function AppInfoTab({ appId, tab, active }: { appId: string; tab: InfoTab; active: boolean }) {
+export function AppInfoTab({ appId, tab, active, signals = true }: { appId: string; tab: InfoTab; active: boolean; signals?: boolean }) {
   const { state, updatedAt, reload } = useLiveTab(appId, tab, active)
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -833,7 +839,7 @@ export function AppInfoTab({ appId, tab, active }: { appId: string; tab: InfoTab
             {state.message}
           </p>
         )}
-        {state.kind === "ready" && <InfoTabBody tab={tab} data={state.data} appId={appId} onChanged={() => void reload()} />}
+        {state.kind === "ready" && <InfoTabBody tab={tab} data={state.data} appId={appId} onChanged={() => void reload()} signals={signals} />}
       </div>
     </div>
   )

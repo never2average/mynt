@@ -9,6 +9,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import type { ChatTransport, UIMessage, UIMessageChunk } from "ai";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { pickType } from "./build-type-helper";
 
 import { NewAppWorkspace, type NewAppProduct } from "@/components/new-app-workspace";
 import { NavFolders } from "@/components/nav-folders";
@@ -234,7 +235,7 @@ describe("threads on the Build page", () => {
     const sent: string[] = [];
     render(workspace({ sent }));
     await settle();
-    await act(async () => void fireEvent.click(document.querySelector('[data-mode-option="product"]') as HTMLElement));
+    await pickType("product");
     await settle();
     fireEvent.change(screen.getByLabelText("Message input"), { target: { value: "A savings account for nurses" } });
     await act(async () => void fireEvent.keyDown(screen.getByLabelText("Message input"), { key: "Enter" }));

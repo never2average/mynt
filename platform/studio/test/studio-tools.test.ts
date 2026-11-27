@@ -228,3 +228,19 @@ describe("agreement scopes", () => {
     expect(pairs).toEqual(AGREEMENT_SCOPES.map((s) => ({ key: s.key, label: s.label })));
   });
 });
+
+describe("Services on the allow-list", () => {
+  it("lists the service tools, and leaves the app tools they reuse as they were", () => {
+    const names = Object.keys(STUDIO_TOOLS);
+    // A service's own tools; its builds, hosting and stages are the app tools with its id.
+    expect(names).toEqual(expect.arrayContaining(["create_service", "get_service", "list_my_services", "archive_service", "get_service_type_contract", "request_service_type", "list_service_type_requests"]));
+    expect(names).toEqual(expect.arrayContaining(["start_build", "deploy_app", "get_promotion_checks", "promote_app", "demote_app"]));
+    // Deciding a request stays with admins; taking a service offline stays with the MCP tools.
+    for (const t of ["decline_service_type_request", "define_service_type", "undeploy_app"]) expect(names).not.toContain(t);
+    expect(parseStudioCall("create_service", { name: "Swift ID", description: "Verifies IDs", service_type: "identity_verification", region: "US" })).toHaveProperty("tool");
+    // Never a typed endpoint, a listing switch or a credential: Mynt derives the endpoint and lists by stage.
+    for (const extra of ["test_base_url", "live_base_url", "listed", "requires_credential"]) expect(parseStudioCall("create_service", { name: "Swift ID", description: "Verifies IDs", service_type: "identity_verification", region: "US", [extra]: true })).toHaveProperty("error");
+    expect(parseStudioCall("archive_service", { service_id: "s1", archived: false })).toEqual({ tool: "archive_service", args: { service_id: "s1", archived: false } });
+    expect(parseStudioCall("request_service_type", { name: "Proof of address", what_it_does: "Checks an address against a bill", example_input: [], example_output: {} })).toHaveProperty("error");
+  });
+});

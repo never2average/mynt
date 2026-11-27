@@ -7,7 +7,7 @@
 // the app can move. Members see the checks and that an owner or admin promotes. The views are
 // server-renderable, so the tests render them without a browser.
 import Link from "next/link"
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { ArrowDownToLine, ArrowUpRight, ExternalLink, Rocket, ShieldCheck } from "lucide-react"
 
 import { ProgramCoverage } from "@/components/app-agreement-sheets"
@@ -245,8 +245,11 @@ type Meta = { supported: false } | { supported: true; app: { id: string; name: s
 // Refreshes the sidebar's folders and the app's own stage after a move.
 const refreshApps = () => window.dispatchEvent(new Event("adorable:projects-updated"))
 
-/** The app top bar's stage control and its sheet. Hidden (a quiet note) until Mynt has promotions. */
-export function StageControl({ appId, appName, stage }: { appId: string; appName: string; stage: Stage }) {
+export const OPEN_PROMOTION_EVENT = "mynt:open-promotion"
+
+/** The app top bar's stage control and its sheet. Hidden (a quiet note) until Mynt has promotions. `noun`: what is
+ * moving, in the sheet's words (a service moves through the same stages with the same sheet). */
+export function StageControl({ appId, appName, stage, noun = "app" }: { appId: string; appName: string; stage: Stage; noun?: "app" | "service" }) {
   const [meta, setMeta] = useState<Meta | null>(null)
   const [mode, setMode] = useState<"promote" | "demote" | null>(null)
   const [checks, setChecks] = useState<PromotionChecks | null>(null)
@@ -294,6 +297,16 @@ export function StageControl({ appId, appName, stage }: { appId: string; appName
     setSheetStage(stage)
     if (m === "promote" && target) void loadChecks(target)
   }
+  // A labelled action elsewhere on the page (a service's checklist: Move to production) opens the same sheet.
+  const openRef = useRef(open)
+  openRef.current = open
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      if ((e as CustomEvent<{ appId?: string }>).detail?.appId === appId && nextStage(stage)) openRef.current("promote")
+    }
+    window.addEventListener(OPEN_PROMOTION_EVENT, onOpen)
+    return () => window.removeEventListener(OPEN_PROMOTION_EVENT, onOpen)
+  }, [appId, stage])
 
   const send = async (payload: Record<string, unknown>) => {
     if (busy) return
@@ -342,8 +355,8 @@ export function StageControl({ appId, appName, stage }: { appId: string; appName
             <SheetTitle>{mode === "demote" ? `Move ${appName} back` : sheetTarget ? `Promote ${appName} to ${STAGE_NAMES[sheetTarget]}` : appName}</SheetTitle>
             <SheetDescription>
               {mode === "demote"
-                ? "Owners and admins can move an app back a stage."
-                : `From ${STAGE_NAMES[sheetStage]}. Mynt checks the app before it moves; each check shows what to fix.`}
+                ? `Owners and admins can move ${noun === "app" ? "an app" : "a service"} back a stage.`
+                : `From ${STAGE_NAMES[sheetStage]}. Mynt checks the ${noun} before it moves; each check shows what to fix.`}
             </SheetDescription>
           </SheetHeader>
           <div className="px-4 pb-6">

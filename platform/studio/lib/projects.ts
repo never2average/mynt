@@ -49,8 +49,17 @@ function conversation(build: Obj): ProjectConversationSummary | null {
 
 const newestFirst = (a: { updatedAt: string }, b: { updatedAt: string }) => b.updatedAt.localeCompare(a.updatedAt);
 
-export function toProjects(appsReply: unknown, buildsReply: unknown): ProjectItem[] {
-  const apps = Array.isArray(appsReply) ? appsReply.filter(isObj) : [];
+// list_my_apps also lists the user's services (kind "service": a vendor service built like an app, with its own
+// workspace at /services/<id>). They are never apps: toProjects leaves them out, toServiceProjects is only them.
+const isService = (a: Obj) => a.kind === "service";
+
+/** The user's services, each with its builds (its builder chat's conversations), as toProjects gives apps. */
+export function toServiceProjects(appsReply: unknown, buildsReply: unknown): ProjectItem[] {
+  return toProjects(appsReply, buildsReply, "service");
+}
+
+export function toProjects(appsReply: unknown, buildsReply: unknown, kind: "app" | "service" = "app"): ProjectItem[] {
+  const apps = (Array.isArray(appsReply) ? appsReply.filter(isObj) : []).filter((a) => isService(a) === (kind === "service"));
   const builds = isObj(buildsReply) && Array.isArray(buildsReply.builds) ? buildsReply.builds.filter(isObj) : [];
 
   const byApp = new Map<string, ProjectConversationSummary[]>();
@@ -67,7 +76,7 @@ export function toProjects(appsReply: unknown, buildsReply: unknown): ProjectIte
       const conversations = (byApp.get(str(a.id)) ?? []).sort(newestFirst);
       return {
         id: str(a.id),
-        name: str(a.name, "Untitled app") || "Untitled app",
+        name: str(a.name) || (kind === "service" ? "Untitled service" : "Untitled app"),
         description: str(a.description),
         status: str(a.status, "draft"),
         stage: stageOf(a, conversations[0] ?? null),
