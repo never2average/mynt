@@ -1,7 +1,7 @@
 import { createPublicKey, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { request } from "node:http";
-import { ATTESTATION_AUDIENCE, keysNonce } from "./shared/binding.js";
+import { ATTESTATION_AUDIENCE, CLIENT_CA_SHA256, keysNonce, signingKeyConfig } from "./shared/binding.js";
 
 // The two things the service asks of the confidential VM's cloud, and nothing else:
 //
@@ -87,7 +87,14 @@ export function kmsClient({ provider, subjectToken, fetchImpl = fetch, stsUrl = 
 // wrapped by a Cloud KMS symmetric key, and named keys signed by Cloud KMS Ed25519 keys, each usable only by this image.
 const ROOT_AAD = Buffer.from("mynt-keyhouse-root-v1");
 
-export function confidentialSpacePlatform({ kms, launcher, wrapKey, signingKeys = {} }) {
+//
+// Which keys those are, and which authority's client certificates may call, come from the VM's metadata, outside the
+// measured image: whoever runs the VM could point it at keys of their own. So each is bound into every attestation
+// (config: wrap_key, signing_key:<name> for each named key, client_ca_sha256), and verifiers require the values they
+// expect.
+export function confidentialSpacePlatform({ kms, launcher, wrapKey, signingKeys = {}, clientCaSha256 }) {
+  if (!wrapKey) throw new Error("the service needs its wrap key's name, to bind into its attestation");
+  if (!CLIENT_CA_SHA256.test(clientCaSha256 ?? "")) throw new Error("the service needs the SHA-256 of its client-certificate authority, to bind into its attestation");
   const publicKeys = new Map();
   const publicKey = async (name) => {
     if (!publicKeys.has(name)) publicKeys.set(name, createPublicKey(await kms.publicKeyPem(signingKeys[name])).export({ format: "jwk" }).x);
@@ -106,7 +113,7 @@ export function confidentialSpacePlatform({ kms, launcher, wrapKey, signingKeys 
     tag: "cs",
     signingNames: Object.keys(signingKeys),
     derivedSigning: false,
-    config: null,
+    config: { wrap_key: wrapKey, client_ca_sha256: clientCaSha256, ...signingKeyConfig(signingKeys) },
     async attest(nonce, keys) {
       const token = await launcher.token({ audience: ATTESTATION_AUDIENCE, nonces: [nonce, keysNonce(keys)] });
       const c = claimsOf(token);

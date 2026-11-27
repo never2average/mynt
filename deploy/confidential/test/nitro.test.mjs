@@ -5,8 +5,9 @@ import { selfSignedEd25519 } from "../src/cert.mjs";
 import { openEnvelopedData } from "../src/cms.mjs";
 import { createKeyhouse, loadPolicy, Refused } from "../src/keyhouse.mjs";
 import { imdsCredentials, nitroKms, nitroPlatform, parseSettings, signV4 } from "../src/nitro.mjs";
-import { keysNonce } from "../src/shared/binding.js";
+import { clientAuthority, keysNonce } from "../src/shared/binding.js";
 import { CborTag, decodeCbor } from "../src/shared/cbor.js";
+import { clientMaterial } from "./fakes.mjs";
 import { envelopedData, fakeCredentials, fakeNitroKms, fakeNsm, KEY_ARN, PCRS } from "./fakes-nitro.mjs";
 
 // The Nitro platform against a fake security module and a fake KMS that enforces the key policy's PCR0 condition:
@@ -15,10 +16,11 @@ import { envelopedData, fakeCredentials, fakeNitroKms, fakeNsm, KEY_ARN, PCRS } 
 const b64u = (b) => Buffer.from(b).toString("base64url");
 const refusedWith = (code) => (e) => e instanceof Refused && e.code === code;
 
+const CA_SHA256 = "c".repeat(64);
 async function nitroKeyhouse({ nsm = fakeNsm(), kms = fakeNitroKms() } = {}) {
   const tls = selfSignedEd25519("mynt-keyhouse");
   const client = nitroKms({ region: "us-east-1", keyArn: KEY_ARN, nsm, credentials: fakeCredentials, post: kms.post });
-  const platform = nitroPlatform({ kms: client, nsm, region: "us-east-1", keyArn: KEY_ARN });
+  const platform = nitroPlatform({ kms: client, nsm, region: "us-east-1", keyArn: KEY_ARN, clientCaSha256: CA_SHA256 });
   const kh = await createKeyhouse({ platform, wrappedRoot: null, tlsSpki: tls.spki, policy: loadPolicy() });
   return { kh, nsm, kms, tls, platform };
 }
@@ -103,13 +105,20 @@ test("in the enclave: locked until init or unlock; init returns only the wrapped
   await assert.rejects(kh.handle("POST", "/v1/unlock", "mynt-core", { wrapped_root }), refusedWith("already_initialised"));
   const { sealed } = await kh.handle("POST", "/v1/seal", "mynt-core", { purpose: "secret", plaintext: b64u("value") });
   assert.match(sealed, /^cs1:ne:secret:/);
-  const signed = await kh.handle("POST", "/v1/sign", "mynt-core", { key: { name: "health-attester" }, message: b64u("m") });
+  // The attester key, derived from the root, signs only inside the health check: never a message a caller hands over.
+  await assert.rejects(kh.handle("POST", "/v1/sign", "mynt-core", { key: { name: "health-attester" }, message: b64u("m") }), refusedWith("reserved_key"));
+  const attester = await kh.handle("GET", "/v1/public-key", "mynt-core", null, new URLSearchParams({ name: "health-attester" }));
+  // A key Mynt sealed here as a signing key still signs.
+  const seed = randomBytes(32);
+  const key = (await kh.handle("POST", "/v1/seal", "mynt-core", { purpose: "signing-key", plaintext: b64u(seed) })).sealed;
+  const signed = await kh.handle("POST", "/v1/sign", "mynt-core", { key: { sealed: key }, message: b64u("m") });
 
   // The enclave restarts (nothing survives) and gets the same root back: the same keys, the same sealed values.
   const { kh: again } = await nitroKeyhouse({ kms });
   await again.handle("POST", "/v1/unlock", "mynt-core", { wrapped_root });
   assert.equal(Buffer.from((await again.handle("POST", "/v1/unseal", "mynt-core", { purpose: "secret", sealed })).plaintext, "base64url").toString(), "value");
-  const signedAgain = await again.handle("POST", "/v1/sign", "mynt-core", { key: { name: "health-attester" }, message: b64u("m") });
+  assert.deepEqual(await again.handle("GET", "/v1/public-key", "mynt-core", null, new URLSearchParams({ name: "health-attester" })), attester);
+  const signedAgain = await again.handle("POST", "/v1/sign", "mynt-core", { key: { sealed: key }, message: b64u("m") });
   assert.equal(signedAgain.public_key, signed.public_key);
   assert.ok(verify(null, Buffer.from("m"), createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: signed.public_key }, format: "jwk" }), Buffer.from(signedAgain.signature, "hex")));
 });
@@ -122,7 +131,8 @@ test("an attestation is the module's document: the caller's nonce, the keys' bin
   const a = await kh.handle("GET", "/v1/attestation", "mynt-core", null, new URLSearchParams({ nonce }));
   assert.equal(a.host, "aws-nitro");
   assert.equal(a.format, "nitro-cose");
-  assert.deepEqual(a.keys.config, { kms_key: KEY_ARN, region: "us-east-1" });
+  // What the parent handed the enclave is part of what's attested: the key, its region, and the client authority.
+  assert.deepEqual(a.keys.config, { kms_key: KEY_ARN, region: "us-east-1", client_ca_sha256: CA_SHA256 });
   assert.ok(a.keys.signing["health-attester"] && a.keys.ingest_public_key);
   const fields = nsm.issued.at(-1);
   assert.equal(Buffer.from(fields.nonce).toString(), nonce);
@@ -135,9 +145,15 @@ test("an attestation is the module's document: the caller's nonce, the keys' bin
   assert.equal(a.measurements.debug, false);
 });
 
-test("settings from the parent: a region, a KMS key ARN in it, and a PEM authority, or nothing starts", () => {
-  const ca = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
-  assert.deepEqual(parseSettings(JSON.stringify({ region: "us-east-1", kms_key: KEY_ARN, client_ca: ca, extra: 1 })), { region: "us-east-1", kms_key: KEY_ARN, client_ca: ca });
+test("settings from the parent: a region, a KMS key ARN in it, and exactly one authority (hashed for the attestation), or nothing starts", () => {
+  const m = clientMaterial("mynt-core");
+  const ca = m.ca;
+  const authority = clientAuthority(ca);
+  assert.deepEqual(parseSettings(JSON.stringify({ region: "us-east-1", kms_key: KEY_ARN, client_ca: ca, extra: 1 })), { region: "us-east-1", kms_key: KEY_ARN, client_ca: authority.pem, client_ca_sha256: authority.sha256 });
+  // The parent appends an authority of its own, to call the enclave as Mynt's server: refused, not half-hashed.
+  assert.throws(() => parseSettings(JSON.stringify({ region: "us-east-1", kms_key: KEY_ARN, client_ca: ca + clientMaterial("mynt-core").ca })), /client_ca: .*exactly one/);
+  assert.throws(() => parseSettings(JSON.stringify({ region: "us-east-1", kms_key: KEY_ARN, client_ca: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n" })), /client_ca/);
+  assert.throws(() => nitroPlatform({ kms: {}, nsm: {}, region: "us-east-1", keyArn: KEY_ARN }), /client-certificate authority/);
   assert.throws(() => parseSettings(JSON.stringify({ region: "us-west-2", kms_key: KEY_ARN, client_ca: ca })), /kms_key/);
   assert.throws(() => parseSettings(JSON.stringify({ region: "nowhere", kms_key: KEY_ARN, client_ca: ca })), /region/);
   assert.throws(() => parseSettings(JSON.stringify({ region: "us-east-1", kms_key: KEY_ARN, client_ca: "x" })), /client_ca/);

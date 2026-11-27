@@ -20,6 +20,15 @@ import type { SealedHealthInput, SealedHealthResult } from "./shared/health.js";
 export const CONFIDENTIAL_HOST_KINDS = ["local", "aws-nitro", "gcp-confidential-space"] as const;
 export type ConfidentialHostKind = (typeof CONFIDENTIAL_HOST_KINDS)[number];
 
+// What this server's confidential host is, in the words ops_status and the start-up log use.
+export const LOCAL_HOST_STATUS = "Confidential host: local (keys sealed in this server's own process)";
+export function confidentialHostStatus(env: NodeJS.ProcessEnv = process.env): { kind: string; attested: boolean; status: string } {
+  const kind = env.CONFIDENTIAL_HOST || "local";
+  if (kind === "local") return { kind, attested: false, status: LOCAL_HOST_STATUS };
+  if (!(CONFIDENTIAL_HOST_KINDS as readonly string[]).includes(kind)) return { kind, attested: false, status: `Confidential host: ${kind} isn't a host Mynt knows, so the server won't start with it` };
+  return { kind, attested: true, status: `Confidential host: ${kind} (keys sealed in the attested confidential service; this server never falls back to its own process)` };
+}
+
 // What a confidential workload is: the hardware and software that ran it and the exact image. Null where a host can't say.
 export interface Measurements {
   host: ConfidentialHostKind;
@@ -75,12 +84,19 @@ export const isPurpose = (p: string): p is Purpose => Object.hasOwn(PURPOSES, p)
 
 export class ConfidentialRefused extends Error {}
 
+// Named keys that sign only inside one operation of the host, never a message a caller hands it: the health attester
+// signs only the report computeHealth made (shared/health.ts). Every host refuses them in sign().
+export const RESERVED_SIGNING_KEYS: readonly string[] = ["health-attester"];
+
 export interface ConfidentialHost {
   readonly kind: ConfidentialHostKind;
   attest(nonce: string): Promise<Attestation>;
   measurements(): Promise<Measurements>;
-  seal(purpose: Purpose, plaintext: Uint8Array): Promise<string>;
-  unseal(purpose: Purpose, sealed: string): Promise<Buffer>; // refused for purposes that never come back out
+  // `context`: what the value is (a platform key's type), bound into the sealed value so it opens only when the same
+  // context is named again (shared/sealing.ts). Values sealed before contexts open under any.
+  seal(purpose: Purpose, plaintext: Uint8Array, context?: string): Promise<string>;
+  unseal(purpose: Purpose, sealed: string, context?: string): Promise<Buffer>; // refused for purposes that never come back out
+  // Never with the health-attester key: it signs only inside computeHealth (RESERVED_SIGNING_KEYS).
   sign(key: SigningKeyRef, message: Uint8Array): Promise<{ public_key: string; signature: string }>; // base64url, hex
   publicKey(name: string): Promise<string>; // base64url raw Ed25519
   ingestPublicKey(): Promise<string>; // base64url X25519: what partners seal their statements to

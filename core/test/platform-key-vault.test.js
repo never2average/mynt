@@ -36,18 +36,19 @@ const ALL_FAKES = Object.values(FAKE);
 // A confidential host that counts what it's asked to seal and open, over the local one.
 function countingHost() {
   const local = new LocalConfidentialHost();
-  const calls = { seal: [], unseal: [] };
+  const calls = { seal: [], unseal: [], contexts: [] };
   const host = new Proxy(local, {
     get(target, k) {
       if (k === "seal")
-        return async (purpose, plain) => {
+        return async (purpose, plain, context) => {
           calls.seal.push(purpose);
-          return target.seal(purpose, plain);
+          calls.contexts.push(context);
+          return target.seal(purpose, plain, context);
         };
       if (k === "unseal")
-        return async (purpose, sealed) => {
+        return async (purpose, sealed, context) => {
           calls.unseal.push(purpose);
-          return target.unseal(purpose, sealed);
+          return target.unseal(purpose, sealed, context);
         };
       const v = target[k];
       return typeof v === "function" ? v.bind(target) : v;
@@ -196,7 +197,9 @@ test("admins only; a key goes in once, sealed by the confidential host, and neve
   const rows = (await w.store.db.query(`SELECT name, key_type, status, sealed, fingerprint FROM ${T}.platform_secrets`)).rows;
   assert.equal(rows.length, 1);
   assert.deepEqual([rows[0].name, rows[0].key_type, rows[0].status], ["ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", "active"]);
-  assert.match(rows[0].sealed, /^cs1:local:secret:/);
+  // Bound to its key type (cs2): the value opens only as an ANTHROPIC_API_KEY.
+  assert.match(rows[0].sealed, /^cs2:local:secret:/);
+  assert.ok(w.calls.contexts.includes("ANTHROPIC_API_KEY"));
   clean(JSON.stringify(rows), "the table");
   // The whole database, as text: the value is nowhere in it.
   const dump = JSON.stringify((await w.store.db.query(`SELECT * FROM ${T}.audit_log`)).rows) + JSON.stringify((await w.store.db.query(`SELECT * FROM ${T}.settings`)).rows);
@@ -418,7 +421,65 @@ test("a key stored before the vault was general (sealed by the vault itself, nam
   assert.equal((await vault.set(await store.getUser(user.id), "SIGNWELL_API_KEY", "sw-fake-key-replacement-0002")).ok, true);
   const rows = (await store.db.query(`SELECT name, status, sealed FROM ${T}.platform_secrets ORDER BY status`)).rows;
   assert.deepEqual(rows.map((r) => [r.status, r.name === "esign:signwell:api_key", r.sealed === null]), [["active", true, false], ["retired", false, true]]);
-  assert.match(rows[0].sealed, /^cs1:local:secret:/);
+  assert.match(rows[0].sealed, /^cs2:local:secret:/);
+});
+
+test("a sealed key is bound to its type: moved to another type's row in the database, it doesn't open there", async () => {
+  const w = await setup();
+  ok(await w.admin.call("set_platform_key", { type: "ANTHROPIC_API_KEY", value: FAKE.model }));
+  ok(await w.admin.call("set_platform_key", { type: "CLERK_WEBHOOK_SECRET", value: FAKE.hook }));
+  const sealedOf = async (type) => (await w.store.db.query(`SELECT sealed FROM ${T}.platform_secrets WHERE key_type = $1 AND status = 'active'`, [type])).rows[0].sealed;
+  const [model, hook] = [await sealedOf("ANTHROPIC_API_KEY"), await sealedOf("CLERK_WEBHOOK_SECRET")];
+  assert.match(model, /^cs2:local:secret:/);
+  // Someone who can write the database swaps the two sealed values (to have the model key sent where the webhook
+  // secret goes, say). Neither opens as the other: the rows stay listed, without a value, and nothing is misused.
+  await w.store.db.query(`UPDATE ${T}.platform_secrets SET sealed = $2 WHERE key_type = $1 AND status = 'active'`, ["ANTHROPIC_API_KEY", hook]);
+  await w.store.db.query(`UPDATE ${T}.platform_secrets SET sealed = $2 WHERE key_type = $1 AND status = 'active'`, ["CLERK_WEBHOOK_SECRET", model]);
+  const printed = [];
+  const error = console.error;
+  console.error = (...a) => printed.push(a.join(" "));
+  let swapped;
+  try {
+    swapped = await PlatformKeyVault.open(w.store, { host: new LocalConfidentialHost(), env: {} });
+  } finally {
+    console.error = error;
+  }
+  assert.equal(swapped.peek("ANTHROPIC_API_KEY"), null);
+  assert.equal(swapped.peek("CLERK_WEBHOOK_SECRET"), null);
+  assert.ok(printed.some((l) => /ANTHROPIC_API_KEY couldn't be opened/.test(l)));
+  clean(printed.join("\n"), "the console");
+  // Put back, each opens as itself.
+  await w.store.db.query(`UPDATE ${T}.platform_secrets SET sealed = $2 WHERE key_type = $1 AND status = 'active'`, ["ANTHROPIC_API_KEY", model]);
+  await w.store.db.query(`UPDATE ${T}.platform_secrets SET sealed = $2 WHERE key_type = $1 AND status = 'active'`, ["CLERK_WEBHOOK_SECRET", hook]);
+  const back = await PlatformKeyVault.open(w.store, { host: new LocalConfidentialHost(), env: {} });
+  assert.deepEqual([back.peek("ANTHROPIC_API_KEY"), back.peek("CLERK_WEBHOOK_SECRET")], [FAKE.model, FAKE.hook]);
+});
+
+test("a key the host sealed before types were bound (cs1) still opens, is sealed again bound to its type, and the next write binds too", async () => {
+  const w = await setup();
+  const local = new LocalConfidentialHost();
+  // As the vault stored it before: sealed for the purpose alone.
+  const old = await local.seal("secret", Buffer.from(FAKE.model, "utf8"));
+  assert.match(old, /^cs1:local:secret:/);
+  await w.store.db.query(`INSERT INTO ${T}.platform_secrets (id, name, key_type, status, sealed, fingerprint, set_by) VALUES (gen_random_uuid(), 'ANTHROPIC_API_KEY', 'ANTHROPIC_API_KEY', 'active', $1, $2, $3)`, [old, fingerprintOf(FAKE.model), w.admin.user.id]);
+  const vault = await PlatformKeyVault.open(w.store, { host: local, env: {} });
+  assert.equal(vault.peek("ANTHROPIC_API_KEY"), FAKE.model, "an old row is read");
+  const sealedNow = async () => (await w.store.db.query(`SELECT sealed FROM ${T}.platform_secrets WHERE key_type = 'ANTHROPIC_API_KEY' AND status = 'active'`)).rows[0].sealed;
+  const rebound = await sealedNow();
+  assert.match(rebound, /^cs2:local:secret:/, "and sealed again, bound to its type, once it has opened");
+  assert.equal((await local.unseal("secret", rebound, "ANTHROPIC_API_KEY")).toString(), FAKE.model);
+  await assert.rejects(local.unseal("secret", rebound, "CLERK_WEBHOOK_SECRET"));
+  // A restart reads the bound row; replacing the key writes a bound row.
+  assert.equal((await PlatformKeyVault.open(w.store, { host: local, env: {} })).peek("ANTHROPIC_API_KEY"), FAKE.model);
+  assert.equal((await vault.set(w.admin.user, "ANTHROPIC_API_KEY", FAKE.model2)).ok, true);
+  assert.match(await sealedNow(), /^cs2:local:secret:/);
+  assert.equal(vault.peek("ANTHROPIC_API_KEY"), FAKE.model2);
+  // A host that can't seal just now leaves the old row as it is, still readable.
+  const w2 = await setup();
+  await w2.store.db.query(`INSERT INTO ${T}.platform_secrets (id, name, key_type, status, sealed, fingerprint, set_by) VALUES (gen_random_uuid(), 'ANTHROPIC_API_KEY', 'ANTHROPIC_API_KEY', 'active', $1, $2, $3)`, [old, fingerprintOf(FAKE.model), w2.admin.user.id]);
+  const readOnly = new Proxy(local, { get: (t, k) => (k === "seal" ? async () => Promise.reject(new Error("down")) : typeof t[k] === "function" ? t[k].bind(t) : t[k]) });
+  assert.equal((await PlatformKeyVault.open(w2.store, { host: readOnly, env: {} })).peek("ANTHROPIC_API_KEY"), FAKE.model);
+  assert.equal((await w2.store.db.query(`SELECT sealed FROM ${T}.platform_secrets WHERE key_type = 'ANTHROPIC_API_KEY'`)).rows[0].sealed, old);
 });
 
 test("without a vault key nothing can be sealed: the key is refused, in words, and nothing is stored", async () => {

@@ -12538,7 +12538,7 @@
     {
       "name": "ops_status",
       "title": "What needs attention",
-      "description": "Admin: failures, stuck runs and this month's spend across builds, the product desk and its algorithm explorations, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying), vendors' services (failed conformance runs, subscriptions whose calls mostly fail), production apps left without a signed program agreement with a product's sponsor, risk reviews and Mynt's risk-model validations that are overdue, and the server's Supabase backups (last run, off-site copy, last restore test). Read-only.",
+      "description": "Admin: failures, stuck runs and this month's spend across builds, the product desk and its algorithm explorations, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying), vendors' services (failed conformance runs, subscriptions whose calls mostly fail), production apps left without a signed program agreement with a product's sponsor, risk reviews and Mynt's risk-model validations that are overdue, and the server's Supabase backups (last run, off-site copy, last restore test). Also says which confidential host this server uses: the local one keeps keys sealed in the server's own process, attesting nothing. Read-only.",
       "area": "admin",
       "roles": [
         "admin"

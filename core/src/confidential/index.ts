@@ -4,7 +4,7 @@ import { installReleasedVaultKeys, legacyVaultRoot, rewrapLegacyValue, LEGACY_SE
 import { NitroEnclaveHost, nitroHostOptionsFromEnv } from "./aws-nitro.js";
 import { ConfidentialSpaceHost, remoteHostOptionsFromEnv } from "./gcp-confidential-space.js";
 import { ConfidentialReleases, TABLES } from "./governance.js";
-import { CONFIDENTIAL_HOST_KINDS, ConfidentialRefused, type ConfidentialHost } from "./host.js";
+import { CONFIDENTIAL_HOST_KINDS, ConfidentialRefused, LOCAL_HOST_STATUS, type ConfidentialHost } from "./host.js";
 import { LocalConfidentialHost } from "./local.js";
 
 export * from "./host.js";
@@ -12,13 +12,36 @@ export { ConfidentialReleases } from "./governance.js";
 export { LocalConfidentialHost } from "./local.js";
 
 // CONFIDENTIAL_HOST: local (the default), aws-nitro (the documented deployment) or gcp-confidential-space, with
-// CONFIDENTIAL_HOST_URL, CONFIDENTIAL_HOST_CLIENT_CERT and CONFIDENTIAL_HOST_CLIENT_KEY (paths to files, never the
-// material), and for aws-nitro CONFIDENTIAL_HOST_KMS_KEY (the wrap key's ARN). With a database, an enclave that
-// restarted gets its wrapped root back from it (`mynt confidential init` stored it).
-export function confidentialHostFromEnv(env: NodeJS.ProcessEnv, releases: ConfidentialReleases | null, db?: Db): ConfidentialHost {
+// CONFIDENTIAL_HOST_URL, CONFIDENTIAL_HOST_CLIENT_CERT, CONFIDENTIAL_HOST_CLIENT_KEY and CONFIDENTIAL_HOST_CLIENT_CA
+// (paths to files, never the material), and what the service's attestation must bind: for aws-nitro
+// CONFIDENTIAL_HOST_KMS_KEY (the wrap key's ARN), for gcp-confidential-space CONFIDENTIAL_HOST_WRAP_KEY and
+// CONFIDENTIAL_HOST_SIGNING_KEYS. With a database, an enclave that restarted gets its wrapped root back from it
+// (`mynt confidential init` stored it).
+//
+// Which host is never a fallback. Unset means local, and says so at start-up and in ops_status. A remote host that's
+// misconfigured or failing throws here or on its first use: nothing in this folder ever answers with the local host
+// in its place. And a server that has any remote setting but no CONFIDENTIAL_HOST is refused rather than quietly run
+// local: someone meant a confidential service and lost the line that selects it.
+
+const REMOTE_SETTINGS = ["CONFIDENTIAL_HOST_URL", "CONFIDENTIAL_HOST_CLIENT_CERT", "CONFIDENTIAL_HOST_CLIENT_KEY", "CONFIDENTIAL_HOST_CLIENT_CA", "CONFIDENTIAL_HOST_KMS_KEY", "CONFIDENTIAL_HOST_WRAP_KEY", "CONFIDENTIAL_HOST_SIGNING_KEYS"];
+let saidLocal = false;
+// Once per process, to stderr (stdout is the protocol on the stdio command).
+const onceAtStart = (line: string) => {
+  if (saidLocal) return;
+  saidLocal = true;
+  console.error(line);
+};
+
+// `log`: where the start-up line goes (once per process); tests pass their own.
+export function confidentialHostFromEnv(env: NodeJS.ProcessEnv, releases: ConfidentialReleases | null, db?: Db, log: (line: string) => void = onceAtStart): ConfidentialHost {
   const kind = env.CONFIDENTIAL_HOST || "local";
   if (!(CONFIDENTIAL_HOST_KINDS as readonly string[]).includes(kind)) throw new ConfidentialRefused(`CONFIDENTIAL_HOST must be one of ${CONFIDENTIAL_HOST_KINDS.join(", ")}`);
-  if (kind === "local") return new LocalConfidentialHost();
+  if (kind === "local") {
+    const stray = REMOTE_SETTINGS.filter((k) => env[k]);
+    if (stray.length) throw new ConfidentialRefused(`${stray.join(", ")} ${stray.length > 1 ? "are" : "is"} set but CONFIDENTIAL_HOST isn't: set CONFIDENTIAL_HOST to the confidential service they describe, or remove them. This server won't run on the local host with a confidential service half configured`);
+    log(`${LOCAL_HOST_STATUS}. Nothing is attested, and whoever runs this server can read what it keeps. Set CONFIDENTIAL_HOST to use the confidential service.`);
+    return new LocalConfidentialHost();
+  }
   if (!releases) throw new ConfidentialRefused("The confidential service needs the release record");
   if (kind === "aws-nitro") return new NitroEnclaveHost(nitroHostOptionsFromEnv(env, () => releases.pcrsInEffect(), db ? () => storedWrappedRoot(db, kind) : undefined));
   return new ConfidentialSpaceHost(remoteHostOptionsFromEnv(env, () => releases.inEffect()));
