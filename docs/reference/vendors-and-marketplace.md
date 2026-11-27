@@ -89,7 +89,7 @@ Mynt tests the offering itself with `run_conformance`:
 
 A pass makes the offering `conformance_passed`. `update_vendor_offering { listed: true }` then lists it. Changing an endpoint or licences sends it back to draft.
 
-For a [service built on Mynt](services.md#a-new-build-and-conformance), putting a new build online is that change of endpoint: the offering goes back to draft, Mynt runs the test itself as soon as the build answers, and the service's stage decides the listing.
+A [service built on Mynt](services.md#a-new-build-and-conformance) is different: a new build goes online beside the one serving, Mynt runs the test against it itself as soon as it answers, and the offering switches to it only on a pass. The serving build stays listed and callable throughout, and the service's stage decides the listing. A service in Staging that has passed can be [tested in the sandbox by its offering id](services.md#testing-a-service-in-staging).
 
 ### Practising first: the vendor sandbox
 
@@ -167,7 +167,7 @@ The signing secret is per subscription, and Mynt generates it.
 
 Conformance runs use the offering's own secret, shown once by `create_vendor_offering`.
 
-A [service built on Mynt](services.md#the-endpoint-and-the-signing-secret) has one secret for conformance and every subscriber, handed to it only as a hosted setting and never shown.
+A [service built on Mynt](services.md#the-endpoint-and-the-signing-secret) has one secret for conformance and every subscriber, handed to it only as a hosted setting and never shown. Each new build gets a new one, which takes over together with the build.
 
 ## The marketplace and standard terms
 

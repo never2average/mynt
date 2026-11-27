@@ -493,3 +493,187 @@ describe("the workspace", () => {
     expect(document.querySelector("[data-service-name]")!.textContent).toBe("Service");
   });
 });
+
+describe("Transcripts, a new build beside the serving one, sandbox testing, and what is the firm's", () => {
+  const SECRET = `mvs_${"s".repeat(43)}`;
+  const exchange = (name: string, status: number, body: unknown) => ({
+    case: name,
+    request: { method: "POST", path: "/mynt/services/identity_verification", headers: { "Content-Type": "application/json", "User-Agent": "Mynt-Vendor-Client/1", "Mynt-Signature": "t=1764000000,v1=<redacted>" }, body: { request_id: "r-1", environment: "test", input: { full_name: "Ada Lovelace" } } },
+    response: { http_status: status, body },
+    expected: name === "fixture_1" ? '200 with the same request_id, status "ok" and an output valid against the service type\'s output schema.' : "Refused: 401.",
+  });
+  const TRANSCRIPT = [exchange("fixture_1", 200, { request_id: "r-1", status: "ok", output: { verified: true } }), exchange("bad_signature_refused", 401, { error: "bad_signature" })];
+  const withTranscripts = () =>
+    service({
+      conformance: {
+        needed: false,
+        tested_build_id: BUILD,
+        runs: [
+          { ...REPLY.conformance.runs[0], total_cases: 2, passed_cases: 2, cases: [], transcript: TRANSCRIPT },
+          { ...REPLY.conformance.runs[1], transcript: TRANSCRIPT, build_id: BUILD },
+          { ...REPLY.conformance.runs[2], transcript: null, transcript_note: "Not recorded: this run is from before Mynt kept transcripts" },
+        ],
+      },
+    });
+  const transcriptRows = (sheet: HTMLElement) => [...sheet.querySelectorAll("[data-run-transcript] tbody tr")].map((r) => [...r.querySelectorAll("td")].map((c) => c.textContent));
+
+  it("a real run's row opens its cases and then its transcript, as a table", async () => {
+    tab("conformance", withTranscripts());
+    expect(rows("runs").map((r) => r[2])).toEqual(["Not recorded", "77777777", "Not recorded"]);
+    await act(async () => void fireEvent.click(document.querySelector('[data-open-run="c2"]')!));
+    const sheet = document.querySelector('[data-admin-sheet="service-run"]') as HTMLElement;
+    expect([...sheet.querySelectorAll("[data-run-transcript] thead th")].map((h) => h.textContent)).toEqual(["Case", "Mynt sent", "It answered", "Mynt expected"]);
+    const t = transcriptRows(sheet);
+    expect(t.map((r) => r[0])).toEqual(["fixture 1", "bad signature refused"]);
+    expect(t[0][1]).toContain("POST /mynt/services/identity_verification");
+    expect(t[0][1]).toContain("Mynt-Signature: t=1764000000,v1=<redacted>");
+    expect(t[0][1]).toContain('"full_name": "Ada Lovelace"');
+    expect(t[0][2]).toContain("HTTP 200");
+    expect(t[0][2]).toContain('"verified": true');
+    expect(t[1][2]).toContain("HTTP 401");
+    expect(t[0][3]).toContain("200 with the same request_id");
+    expect(sheet.textContent).toContain("The signing secret, the signature's digest and any credential are left out");
+  });
+
+  it("a practice run's row opens its transcript too, with no pointer elsewhere", async () => {
+    tab("conformance", withTranscripts());
+    await act(async () => void fireEvent.click(document.querySelector('[data-open-run="p2"]')!));
+    const sheet = document.querySelector('[data-admin-sheet="service-run"]') as HTMLElement;
+    expect(sheet.textContent).toContain("It never counts as conformance");
+    expect(transcriptRows(sheet).map((r) => r[0])).toEqual(["fixture 1", "bad signature refused"]);
+    expect(sheet.querySelector("[data-practice-transcript-note]")).toBeNull();
+  });
+
+  it("a run from before transcripts were kept says so, and shows no empty transcript", async () => {
+    tab("conformance", withTranscripts());
+    await act(async () => void fireEvent.click(document.querySelector('[data-open-run="c1"]')!));
+    const sheet = document.querySelector('[data-admin-sheet="service-run"]') as HTMLElement;
+    expect(sheet.querySelector("[data-run-transcript]")).toBeNull();
+    expect(sheet.querySelector("[data-transcript-note]")!.textContent).toBe("Transcript: Not recorded: this run is from before Mynt kept transcripts");
+  });
+
+  it("never shows a signing secret, a key, a bearer credential or a signature's digest, even if a reply carried one", async () => {
+    const leaky = service({
+      conformance: {
+        needed: false,
+        tested_build_id: null,
+        runs: [
+          {
+            ...REPLY.conformance.runs[1],
+            transcript: [
+              {
+                ...TRANSCRIPT[0],
+                request: { ...TRANSCRIPT[0].request, headers: { "Mynt-Signature": `t=1764000000,v1=${"ab".repeat(32)}`, Authorization: "Bearer abcdefghijklmnop" } },
+                response: { http_status: 200, body: { debug: { secret: SECRET, key: "mynt_test_abcdefghijkl" } } },
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(leaky)).not.toContain(SECRET);
+    const { container } = tab("conformance", leaky);
+    await act(async () => void fireEvent.click(document.querySelector('[data-open-run="c2"]')!));
+    const sheet = document.querySelector('[data-admin-sheet="service-run"]') as HTMLElement;
+    const text = `${container.textContent}${sheet.textContent}`;
+    expect(text).not.toMatch(/mvs_|mynt_test_abc|abcdefghijklmnop|v1=[0-9a-f]{32}/);
+    expect(sheet.textContent).toContain("v1=<redacted>");
+    expect(sheet.textContent).toContain('"secret": "<redacted>"');
+  });
+
+  it("shows a new build being tested beside the serving one, and one that didn't take over, plainly", async () => {
+    const sv = service({
+      stage: "production",
+      offering: { ...REPLY.offering, status: "listed", status_words: "Listed in the Marketplace" },
+      hosted: { status: "running", online: true, build_id: BUILD, address: "https://x.example.com" },
+      new_build: { build_id: "99999999-0000-4000-8000-000000000000", status: "testing", status_words: "Being tested by Mynt", serving_build_id: BUILD, note: "The serving build keeps answering. Mynt switches to this build only if it passes; otherwise it is removed." },
+      conformance: {
+        needed: false,
+        tested_build_id: BUILD,
+        runs: [
+          {
+            run_id: "n1",
+            kind: "conformance",
+            passed: false,
+            at: "2026-11-26T10:00:00Z",
+            run_by: null,
+            failures: [{ case: "fixture_1", problems: ["output /score must be integer"] }],
+            cases: [{ case: "fixture_1", passed: false, http_status: 200, problems: ["output /score must be integer"] }],
+            passed_cases: 0,
+            total_cases: 1,
+            transcript: [TRANSCRIPT[0]],
+            build_id: "88888888-0000-4000-8000-000000000000",
+            new_build: true,
+            switched: false,
+            outcome: "Mynt's conformance test failed on it. It was removed; the build that was serving kept serving",
+          },
+          {
+            run_id: "n0",
+            kind: "conformance",
+            passed: false,
+            at: "2026-11-25T12:00:00Z",
+            run_by: null,
+            failures: [],
+            cases: [],
+            passed_cases: 0,
+            total_cases: 0,
+            transcript: null,
+            transcript_note: "Nothing was sent: the build never answered, so there was nothing to test",
+            build_id: "66666666-0000-4000-8000-000000000000",
+            new_build: true,
+            switched: false,
+            outcome: "The build didn't start on Mynt's hosting, so there was nothing to test. It was removed; the build that was serving kept serving",
+          },
+          { ...REPLY.conformance.runs[2], run_id: "c9", at: "2026-11-25T10:00:00Z", build_id: BUILD },
+        ],
+      },
+    });
+    tab("conformance", sv);
+    expect(rows("runs")).toEqual([
+      ["2026-11-26 10:00", "Conformance, new build", "88888888", "Didn't pass: removed", "0 of 1", "Mynt"],
+      ["2026-11-25 12:00", "Conformance, new build", "66666666", "Didn't pass: removed", "None run", "Mynt"],
+      ["2026-11-25 10:00", "Conformance", "77777777", "Passed", "1 of 1", "Vera"],
+    ]);
+    // The run that stands is the serving build's, not the failed new build's.
+    expect(fact("Last real run")).toBe("Passed 2026-11-25 10:00");
+    expect(fact("Build tested")).toBe("77777777");
+    expect(fact("New build")).toBe("99999999 · Being tested by Mynt");
+    expect(fact("Last new build that didn't take over")).toBe("88888888 · 2026-11-26 10:00");
+    await act(async () => void fireEvent.click(document.querySelector('[data-open-run="n1"]')!));
+    const sheet = document.querySelector('[data-admin-sheet="service-run"]') as HTMLElement;
+    expect(sheet.textContent).toContain("Conformance run on a new build");
+    expect(sheet.querySelector("[data-run-outcome]")!.textContent).toBe("Mynt's conformance test failed on it. It was removed; the build that was serving kept serving");
+    cleanup();
+    tab("overview", sv);
+    expect(fact("Status")).toBe("Listed in the Marketplace");
+    expect(fact("Build serving")).toBe("77777777");
+    expect(fact("New build")).toBe("99999999 · Being tested by Mynt");
+    expect(document.querySelector("[data-new-build-note]")!.textContent).toContain("Build 99999999 is online beside build 77777777. The serving build keeps answering.");
+  });
+
+  it("says when a service in Staging is open to sandbox testing, with the offering id to share", () => {
+    const open = service({
+      stage: "staging",
+      testing: { open: true, offering_id: OFF, words: "In testing: sandbox only until its builder moves it to Production", how: "Give this offering id to a builder who should test it." },
+    });
+    tab("overview", open);
+    expect(document.querySelector('[data-sandbox-testing="open"]')!.textContent).toBe(`Open. Offering id ${OFF}`);
+    expect(document.querySelector("[data-sandbox-testing-note]")!.textContent).toBe("In testing: sandbox only until its builder moves it to Production. Give this offering id to a builder who should test it.");
+    cleanup();
+    tab("overview", service({ testing: { open: false, offering_id: OFF, words: "Opens once the service is in Staging and a build has passed Mynt's conformance test" } }));
+    expect(document.querySelector('[data-sandbox-testing="closed"]')!.textContent).toBe("Opens once the service is in Staging and a build has passed Mynt's conformance test");
+    expect(document.querySelector("[data-sandbox-testing-note]")).toBeNull();
+  });
+
+  it("a member from another firm isn't shown who subscribes: Not shown with the reason, never 0", () => {
+    const outside = service({ subscribers: null, checklist: [], progress: { done: 0, total: 0 }, firm_only: "Who subscribes and what is left to list it are shown to Swift ID Ltd's people only" });
+    expect(outside.subscribers).toEqual([]);
+    tab("subscribers", outside);
+    expect(fact("Subscriptions")).toBe("Not shown");
+    expect(fact("Live")).toBe("Not shown");
+    expect(rows("subscribers")).toEqual([["Not available. Who subscribes and what is left to list it are shown to Swift ID Ltd's people only"]]);
+    cleanup();
+    tab("overview", outside);
+    expect(document.querySelector("[data-firm-only]")!.textContent).toBe("Who subscribes and what is left to list it are shown to Swift ID Ltd's people only");
+  });
+});

@@ -16,7 +16,8 @@ export interface VendorCallOptions {
   anyPort?: boolean; // webhooks: https on any port (vendors serve on 443 only)
   anyBody?: boolean; // webhooks: the receiver's answer needn't be JSON
   rawBody?: boolean; // public registers' files: the answer comes back as text, not parsed
-  appAddress?: (appId: string) => string | null; // tests only: where a hosted app answers, instead of its hosted address
+  // tests only: where a hosted app answers, instead of its hosted address (`copy`: which of its copies, by the address Mynt derived for it)
+  appAddress?: (appId: string, copy?: { tag: string | null; domain: string | null }) => string | null;
   timeoutMs?: number; // default 10 s
   maxResponseBytes?: number; // default 256 KiB
 }

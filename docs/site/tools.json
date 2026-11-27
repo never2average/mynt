@@ -7609,7 +7609,7 @@
     {
       "name": "deploy_app",
       "title": "Host an app",
-      "description": "Developer: run one of your apps on its own VM from a build Mynt verified (build_id from your coding-agent builds). The VM fetches exactly that commit, builds it and runs it; each Compose service listens on the port its mynt.port label names and is served publicly over HTTPS. Mynt gives the app a dedicated key (live once the app is in Production and published, else sandbox), added at the edge to its calls to Mynt and never stored on the VM. Deploying again with a newer build replaces it.",
+      "description": "Developer: run one of your apps on its own VM from a build Mynt verified (build_id from your coding-agent builds). The VM fetches exactly that commit, builds it and runs it; each Compose service listens on the port its mynt.port label names and is served publicly over HTTPS. Mynt gives the app a dedicated key (live once the app is in Production and published, else sandbox), added at the edge to its calls to Mynt and never stored on the VM. Deploying again with a newer build replaces it. A service (create_service) differs: only an owner or admin of its workspace, at the firm that offers it, puts a build online; it needs direct hosting; and while a build of it serves subscribers, a newer build goes online beside it, with a signing secret of its own, and takes over only after Mynt's conformance test passes on it (and, in Production, the other production checks). If it fails it is removed and the serving build, its offering and its listing are unchanged.",
       "area": "hosting",
       "roles": [
         "developer",
@@ -9236,7 +9236,7 @@
     {
       "name": "get_service",
       "title": "A service you build on Mynt",
-      "description": "Builder (any member of the service's workspace): one service, whole. Its stage (idea, staging, or production, which is listed in the Marketplace), its service type's contract (the input and output as field tables, the endpoint Mynt derives, the signing rule, fixtures), its conformance and practice runs with their cases, its standard terms versions, the firms and apps subscribed with their agreements, reliability from Mynt's own records of calls (calls, error rate and incidents per day; a figure Mynt doesn't record is null with the reason, never 0), its activity, and the ordered checklist of what is left. It only reads.",
+      "description": "Builder (any member of the service's workspace): one service, whole. Its stage (idea, staging, or production, which is listed in the Marketplace), its service type's contract (the input and output as field tables, the endpoint Mynt derives, the signing rule, fixtures), its conformance and practice runs with their cases and each run's transcript (the requests Mynt sent and the answers, with the signature's digest, the signing secret and any credential left out), a new build online beside the serving one while Mynt tests it (new_build) and the builds that didn't take over, whether builders can test it in the sandbox by its offering id (testing), its standard terms versions, the firms and apps subscribed with their agreements and the checklist (for the offering firm's own people; null for a workspace member from another firm), reliability from Mynt's own records of calls (calls, error rate and incidents per day; a figure Mynt doesn't record is null with the reason, never 0), its activity, and the ordered checklist of what is left. It only reads.",
       "area": "vendors",
       "roles": [
         "developer",
@@ -12358,7 +12358,7 @@
     {
       "name": "list_vendor_offerings",
       "title": "Standard services you can plug in",
-      "description": "Innovator (the vendor marketplace): listed vendors' offerings of standard services, by region, service type or category: the vendor's standard terms (document link, SHA-256, summary, pricing, scopes with scope_labels (what they cover; empty on a terms version from before scopes were recorded) and version; null when none are on file), price per call, SLA notes, the vendor's licences, its last conformance result, whether your firm meets the licence prerequisites to subscribe, and your firm's subscription to it, if any. Subscribe with subscribe_vendor_service, accepting the terms' version.",
+      "description": "Innovator (the vendor marketplace): listed vendors' offerings of standard services, by region, service type or category: the vendor's standard terms (document link, SHA-256, summary, pricing, scopes with scope_labels (what they cover; empty on a terms version from before scopes were recorded) and version; null when none are on file), price per call, SLA notes, the vendor's licences, its last conformance result, whether your firm meets the licence prerequisites to subscribe, and your firm's subscription to it, if any. Subscribe with subscribe_vendor_service, accepting the terms' version. A service still in testing (built on Mynt, in Staging, passed Mynt's conformance test) is never in this list: its builder gives you its offering id, and offering_id shows that one, marked availability in_testing (sandbox only until it is in Production).",
       "area": "vendors",
       "roles": [
         "developer",
@@ -12391,6 +12391,12 @@
               "ramp",
               "other"
             ]
+          },
+          "offering_id": {
+            "description": "One offering by its id: a listed one, or a service in testing whose builder gave you the id",
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
           },
           "include_unlisted": {
             "default": false,
@@ -18612,7 +18618,7 @@
     {
       "name": "subscribe_vendor_service",
       "title": "Subscribe to a vendor's service",
-      "description": "Innovator: subscribe your firm to a listed offering (in the sandbox first). When the vendor has standard terms on file (list_vendor_offerings' standard_terms), subscribing is click-through: pass accept_terms_version (the current version: you accept those terms) and app_ids, the apps it's for (your workspace's owners and admins only), optionally with products (ids of those apps' products it's used for); Mynt records one vendor agreement per app with the vendor's firm, signed by both sides (the vendor through its listing, you through this call), with the terms' version, SHA-256 and scopes (what they cover; none when that version names none). Already subscribed: naming more apps adds their agreements. Checks the licences the service needs your firm to hold, keeps the test (and live) credentials the vendor gave you, if it needs them, in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id. The vendor bills you directly; Mynt never bills or holds money for it.",
+      "description": "Innovator: subscribe your firm to a listed offering (in the sandbox first), or, by the offering id its builder gave you, to a service in testing (built on Mynt, in Staging, passed Mynt's test): that one is called in the sandbox only, and the same subscription can be turned live once it is in Production. When the vendor has standard terms on file (list_vendor_offerings' standard_terms), subscribing is click-through: pass accept_terms_version (the current version: you accept those terms) and app_ids, the apps it's for (your workspace's owners and admins only), optionally with products (ids of those apps' products it's used for); Mynt records one vendor agreement per app with the vendor's firm, signed by both sides (the vendor through its listing, you through this call), with the terms' version, SHA-256 and scopes (what they cover; none when that version names none). Already subscribed: naming more apps adds their agreements. Checks the licences the service needs your firm to hold, keeps the test (and live) credentials the vendor gave you, if it needs them, in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id. The vendor bills you directly; Mynt never bills or holds money for it.",
       "area": "vendors",
       "roles": [
         "developer",
@@ -18914,7 +18920,7 @@
     {
       "name": "undeploy_app",
       "title": "Stop hosting an app",
-      "description": "Developer: stop hosting one of your apps; its public addresses go away and, under direct hosting, its VM is deleted.",
+      "description": "Developer: stop hosting one of your apps; its public addresses go away and, under direct hosting, its VM is deleted. A service: only an owner or admin of its workspace, at the firm that offers it; its offering is suspended (subscribers' calls stop, and products that hand off through it drift) until it is online again and passes.",
       "area": "hosting",
       "roles": [
         "developer",

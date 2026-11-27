@@ -2,14 +2,16 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { inTransaction } from "./db.js";
+import { isDirect } from "./freestyle.js";
 import type { HostingService } from "./hosting.js";
+import { isProduction } from "./promotion-schema.js";
 import { effectiveStages } from "./promotions.js";
 import { effectiveRoles, type App, type Store, type User } from "./store.js";
 import { open, seal, vaultAvailable } from "./vault.js";
 import { resolveVendorUrl, type VendorCallOptions } from "./vendor-call.js";
 import { appServicePath, vendorOnboarding, type OnboardingStep } from "./vendor-onboarding.js";
 import { sandboxOutput } from "./vendor-sandbox.js";
-import { getOffering, hostedCopy, rampRefusal, runConformance, serviceType, usageOf, vendorDriftSweep, vendorLicenceGap, type HostedCopy, type Offering, type ServiceType } from "./vendors.js";
+import { conformanceExchange, getOffering, hostedCopy, IN_TESTING_WORDS, inTesting, listingBlockers, rampRefusal, runConformance, serviceType, usageOf, vendorDriftSweep, vendorLicenceGap, type HostedCopy, type Offering, type ServiceType } from "./vendors.js";
 import { appRole, createdWorkspaces, isUuid, memberApp, personalWorkspace, workspaceRole } from "./workspaces.js";
 
 // Services: the third kind of thing built on Mynt, beside apps and financial products.
@@ -29,10 +31,12 @@ import { appRole, createdWorkspaces, isUuid, memberApp, personalWorkspace, works
 //  - The signing secret is the service's own, sealed. Mynt hands it over as a hosted setting
 //    (MYNT_VENDOR_SIGNING_SECRET, in the deploy job's environment) and shows it to nobody.
 //  - Listing is its stage: Production is listed, and moving back unlists (promotions.ts holds its checks).
-//  - Every build that goes online is tested before it serves anyone: putting a build online takes the offering off
-//    (needs conformance), Mynt runs its conformance test itself the moment the build answers, and a pass puts a
-//    Production service straight back on the list. Mynt hosts one copy of a service, so it can't keep the previous
-//    build serving while the new one is tested; the gap is the deploy plus the test.
+//  - Every build that goes online is tested before it serves anyone, and subscribers never wait for that. A first
+//    build goes online and Mynt tests it the moment it answers. Every build after it goes online beside the one
+//    serving, is tested there, and takes over only if it passes; the serving build answers throughout.
+//  - In Staging, once it has passed, builders its firm gives the offering's id to can subscribe and call it in the
+//    sandbox only (vendors.ts, inTesting). Production lists it and makes it live-subscribable; they carry over.
+//  - Only an owner or admin of its workspace, at its firm, puts a build online or takes the service offline.
 //
 // Conformance stays Mynt's: it runs from Mynt, outside the service, against the deployed build.
 
@@ -114,16 +118,21 @@ export function serviceTypeContract(t: ServiceType) {
 
 /** Where Mynt calls a service: its hosted address and the fixed path. Null when it has no address. */
 export function serviceEndpoint(hosting: Pick<HostingService, "appDomain"> | null, hosted: HostedCopy | null, appId: string, serviceTypeKey: string, opts: VendorCallOptions = {}): string | null {
-  let origin = opts.appAddress?.(appId) ?? null;
-  if (!origin) {
-    // A compose project: the web service's address (it forwards the path to the api), else its first served one.
-    const domain = hosted?.services.length ? (hosted.services.find((x) => x.expose === "web" && x.domain) ?? hosted.services.find((x) => x.domain))?.domain : hosting?.appDomain(appId);
-    origin = domain ? `https://${domain}` : null;
-  }
+  // A compose project: the web service's address (it forwards the path to the api), else its first served one. A copy
+  // that went online beside another has an address of its own (its tag).
+  const tag = hosted?.address_tag ?? null;
+  const domain = hosted?.services.length ? (hosted.services.find((x) => x.expose === "web" && x.domain) ?? hosted.services.find((x) => x.domain))?.domain : hosting?.appDomain(appId, "web", tag);
+  const origin = opts.appAddress?.(appId, { tag, domain: domain ?? null }) ?? (domain ? `https://${domain}` : null);
   return origin ? `${origin.replace(/\/+$/, "")}${appServicePath(serviceTypeKey)}` : null;
 }
 
 const newSecret = () => `mvs_${randomBytes(32).toString("base64url")}`;
+
+/** Why this deployment can't host a service, when it can't (null: it can, or it hosts nothing at all yet). */
+export function serviceHostingRefusal(hosting: Pick<HostingService, "enabled" | "provider"> | null): string | null {
+  if (!hosting?.enabled || isDirect(hosting.provider)) return null;
+  return "This Mynt hosts apps through its gateway (one VM per workspace, behind a tunnel), which can't host a service: a service is a Compose project, its signing secret is handed over as a deploy job's setting, Mynt tests each build the moment it answers, and a new build goes online beside the one serving. The gateway mode runs single-container apps only, from a script fixed when the VM first booted, never reports that a build is running, and has one container per app. Services need Mynt's direct hosting; ask whoever runs this Mynt to turn it on";
+}
 
 /** The offering a service was made with (1:1), if `appId` is a service. */
 export async function offeringOfService(store: Store, appId: string): Promise<Offering | undefined> {
@@ -156,7 +165,8 @@ export async function serviceDeployed(store: Store, hosting: HostingService | nu
   const adminSuspended = o.status === "suspended" && !o.app_pause;
   const status: Offering["status"] = adminSuspended ? "suspended" : "draft";
   await store.db.query(
-    `UPDATE ${T}.vendor_offerings SET test_base_url = $2, live_base_url = $2, status = $3, status_note = CASE WHEN $4 THEN status_note ELSE NULL END, app_pause = NULL, app_build_id = $5, app_secret_at = now(), updated_at = now()
+    `UPDATE ${T}.vendor_offerings SET test_base_url = $2, live_base_url = $2, status = $3, status_note = CASE WHEN $4 THEN status_note ELSE NULL END, app_pause = NULL, app_build_id = $5, app_secret_at = now(),
+            candidate_id = NULL, candidate_build_id = NULL, candidate_secret = NULL, candidate_at = NULL, updated_at = now()
       WHERE id = $1`,
     [o.id, endpoint, status, adminSuspended, isUuid(buildId) ? buildId : null],
   );
@@ -191,9 +201,140 @@ export async function conformanceAfterDeploy(store: Store, app: Pick<App, "id">,
   return result;
 }
 
+/**
+ * Why this person may not put a build of the service online or take it offline; null when they may. A build put
+ * online is handed the signing secret and, once it passes, receives subscribers' requests, and taking the service
+ * offline stops every subscriber's calls: so only an owner or admin of its workspace, at the firm that offers it
+ * (the same people who archive it). Being a member of the workspace is not enough.
+ */
+export async function serviceOperatorRefusal(store: Store, user: User, app: App): Promise<string | null> {
+  if (app.kind !== "service") return null;
+  const me = (await store.getUser(user.id)) ?? user;
+  const o = await offeringOfService(store, app.id);
+  if (!o) return null;
+  const role = await appRole(store, me, app);
+  if (role !== "owner" && role !== "admin") return "Only the workspace's owners and admins put a service online or take it offline: its builds receive subscribers' requests";
+  if (o.entity_id !== me.entity_id) return "That service is offered by another firm: only its own people put it online or take it offline";
+  return null;
+}
+
+// ---- a new build beside the one serving ----
+//
+// While a build serves subscribers (its offering has passed Mynt's test and isn't suspended), the next build put online
+// doesn't replace it. It goes online as a second copy, on a VM and at an address of its own (hosting.ts,
+// deployCandidate), and Mynt tests it there. The offering keeps its endpoint, its secret, its status and its place in
+// the Marketplace throughout. Only when the new build passes (and, for a service in Production, meets every other
+// check a promotion to Production runs) does Mynt switch: the endpoint, the secret and the hosted copy change in one
+// transaction, and the copy that served until then is removed once calls in flight to it have had time to finish. A
+// build that fails, or doesn't start, is removed; the one serving never noticed, and the failure is kept to be shown.
+//
+// The signing secret: the new copy gets a new one of its own, not the serving copy's. That is the safer of the two.
+// Code Mynt hasn't tested yet never holds the secret that authenticates calls to the build subscribers rely on, so a
+// build that leaks its settings can't be used to forge requests to the serving one; and each build's secret dies with
+// it. It costs nothing in availability because the endpoint and the secret are stored, switched and read together
+// (vendors.ts, servedAt). It reaches the copy the same way as ever: a hosted setting in the deploy job's environment,
+// never returned, scrubbed from output.
+
+/** Whether a build is serving subscribers right now, so the next one must go online beside it rather than in its place. */
+export async function servingOffering(store: Store, appId: string): Promise<Offering | null> {
+  const o = await offeringOfService(store, appId);
+  if (!o || o.app_pause || !o.test_base_url || (o.status !== "conformance_passed" && o.status !== "listed")) return null;
+  const hosted = await hostedCopy(store.db, appId);
+  return hosted?.status === "running" && hosted.build_id === o.app_build_id ? o : null;
+}
+
+/** A new secret for the copy about to go online beside the serving one: the hosted setting, and its sealed form to keep until the switch. */
+export function candidateSettings(): { settings: Record<string, string>; sealed: string } {
+  const secret = newSecret();
+  return { settings: { [SERVICE_SECRET_ENV]: secret }, sealed: seal(secret, false) };
+}
+
+/** The new build is going online beside the one serving: recorded on the offering, which is otherwise unchanged. */
+export async function serviceBuildBeside(store: Store, app: Pick<App, "id">, o: Offering, candidateId: string, buildId: string, sealedSecret: string, by: string) {
+  // Which copy, which build and its secret in one statement: a test of an earlier copy can't clear half of it.
+  await store.db.query(`UPDATE ${T}.vendor_offerings SET candidate_id = $2, candidate_build_id = $3, candidate_secret = $4, candidate_at = now(), updated_at = now() WHERE id = $1`, [o.id, candidateId, buildId, sealedSecret]);
+  await store.audit(by, "service_build_beside", o.id, { service_id: app.id, build_id: buildId, serving_build_id: o.app_build_id, status: o.status });
+  return {
+    offering_id: o.id,
+    service_type: o.service_type,
+    region: o.region,
+    status: o.status,
+    serving_build_id: o.app_build_id,
+    testing_build_id: buildId,
+    endpoint_path: appServicePath(o.service_type),
+    next: `Build ${(o.app_build_id ?? "").slice(0, 8)} keeps serving${o.status === "listed" ? " and stays listed" : ""} while Mynt tests this build beside it. Mynt switches to this build only if it passes; if it doesn't, it is removed and nothing changes for subscribers`,
+  };
+}
+
+const clearCandidate = (store: Store, offeringId: string, candidateId: string) =>
+  store.db.query(`UPDATE ${T}.vendor_offerings SET candidate_id = NULL, candidate_build_id = NULL, candidate_secret = NULL, candidate_at = NULL, updated_at = now() WHERE id = $1 AND candidate_id = $2`, [offeringId, candidateId]);
+
+/**
+ * Once the new build's copy answers (or didn't start): Mynt's conformance test of it, at its own address, signed with
+ * its own secret, with nobody asking. A pass that also meets the production checks switches the offering to it. Anything
+ * else removes the copy and leaves the offering exactly as it was.
+ */
+export async function testCandidate(store: Store, hosting: HostingService, app: Pick<App, "id">, candidateId: string, opts: VendorCallOptions = {}) {
+  const o = await offeringOfService(store, app.id);
+  // A newer build took its place, or the service went offline or was archived meanwhile: nothing to do.
+  if (!o || o.candidate_id !== candidateId) return null;
+  const copy = await hosting.candidate(candidateId);
+  const buildId = copy?.build_id ?? o.candidate_build_id ?? "";
+  const notSwitched = async (reason: string, run?: { passed: boolean; cases: unknown; transcript: unknown }) => {
+    const runId = randomUUID();
+    await store.db.query(`INSERT INTO ${T}.vendor_candidate_runs (id, offering_id, build_id, candidate_id, passed, reason, cases, transcript) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [
+      runId,
+      o.id,
+      buildId,
+      candidateId,
+      run?.passed ?? false,
+      reason,
+      JSON.stringify(run?.cases ?? []),
+      run ? JSON.stringify(run.transcript) : null,
+    ]);
+    await hosting.dropCandidate(app.id, reason, "failed");
+    await clearCandidate(store, o.id, candidateId);
+    await store.audit(null, "service_build_not_switched", o.id, { service_id: app.id, build_id: buildId, serving_build_id: o.app_build_id, passed: run?.passed ?? false, reason, run_id: runId });
+    return { switched: false as const, passed: run?.passed ?? false, reason, run_id: runId, status: o.status, serving_build_id: o.app_build_id };
+  };
+  if (!copy || copy.status !== "running") return notSwitched(copy?.status === "failed" ? "The build didn't start on Mynt's hosting, so there was nothing to test" : "The build's copy was removed before Mynt could test it");
+  const t = await serviceType(store.db, o.region, o.service_type);
+  const sealed = (await store.db.query(`SELECT candidate_secret FROM ${T}.vendor_offerings WHERE id = $1 AND candidate_id = $2`, [o.id, candidateId])).rows[0]?.candidate_secret as string | null | undefined;
+  const endpoint = serviceEndpoint(hosting, { status: "running", build_id: copy.build_id, error: null, services: copy.services ?? [], address_tag: copy.address_tag }, app.id, o.service_type, opts);
+  if (!t || !sealed || !endpoint) return notSwitched("Mynt couldn't address the build's copy to test it");
+  const run = await conformanceExchange(store, o, t, opts, null, { base_url: endpoint, secret: open(sealed, false) });
+  if (!run.passed) return notSwitched("Mynt's conformance test failed on it", run);
+  // Passing conformance is not enough for a service in Production: the build must meet the other checks too.
+  const production = await isProduction(store.db, app.id);
+  const blockers = production ? await listingBlockers(store, app.id, copy.build_id) : [];
+  if (blockers.length) return notSwitched(`It passed Mynt's conformance test, but a service in Production also needs: ${blockers.join("; ")}`, run);
+  const runId = randomUUID();
+  const status: Offering["status"] = production ? "listed" : "conformance_passed";
+  const switched = await hosting.promoteCandidate(candidateId, async (tx) => {
+    // The endpoint, the secret and the hosted copy change together, or not at all.
+    const moved = await tx.query(
+      `UPDATE ${T}.vendor_offerings SET test_base_url = $3, live_base_url = $3, conformance_secret = candidate_secret, app_build_id = $4, app_secret_at = now(), status = $5,
+              candidate_id = NULL, candidate_build_id = NULL, candidate_secret = NULL, candidate_at = NULL, updated_at = now()
+        WHERE id = $1 AND candidate_id = $2 AND candidate_secret IS NOT NULL AND app_pause IS NULL AND status IN ('conformance_passed', 'listed') RETURNING id`,
+      [o.id, candidateId, endpoint, copy.build_id, status],
+    );
+    if (!moved.rows.length) throw new NothingToSwitch();
+    await tx.query(`INSERT INTO ${T}.vendor_conformance_runs (id, offering_id, passed, cases, run_by, transcript, build_id) VALUES ($1, $2, true, $3, NULL, $4, $5)`, [runId, o.id, JSON.stringify(run.cases), JSON.stringify(run.transcript), copy.build_id]);
+  }).catch((e) => {
+    if (e instanceof NothingToSwitch) return null;
+    throw e;
+  });
+  if (!switched) return notSwitched("It passed Mynt's conformance test, but the service was suspended, archived or taken offline meanwhile, so nothing was switched", run);
+  await store.audit(null, "service_build_switched", o.id, { service_id: app.id, build_id: copy.build_id, was_build_id: o.app_build_id, passed: true, status, run_id: runId });
+  if (status !== o.status) await vendorDriftSweep(store, { offering_id: o.id });
+  return { switched: true as const, passed: true, run_id: runId, status, serving_build_id: copy.build_id };
+}
+class NothingToSwitch extends Error {}
+
 /** The service went offline (undeploy_app): its offering is suspended, with a plain reason, until it is back. */
 export async function serviceOffline(store: Store, app: Pick<App, "id" | "name">, by: string) {
   const o = await offeringOfService(store, app.id);
+  if (o?.candidate_id) await clearCandidate(store, o.id, o.candidate_id);
   if (!o || o.app_pause || o.status === "suspended") return null;
   const note = `${app.name} isn't online. Put it online again; Mynt then tests it and it comes back.`;
   await store.db.query(`UPDATE ${T}.vendor_offerings SET status = 'suspended', status_note = $2, app_pause = 'offline', updated_at = now() WHERE id = $1`, [o.id, note]);
@@ -258,7 +399,7 @@ async function reliabilityOf(store: Store, o: Offering, days: number) {
   const incidents = (
     await store.db.query(
       `SELECT a.action, a.details, a.created_at FROM ${T}.audit_log a
-        WHERE a.target = $1 AND (a.action IN ('service_offline', 'suspend_vendor_offering', 'archive_service') OR (a.action IN ('run_conformance', 'admin_run_conformance', 'service_conformance_after_deploy') AND a.details->>'passed' = 'false'))
+        WHERE a.target = $1 AND (a.action IN ('service_offline', 'suspend_vendor_offering', 'archive_service', 'service_build_not_switched') OR (a.action IN ('run_conformance', 'admin_run_conformance', 'service_conformance_after_deploy') AND a.details->>'passed' = 'false'))
           AND a.created_at > now() - make_interval(days => $2::int) ORDER BY a.created_at DESC LIMIT 50`,
       [o.id, days],
     )
@@ -266,7 +407,9 @@ async function reliabilityOf(store: Store, o: Offering, days: number) {
     at: iso(r.created_at),
     kind: r.action as string,
     what:
-      r.action === "service_offline"
+      r.action === "service_build_not_switched"
+        ? `A new build (${String((r.details as { build_id?: string })?.build_id ?? "").slice(0, 8)}) didn't take over: ${String((r.details as { reason?: string })?.reason ?? "it wasn't switched to")}. The serving build kept serving`
+        : r.action === "service_offline"
         ? "The service went offline; its offering was suspended until it came back"
         : r.action === "suspend_vendor_offering"
           ? (r.details as { suspended?: boolean })?.suspended === false
@@ -300,6 +443,9 @@ const ACTIVITY: Record<string, string> = {
   app_demoted: "Moved back a stage",
   service_build_online: "A new build went online: conformance needed",
   service_conformance_after_deploy: "Mynt tested the new build",
+  service_build_beside: "A new build went online beside the serving one",
+  service_build_switched: "Mynt switched to the new build",
+  service_build_not_switched: "The new build was removed: the serving build kept serving",
   service_offline: "Offering suspended: the service isn't online",
   run_conformance: "Conformance run",
   admin_run_conformance: "Conformance run by a Mynt admin",
@@ -319,8 +465,15 @@ async function activityOf(store: Store, appId: string, offeringId: string) {
   );
   return rows.map((r) => {
     const d = (r.details ?? {}) as Record<string, unknown>;
+    const build = typeof d.build_id === "string" ? `Build ${d.build_id.slice(0, 8)}` : "The build";
     const detail =
-      "passed" in d
+      r.action === "service_build_beside"
+        ? `${build} went online beside build ${String(d.serving_build_id ?? "").slice(0, 8)}, which kept serving`
+        : r.action === "service_build_switched"
+          ? `${build} passed and now serves`
+          : r.action === "service_build_not_switched"
+            ? `${build}: ${String(d.reason ?? "not switched to")}. Build ${String(d.serving_build_id ?? "").slice(0, 8)} kept serving`
+            : "passed" in d
         ? d.passed
           ? "Passed"
           : "Failed"
@@ -337,7 +490,8 @@ async function activityOf(store: Store, appId: string, offeringId: string) {
                 : r.action === "start_build"
                   ? `Build ${String(r.target).slice(0, 8)}`
                   : "";
-    return { at: iso(r.created_at), action: r.action as string, what: ACTIVITY[r.action as string], detail, by: (r.actor as string | null) ?? (r.action === "service_conformance_after_deploy" ? "Mynt" : null) };
+    const mynts = ["service_conformance_after_deploy", "service_build_switched", "service_build_not_switched"];
+    return { at: iso(r.created_at), action: r.action as string, what: ACTIVITY[r.action as string], detail, by: (r.actor as string | null) ?? (mynts.includes(r.action as string) ? "Mynt" : null) };
   });
 }
 
@@ -356,12 +510,44 @@ export async function serviceView(store: Store, hosting: HostingService | null, 
   const steps = [roleStep(vendor, me.entity_id === o.entity_id ? (firm?.name ?? null) : null), ...(onboarding.offerings[0]?.steps ?? []).filter((s) => s.key !== "service_created" && s.key !== "first_subscriber")];
   const counted = steps.filter((s) => !s.informational);
   const history = (onboarding.history?.[0] ?? {}) as { conformance_runs?: Record<string, unknown>[]; practice_runs?: Record<string, unknown>[]; terms_versions?: Record<string, unknown>[] };
-  // Each real run's cases (the checklist keeps only its failures).
-  const runCases = new Map<string, { cases: unknown; passed_cases: number; total_cases: number }>();
-  for (const r of (await store.db.query(`SELECT id::text AS id, cases FROM ${T}.vendor_conformance_runs WHERE offering_id = $1 ORDER BY created_at DESC LIMIT 20`, [o.id])).rows) {
+  // Each run's cases and its transcript: what Mynt sent and what came back, kept redacted (the checklist keeps only a
+  // run's failures). A run from before transcripts were kept has none, and says so rather than showing an empty one.
+  type Detail = { cases: unknown; passed_cases: number; total_cases: number; transcript: unknown; transcript_note?: string; build_id?: string | null };
+  const detail = (r: Record<string, unknown>): Detail => {
     const cases = (r.cases as { passed: boolean }[] | null) ?? [];
-    runCases.set(r.id as string, { cases, passed_cases: cases.filter((c) => c.passed).length, total_cases: cases.length });
-  }
+    return {
+      cases,
+      passed_cases: cases.filter((c) => c.passed).length,
+      total_cases: cases.length,
+      transcript: r.transcript ?? null,
+      ...(r.transcript ? {} : { transcript_note: "Not recorded: this run is from before Mynt kept transcripts" }),
+    };
+  };
+  const runCases = new Map<string, Detail>();
+  for (const r of (await store.db.query(`SELECT id::text AS id, cases, transcript, build_id::text AS build_id FROM ${T}.vendor_conformance_runs WHERE offering_id = $1 ORDER BY created_at DESC LIMIT 20`, [o.id])).rows)
+    runCases.set(r.id as string, { ...detail(r), build_id: (r.build_id as string | null) ?? null });
+  const practiceCases = new Map<string, Detail>();
+  for (const r of (await store.db.query(`SELECT id::text AS id, cases, transcript FROM ${T}.vendor_practice_runs WHERE offering_id = $1 ORDER BY created_at DESC LIMIT 20`, [o.id])).rows) practiceCases.set(r.id as string, detail(r));
+  // Mynt's tests of new builds that did not take over: shown beside the others, plainly as what they are.
+  const notSwitched = (await store.db.query(`SELECT * FROM ${T}.vendor_candidate_runs WHERE offering_id = $1 ORDER BY created_at DESC LIMIT 20`, [o.id])).rows.map((r) => ({
+    run_id: r.id as string,
+    kind: "conformance" as const,
+    passed: r.passed === true,
+    at: iso(r.created_at),
+    run_by: null,
+    failures: ((r.cases as { case: string; passed: boolean; problems: string[] }[] | null) ?? []).filter((c) => !c.passed).map((c) => ({ case: c.case, problems: c.problems ?? [] })),
+    ...detail(r),
+    ...(r.transcript ? {} : { transcript_note: "Nothing was sent: the build never answered, so there was nothing to test" }),
+    build_id: String(r.build_id),
+    new_build: true as const,
+    switched: false as const,
+    outcome: `${r.reason as string}. It was removed; the build that was serving kept serving`,
+  }));
+  // The build online beside the serving one right now, if any.
+  const beside = o.candidate_id && hosting ? await hosting.candidate(o.candidate_id) : undefined;
+  // Who subscribes, and the firm's own onboarding steps, are the offering firm's (and Mynt's admins'): a member of the
+  // workspace from another firm reads the service, not the firm's customers.
+  const own = me.entity_id === o.entity_id || effectiveRoles(me.roles).includes("admin");
   const subscribers = (
     await store.db.query(
       `SELECT s.id::text AS subscription_id, e.name AS firm, s.live, s.status, s.created_at, a.id::text AS agreement_id, a.status AS agreement_status, a.terms_version, p.name AS app_name
@@ -407,6 +593,21 @@ export async function serviceView(store: Store, hosting: HostingService | null, 
       build_id: o.app_build_id,
     },
     hosted: hosted ? { status: hosted.status, online: hosted.status === "running", build_id: hosted.build_id, address: address ? new URL(address).origin : null } : null,
+    // A new build online beside the serving one, until Mynt has tested it: the serving build answers meanwhile.
+    new_build:
+      o.candidate_id && o.candidate_build_id
+        ? {
+            build_id: o.candidate_build_id,
+            status: beside?.status === "running" ? ("testing" as const) : ("going_online" as const),
+            status_words: beside?.status === "running" ? "Being tested by Mynt" : "Going online beside the serving build",
+            serving_build_id: o.app_build_id,
+            note: "The serving build keeps answering. Mynt switches to this build only if it passes; otherwise it is removed.",
+          }
+        : null,
+    // Open to sandbox testing: in Staging with a passed build. Never in the Marketplace list; by this id only.
+    testing: (await inTesting(store.db, o))
+      ? { open: true as const, offering_id: o.id, words: IN_TESTING_WORDS, how: "Give this offering id to a builder who should test it: they subscribe with it (subscribe_vendor_service) and call the service in the sandbox only. Moving the service to Production lists it; their subscriptions carry over and can then be turned live." }
+      : { open: false as const, offering_id: o.id, words: stage === "production" ? "Listed services are subscribed to from the Marketplace" : "Opens once the service is in Staging and a build has passed Mynt's conformance test" },
     contract: contract && {
       ...contract,
       // The endpoint in full once the service has an address; the path alone before.
@@ -418,18 +619,19 @@ export async function serviceView(store: Store, hosting: HostingService | null, 
     conformance: {
       runs: [
         ...(history.conformance_runs ?? []).map((r) => ({ ...r, kind: "conformance" as const, ...(runCases.get(r.run_id as string) ?? {}) })),
-        ...(history.practice_runs ?? []).map((r) => ({ ...r, kind: "practice" as const })),
+        ...notSwitched,
+        ...(history.practice_runs ?? []).map((r) => ({ ...r, kind: "practice" as const, ...(practiceCases.get(r.run_id as string) ?? {}) })),
       ].sort((a, b) => String((b as { at?: string }).at ?? "").localeCompare(String((a as { at?: string }).at ?? ""))),
       needed: o.status === "draft",
       // The build the passing test ran against (the one online), while it stands.
       tested_build_id: o.status === "conformance_passed" || o.status === "listed" ? o.app_build_id : null,
     },
     terms: { current: o.terms, versions: history.terms_versions ?? [] },
-    subscribers,
+    ...(own
+      ? { subscribers, checklist: steps, progress: { done: counted.filter((s) => s.status === "done").length, total: counted.length } }
+      : { subscribers: null, checklist: [], progress: { done: 0, total: 0 }, firm_only: `Who subscribes and what is left to list it are shown to ${firm?.name ?? "the offering firm"}'s people only` }),
     reliability: await reliabilityOf(store, o, opts.days ?? 30),
     activity: await activityOf(store, app.id, o.id),
-    checklist: steps,
-    progress: { done: counted.filter((s) => s.status === "done").length, total: counted.length },
   };
 }
 
@@ -461,7 +663,7 @@ export function registerServiceTools(server: McpServer, store: Store, user: User
     {
       title: "A service you build on Mynt",
       description:
-        "Builder (any member of the service's workspace): one service, whole. Its stage (idea, staging, or production, which is listed in the Marketplace), its service type's contract (the input and output as field tables, the endpoint Mynt derives, the signing rule, fixtures), its conformance and practice runs with their cases, its standard terms versions, the firms and apps subscribed with their agreements, reliability from Mynt's own records of calls (calls, error rate and incidents per day; a figure Mynt doesn't record is null with the reason, never 0), its activity, and the ordered checklist of what is left. It only reads.",
+        "Builder (any member of the service's workspace): one service, whole. Its stage (idea, staging, or production, which is listed in the Marketplace), its service type's contract (the input and output as field tables, the endpoint Mynt derives, the signing rule, fixtures), its conformance and practice runs with their cases and each run's transcript (the requests Mynt sent and the answers, with the signature's digest, the signing secret and any credential left out), a new build online beside the serving one while Mynt tests it (new_build) and the builds that didn't take over, whether builders can test it in the sandbox by its offering id (testing), its standard terms versions, the firms and apps subscribed with their agreements and the checklist (for the offering firm's own people; null for a workspace member from another firm), reliability from Mynt's own records of calls (calls, error rate and incidents per day; a figure Mynt doesn't record is null with the reason, never 0), its activity, and the ordered checklist of what is left. It only reads.",
       inputSchema: { service_id: z.string(), days: z.number().int().min(1).max(90).default(30).describe("The reliability window") },
       annotations: { readOnlyHint: true },
     },
@@ -652,6 +854,9 @@ export function registerServiceVendorTools(server: McpServer, store: Store, user
     },
     async ({ workspace_id, name, description, service_type, region, price, sla_notes, licence_ids }) => {
       const me = (await store.getUser(user.id)) ?? user;
+      // Said now rather than at Put online: a service nobody can host is not worth creating.
+      const unhostable = serviceHostingRefusal(hosting);
+      if (unhostable) return fail(unhostable);
       if (!me.entity_id) return fail("You don't belong to a firm yet. Ask a Mynt admin to add you to yours, with the vendor role");
       let workspace = workspace_id;
       if (workspace) {
@@ -735,7 +940,12 @@ export function registerServiceVendorTools(server: McpServer, store: Store, user
         if (o.app_pause === "stopped") return fail("That service is already archived");
         if (o.status === "suspended" && !o.app_pause) return fail("A Mynt admin suspended this service's offering; it is already off");
         const note = `Archived by its builder${reason ? `: ${reason}` : ""}.`;
-        await store.db.query(`UPDATE ${T}.vendor_offerings SET status = 'suspended', status_note = $2, app_pause = 'stopped', updated_at = now() WHERE id = $1`, [o.id, note]);
+        // A new build still being tested beside the serving one is removed: an archived service switches to nothing.
+        await store.db.query(
+          `UPDATE ${T}.vendor_offerings SET status = 'suspended', status_note = $2, app_pause = 'stopped', candidate_id = NULL, candidate_build_id = NULL, candidate_secret = NULL, candidate_at = NULL, updated_at = now() WHERE id = $1`,
+          [o.id, note],
+        );
+        if (hosting) await hosting.dropCandidate(app.id, "The service was archived").catch(() => null);
       } else {
         if (o.app_pause !== "stopped") return fail("That service isn't archived");
         // Back as a draft with no endpoint: it is set, and the build tested, when the service is next put online.

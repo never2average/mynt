@@ -157,6 +157,8 @@ export interface Offering {
   app_id: string | null; // made with a service built on Mynt (services.ts; the service's id): its endpoints are derived, never typed
   app_pause: "offline" | "stopped" | null; // why the service took it off: it isn't online, or it was archived
   app_build_id: string | null; // the deployed build its endpoint answers from
+  candidate_id: string | null; // a new build online beside the one serving, being tested (services.ts); null: none
+  candidate_build_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -215,6 +217,8 @@ const toOffering = (r: Row): Offering => ({
   app_id: (r.app_id as string | null) ?? null,
   app_pause: (r.app_pause as Offering["app_pause"]) ?? null,
   app_build_id: (r.app_build_id as string | null) ?? null,
+  candidate_id: (r.candidate_id as string | null) ?? null,
+  candidate_build_id: (r.candidate_build_id as string | null) ?? null,
   created_at: iso(r.created_at)!,
   updated_at: iso(r.updated_at)!,
 });
@@ -274,14 +278,36 @@ export interface HostedCopy {
   build_id: string;
   error: string | null;
   services: { expose: string; domain: string | null }[];
+  address_tag?: string | null; // a copy that went online beside another answers at an address of its own (hosting.ts)
 }
 export async function hostedCopy(db: Db, appId: string): Promise<HostedCopy | null> {
   const has = (await db.query(`SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'hosted_apps'`, [T])).rows.length;
   if (!has) return null;
-  const r = (await db.query(`SELECT status, build_id::text AS build_id, error, services FROM ${T}.hosted_apps WHERE app_id = $1`, [appId])).rows[0];
+  const r = (await db.query(`SELECT * FROM ${T}.hosted_apps WHERE app_id = $1`, [appId])).rows[0];
   if (!r) return null;
   const services = ((typeof r.services === "string" ? JSON.parse(r.services) : r.services) ?? []) as HostedCopy["services"];
-  return { status: r.status as HostedCopy["status"], build_id: r.build_id as string, error: (r.error as string | null) ?? null, services };
+  return { status: r.status as HostedCopy["status"], build_id: String(r.build_id), error: (r.error as string | null) ?? null, services, address_tag: (r.address_tag as string | null) ?? null };
+}
+// A service built on Mynt is open to sandbox testing while it is in Staging and the build online has passed Mynt's
+// conformance test. Builders its firm gives the offering's id to subscribe and call it in the sandbox only; it is
+// never in the Marketplace list and never called live until it is in Production (which lists it).
+export async function inTesting(db: Db, o: Pick<Offering, "app_id" | "app_pause" | "status">): Promise<boolean> {
+  if (!o.app_id || o.app_pause || o.status !== "conformance_passed") return false;
+  return (await db.query(`SELECT 1 FROM ${T}.app_promotions WHERE app_id::text = $1 AND stage = 'staging'`, [o.app_id])).rows.length > 0;
+}
+export const IN_TESTING_WORDS = "In testing: sandbox only until its builder moves it to Production";
+// How a subscriber may use an offering: listed (sandbox, and live once turned on), or a service in testing.
+export async function availabilityOf(db: Db, o: Offering): Promise<{ availability: "listed" | "in_testing" | "unavailable"; availability_words?: string; sandbox_only?: true }> {
+  if (o.status === "listed") return { availability: "listed" };
+  if (await inTesting(db, o)) return { availability: "in_testing", availability_words: IN_TESTING_WORDS, sandbox_only: true };
+  return { availability: "unavailable" };
+}
+// Where a service built on Mynt answers right now, and the secret its requests are signed with: read together, so a
+// request is never signed with one copy's secret and sent to another's address (the two change in one statement when
+// Mynt switches the offering to a new build).
+export async function servedAt(db: Db, offeringId: string): Promise<{ test_base_url: string | null; live_base_url: string | null; secret: string } | null> {
+  const r = (await db.query(`SELECT test_base_url, live_base_url, conformance_secret FROM ${T}.vendor_offerings WHERE id = $1`, [offeringId])).rows[0];
+  return r ? { test_base_url: (r.test_base_url as string | null) ?? null, live_base_url: (r.live_base_url as string | null) ?? null, secret: open(r.conformance_secret as string, false) } : null;
 }
 // Why Mynt can't test or call a service's offering right now, in plain words; null when the service answers.
 export async function appNotAnswering(db: Db, o: Offering): Promise<string | null> {
@@ -682,29 +708,114 @@ export async function conformanceSecret(store: Store, offeringId: string): Promi
   return open((await sealedColumn(store.db, "vendor_offerings", "conformance_secret", offeringId))!, false);
 }
 
+// ---- a run's transcript: what Mynt sent and what came back, for the vendor to read ----
+
+export const REDACTED = "<redacted>";
+/** One request of a run and its answer. The signature's digest and any credential are never in it. */
+export interface ConformanceExchange {
+  case: string;
+  request: { method: "POST"; path: string; headers: Record<string, string>; body: unknown };
+  response: { http_status: number | null; body: unknown; error?: string | null };
+  expected: string;
+}
+export const EXPECTED_ANSWER: Record<string, string> = {
+  bad_signature_refused: 'Refused: 401 (Mynt accepts any 4xx, or 200 with status "error"). This request\'s signature was made with another secret.',
+  stale_timestamp_refused: 'Refused: 401 (Mynt accepts any 4xx, or 200 with status "error"). This request is correctly signed, but its timestamp is 600 s old.',
+};
+export const EXPECTED_OK = '200 with the same request_id, status "ok" and an output valid against the service type\'s output schema.';
+// Anything shaped like a secret, whoever put it there (a service that echoes its settings into an answer, say).
+const SECRET_SHAPES = /mvs_[A-Za-z0-9_-]{8,}|mynt_(?:live|test)_[A-Za-z0-9_-]{8,}|\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{8,}|\bgh[opsu]_[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9._~+/=-]{8,}/g;
+const MAX_ANSWER = 8 * 1024;
+/** A transcript safe to keep and show: the given secrets, and anything shaped like one, replaced; long answers cut. */
+export function redactTranscript<V>(value: V, secrets: (string | null | undefined)[] = []): V {
+  let text = JSON.stringify(value);
+  for (const s of secrets) if (s) text = text.split(JSON.stringify(s).slice(1, -1)).join(REDACTED);
+  return JSON.parse(text.replace(SECRET_SHAPES, REDACTED)) as V;
+}
+const exchangeOf = (name: string, path: string, body: unknown, signature: string, credential: boolean, r: VendorResult): ConformanceExchange => {
+  const answer = r.body == null ? null : JSON.stringify(r.body).length > MAX_ANSWER ? `An answer of ${JSON.stringify(r.body).length} characters: too long to keep` : r.body;
+  return {
+    case: name,
+    request: {
+      method: "POST",
+      path,
+      headers: { "Content-Type": "application/json", "User-Agent": "Mynt-Vendor-Client/1", "Mynt-Signature": signature.replace(/v1=[0-9a-f]+$/, `v1=${REDACTED}`), ...(credential ? { Authorization: `Bearer ${REDACTED}` } : {}) },
+      body,
+    },
+    response: { http_status: r.http_status, body: answer, ...(r.ok ? {} : { error: r.error }) },
+    expected: EXPECTED_ANSWER[name] ?? EXPECTED_OK,
+  };
+};
+
+type Target = { base_url: string; secret: string };
+// The cases against an offering's test endpoint (or, for a service built on Mynt, against `target`: a copy of it
+// that isn't the one serving yet), with what was sent and what came back. Records nothing and changes nothing.
+export async function conformanceExchange(store: Store, o: Offering, t: ServiceType, opts: VendorCallOptions, credential?: string | null, target?: Target) {
+  // A service's endpoint and secret are read together (servedAt), so the test signs for the copy it calls.
+  const served = !target && o.app_id ? await servedAt(store.db, o.id) : null;
+  const secret = target?.secret ?? served?.secret ?? (await conformanceSecret(store, o.id));
+  const base = target?.base_url ?? (served ? served.test_base_url : o.test_base_url);
+  const to: Offering = o.app_id ? { ...o, test_base_url: base } : o;
+  const pathOf = (raw: string) => {
+    try {
+      return new URL(raw).pathname.replace(/\/+$/, "");
+    } catch {
+      return "";
+    }
+  };
+  // The path only: where a vendor's own endpoint lives is the vendor's to know, and a service's address is Mynt's.
+  const path = o.adapter ? `adapter:${o.adapter}` : !base ? "" : o.app_id ? pathOf(base) : `${pathOf(base)}/v1/${t.key}`;
+  const transcript: ConformanceExchange[] = [];
+  const cases = await conformanceCases(t, secret, async (name, body, signature) => {
+    const header = signature ?? signBody(secret, JSON.stringify(body));
+    const r = await callOffering(store, to, { environment: "test", service_type: t.key, body, signing_secret: secret, credential, signature: header }, opts);
+    transcript.push(exchangeOf(name, path, body, header, Boolean(credential && !o.app_id && !o.adapter), r));
+    return r;
+  });
+  const gap = await vendorLicenceGap(store, o, t);
+  return {
+    passed: cases.every((c) => c.passed) && !gap,
+    cases: gap ? [...cases, { case: "vendor_licences", passed: false, http_status: null, latency_ms: 0, problems: [gap] }] : cases,
+    answered: cases,
+    transcript: redactTranscript(transcript, [secret, credential]),
+    gap,
+  };
+}
+
+// What stops a service in Production from being listed on `buildId`, besides conformance (promotions.ts): the checks
+// a promotion to Production runs, on the build that is going online. Empty: nothing does.
+export async function listingBlockers(store: Store, appId: string, buildId: string | null): Promise<string[]> {
+  const { productionBlockers } = await import("./promotions.js");
+  return productionBlockers(store, appId, buildId);
+}
+
 // Mynt's own test of an offering's test endpoint (the cases above), with the vendor's licences checked too.
 export async function runConformance(store: Store, o: Offering, t: ServiceType, opts: VendorCallOptions, by: string | null, credential?: string | null) {
-  const secret = await conformanceSecret(store, o.id);
-  const cases = await conformanceCases(t, secret, (_name, body, signature) => callOffering(store, o, { environment: "test", service_type: t.key, body, signing_secret: secret, credential, signature }, opts));
-  const gap = await vendorLicenceGap(store, o, t);
-  const passed = cases.every((c) => c.passed) && !gap;
+  const { passed, cases, answered, transcript, gap } = await conformanceExchange(store, o, t, opts, credential);
   const id = randomUUID();
-  await store.db.query(`INSERT INTO ${T}.vendor_conformance_runs (id, offering_id, passed, cases, run_by) VALUES ($1, $2, $3, $4, $5)`, [
+  await store.db.query(`INSERT INTO ${T}.vendor_conformance_runs (id, offering_id, passed, cases, run_by, transcript, build_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [
     id,
     o.id,
     passed,
-    JSON.stringify(gap ? [...cases, { case: "vendor_licences", passed: false, http_status: null, latency_ms: 0, problems: [gap] }] : cases),
+    JSON.stringify(cases),
     by,
+    JSON.stringify(transcript),
+    o.app_id ? o.app_build_id : null,
   ]);
   // A pass moves a draft on; a failure sends a passed-but-unlisted offering back. Listed or suspended
   // offerings keep their status (an admin suspends), and ops_status shows the failure.
   let status = o.status;
   if (passed && o.status === "draft") status = "conformance_passed";
-  // A service built on Mynt that is in Production is listed: a pass on the build now online puts it straight back.
-  if (passed && o.app_id && status === "conformance_passed" && (await isProduction(store.db, o.app_id))) status = "listed";
+  // A service built on Mynt that is in Production is listed: a pass on the build now online puts it straight back,
+  // when that build also meets every other check a promotion to Production runs (conformance alone never lists).
+  let notListed: string[] = [];
+  if (passed && o.app_id && status === "conformance_passed" && (await isProduction(store.db, o.app_id))) {
+    notListed = await listingBlockers(store, o.app_id, o.app_build_id);
+    if (!notListed.length) status = "listed";
+  }
   if (!passed && o.status === "conformance_passed") status = "draft";
   if (status !== o.status) await store.db.query(`UPDATE ${T}.vendor_offerings SET status = $2, updated_at = now() WHERE id = $1`, [o.id, status]);
-  return { run_id: id, passed, status, cases, ...(gap ? { licence_gap: gap } : {}) };
+  return { run_id: id, passed, status, cases: answered, ...(gap ? { licence_gap: gap } : {}), ...(notListed.length ? { not_listed: notListed } : {}) };
 }
 
 // What's wrong with a vendor's response body, as rules only. With allowPending, an asynchronous service may
@@ -975,10 +1086,14 @@ async function callBoundVendor(
     const need = ((t.input_schema.required as string[] | undefined) ?? []).filter((f) => !(f in held));
     return { kind: "error", status: 409, code: "data_required", message: `${t.name} needs ${need.join(", ") || "valid inputs"} from the customer first (POST /v1/client/fields)` };
   }
+  // A service built on Mynt: the copy that serves right now and its secret, read together. Mynt switches both in one
+  // statement when a new build passes its test, so a call is signed for the copy it is sent to, before and after.
+  const served = o.app_id ? await servedAt(store.db, o.id) : null;
+  if (served) o = { ...o, test_base_url: served.test_base_url, live_base_url: served.live_base_url };
   const base = a.sandbox ? o.test_base_url : o.live_base_url;
   if (!base) return { kind: "error", status: 503, code: "vendor_unavailable", message: `The ${t.name} service has no live endpoint` };
   // An app-served offering is signed with its app's one secret (the only one the app was handed, on deploy).
-  const secret = o.app_id ? await conformanceSecret(store, o.id) : open((await sealedColumn(store.db, "vendor_subscriptions", "signing_secret", sub.id))!, false);
+  const secret = served ? served.secret : open((await sealedColumn(store.db, "vendor_subscriptions", "signing_secret", sub.id))!, false);
   // Sandbox calls carry the test credential and never the live one. An app-served offering takes none.
   const keyId = o.app_id ? null : a.sandbox ? sub.test_credential_key_id : sub.live_credential_key_id;
   const sealedCredential = keyId ? await sealedColumn(store.db, "key_vault", "sealed", keyId) : null;
@@ -2162,6 +2277,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
       live: s.live,
       status: s.status,
       offering_status: o.status,
+      ...(await availabilityOf(store.db, o)),
       credentials: { test: await keyView(s.test_credential_key_id), live: await keyView(s.live_credential_key_id) },
       // The standard terms accepted, per app (click-through agreements); null: subscribed with no standard terms on file.
       terms_accepted: agreements.length
@@ -2197,25 +2313,30 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
     {
       title: "Standard services you can plug in",
       description:
-        "Innovator (the vendor marketplace): listed vendors' offerings of standard services, by region, service type or category: the vendor's standard terms (document link, SHA-256, summary, pricing, scopes with scope_labels (what they cover; empty on a terms version from before scopes were recorded) and version; null when none are on file), price per call, SLA notes, the vendor's licences, its last conformance result, whether your firm meets the licence prerequisites to subscribe, and your firm's subscription to it, if any. Subscribe with subscribe_vendor_service, accepting the terms' version.",
+        "Innovator (the vendor marketplace): listed vendors' offerings of standard services, by region, service type or category: the vendor's standard terms (document link, SHA-256, summary, pricing, scopes with scope_labels (what they cover; empty on a terms version from before scopes were recorded) and version; null when none are on file), price per call, SLA notes, the vendor's licences, its last conformance result, whether your firm meets the licence prerequisites to subscribe, and your firm's subscription to it, if any. Subscribe with subscribe_vendor_service, accepting the terms' version. A service still in testing (built on Mynt, in Staging, passed Mynt's conformance test) is never in this list: its builder gives you its offering id, and offering_id shows that one, marked availability in_testing (sandbox only until it is in Production).",
       inputSchema: {
         region: z.string().optional(),
         service_type: z.string().optional(),
         category: z.enum(SERVICE_CATEGORIES).optional(),
+        offering_id: z.string().uuid().optional().describe("One offering by its id: a listed one, or a service in testing whose builder gave you the id"),
         include_unlisted: z.boolean().default(false).describe("Admins: every offering, whatever its status"),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ region, service_type, category, include_unlisted }) => {
+    async ({ region, service_type, category, offering_id, include_unlisted }) => {
       const entityId = await entityOf(store, user);
       const { rows } = await store.db.query(
         `SELECT o.* FROM ${T}.vendor_offerings o JOIN ${T}.service_types t ON t.region = o.region AND t.key = o.service_type
-         WHERE ($1::boolean OR o.status = 'listed') AND ($2::text IS NULL OR o.region = $2) AND ($3::text IS NULL OR o.service_type = $3) AND ($4::text IS NULL OR t.category = $4)
+         WHERE ($1::boolean OR o.status = 'listed' OR ($5::text IS NOT NULL AND o.status = 'conformance_passed')) AND ($2::text IS NULL OR o.region = $2) AND ($3::text IS NULL OR o.service_type = $3) AND ($4::text IS NULL OR t.category = $4)
+           AND ($5::text IS NULL OR o.id::text = $5)
          ORDER BY o.region, o.service_type, o.created_at`,
-        [Boolean(include_unlisted && opts.admin), region ?? null, service_type ?? null, category ?? null],
+        [Boolean(include_unlisted && opts.admin), region ?? null, service_type ?? null, category ?? null, offering_id ?? null],
       );
       const out = [];
       for (const o of rows.map(toOffering)) {
+        const availability = await availabilityOf(store.db, o);
+        // By id, an offering that is neither listed nor open to sandbox testing stays unseen (admins aside).
+        if (o.status !== "listed" && availability.availability !== "in_testing" && !(include_unlisted && opts.admin)) continue;
         const t = (await serviceType(store.db, o.region, o.service_type))!;
         const vendor = await store.getEntity(o.entity_id);
         const licences = (await store.licensesOf(o.entity_id)).filter((l) => o.licence_ids.includes(l.id)).map(licenceView);
@@ -2232,7 +2353,8 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
           standard_terms: o.terms ? { version: o.terms.version, document_url: o.terms.document_url, document_sha256: o.terms.document_sha256, summary: o.terms.summary, pricing_summary: o.terms.pricing_summary, scopes: o.terms.scopes, scope_labels: o.terms.scopes.map(agreementScopeLabel), set_at: o.terms.set_at } : null,
           price: o.price,
           sla_notes: o.sla_notes,
-          live_available: Boolean(o.live_base_url),
+          live_available: Boolean(o.live_base_url) && o.status === "listed",
+          ...availability,
           requires_credential: o.requires_credential,
           vendor_licences: licences,
           conformance: run ? { passed: run.passed as boolean, at: iso(run.created_at) } : null,
@@ -2253,7 +2375,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
     {
       title: "Subscribe to a vendor's service",
       description:
-        "Innovator: subscribe your firm to a listed offering (in the sandbox first). When the vendor has standard terms on file (list_vendor_offerings' standard_terms), subscribing is click-through: pass accept_terms_version (the current version: you accept those terms) and app_ids, the apps it's for (your workspace's owners and admins only), optionally with products (ids of those apps' products it's used for); Mynt records one vendor agreement per app with the vendor's firm, signed by both sides (the vendor through its listing, you through this call), with the terms' version, SHA-256 and scopes (what they cover; none when that version names none). Already subscribed: naming more apps adds their agreements. Checks the licences the service needs your firm to hold, keeps the test (and live) credentials the vendor gave you, if it needs them, in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id. The vendor bills you directly; Mynt never bills or holds money for it.",
+        "Innovator: subscribe your firm to a listed offering (in the sandbox first), or, by the offering id its builder gave you, to a service in testing (built on Mynt, in Staging, passed Mynt's test): that one is called in the sandbox only, and the same subscription can be turned live once it is in Production. When the vendor has standard terms on file (list_vendor_offerings' standard_terms), subscribing is click-through: pass accept_terms_version (the current version: you accept those terms) and app_ids, the apps it's for (your workspace's owners and admins only), optionally with products (ids of those apps' products it's used for); Mynt records one vendor agreement per app with the vendor's firm, signed by both sides (the vendor through its listing, you through this call), with the terms' version, SHA-256 and scopes (what they cover; none when that version names none). Already subscribed: naming more apps adds their agreements. Checks the licences the service needs your firm to hold, keeps the test (and live) credentials the vendor gave you, if it needs them, in your firm's key vault, never shown again, and adds the vendor to your roster as a party. Then bind a partner handoff to it: handoff_to_party to that party with attributes.vendor_subscription_id. The vendor bills you directly; Mynt never bills or holds money for it.",
       inputSchema: {
         offering_id: z.string(),
         accept_terms_version: z.number().int().min(1).optional().describe("The version of the vendor's standard terms you accept; must be the current one"),
@@ -2268,7 +2390,10 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
       const entityId = await entityOf(store, user);
       if (!entityId) return fail("You don't belong to an entity yet; create one with create_entity");
       const o = await getOffering(store.db, offering_id);
-      if (!o || o.status !== "listed") return fail(`No listed offering '${offering_id}'; see list_vendor_offerings`);
+      // A listed offering, or a service in testing (in Staging, passed Mynt's test): that one in the sandbox only.
+      const testing = o ? await inTesting(store.db, o) : false;
+      if (!o || (o.status !== "listed" && !testing)) return fail(`No listed offering '${offering_id}'; see list_vendor_offerings`);
+      if (testing && live_credential) return fail(`${o.name} is in testing: it is called in the sandbox only, so it takes no live credential yet`);
       const t = (await serviceType(store.db, o.region, o.service_type))!;
       const gap = await innovatorLicenceGap(store, entityId, t);
       if (gap) return fail(gap);
@@ -2340,7 +2465,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
       await auditTerms(made, o, s.id);
       return json({
         ...(await subscriptionView(s)),
-        next: `Bind a partner handoff: handoff_to_party to party ${party.id} with attributes { vendor_subscription_id: '${s.id}', service_type: '${t.key}', consent_purpose: '${t.consent_purpose}' }. Sandbox sessions then call the vendor's test endpoint; set_subscription_live when you're ready for live.`,
+        next: `Bind a partner handoff: handoff_to_party to party ${party.id} with attributes { vendor_subscription_id: '${s.id}', service_type: '${t.key}', consent_purpose: '${t.consent_purpose}' }. Sandbox sessions then call the vendor's test endpoint; ${testing ? "the service is in testing, so it can be turned live (set_subscription_live) only once its builder moves it to Production. This subscription carries over" : "set_subscription_live when you're ready for live"}.`,
       });
     },
   );
@@ -2378,6 +2503,7 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
       if (!s || s.status !== "active") return fail(`No active subscription of your firm '${subscription_id}'`);
       if (live) {
         const o = (await getOffering(store.db, s.offering_id))!;
+        if (await inTesting(store.db, o)) return fail(`${o.name} is in testing: your subscription calls it in the sandbox only. It can be turned live once its builder moves it to Production; this subscription carries over`);
         if (o.status !== "listed") return fail(`The offering is ${o.status}, not listed`);
         if (!o.live_base_url) return fail("The vendor hasn't given a live endpoint yet");
         const gap = await innovatorLicenceGap(store, s.entity_id, (await serviceType(store.db, o.region, o.service_type))!);

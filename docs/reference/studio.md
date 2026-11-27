@@ -294,11 +294,11 @@ Each tab is a read view. Changes are the labelled buttons.
 
 | Tab | What it shows |
 |---|---|
-| **Overview** | The service's details and its checklist, each step with its button: Put online, Ask the builder to add it, Run practice test, Run conformance, Set standard terms, Move to production. A blocked role step says to ask a Mynt admin |
+| **Overview** | The service's details (with the build serving, a new build being tested beside it, and whether it is open to sandbox testing, with the offering id to share) and its checklist, each step with its button: Put online, Ask the builder to add it, Run practice test, Run conformance, Set standard terms, Move to production. A blocked role step says to ask a Mynt admin |
 | **Contract** | The service type and region; what it takes in and gives back, as field tables (Field, Type, Required, Description); the endpoint Mynt derives; the signing rule; fixtures |
-| **Conformance** | Practice runs and real runs in one table (When, Kind, Build, Result, Cases passed, Run by). A row opens its cases. **Run practice test** and **Run conformance** |
+| **Conformance** | Practice runs, real runs and tests of new builds that didn't take over, in one table (When, Kind, Build, Result, Cases passed, Run by). A row opens its cases, then its transcript as a table (Case, Mynt sent, It answered, Mynt expected), for practice runs too. **Run practice test** and **Run conformance** |
 | **Terms & pricing** | The standard terms versions (Version, Scope, Summary, Pricing, Set on, Set by, the document). **Set standard terms** |
-| **Subscribers** | Firm, App, Terms version accepted, Since, Live or sandbox, Agreement status |
+| **Subscribers** | Firm, App, Terms version accepted, Since, Live or sandbox, Agreement status. Shown to the offering firm's own people; a workspace member from another firm reads "Not shown" with the reason |
 | **Reliability** | Calls, error rate, response time and incidents from Mynt's own records. A figure Mynt doesn't record reads "Not measured" with the reason, never 0 |
 | **Security & risk** | The same view as an app's, for the service |
 | **Activity** | Builds, deploys, stage moves, conformance runs and terms changes (When, What, Detail, By) |
@@ -306,8 +306,10 @@ Each tab is a read view. Changes are the labelled buttons.
 A service has no Products, Agreements, Customers, P&L or SDK tab.
 
 - **Ask the builder to add it** sends a prepared message into the service's chat: "Add Mynt's vendor service endpoint for <service type>".
-- The Build column shows the tested build only on the passing run that stands. Other rows read "Not recorded".
-- A past practice run's row shows its failures. Its full transcript shows in Run practice test, right after a run.
+- The Build column shows the build each real run tested. A run from before Mynt recorded it reads "Not recorded", unless it is the passing run that stands.
+- A transcript leaves out the signing secret, the signature's digest and any credential. A run from before transcripts were kept says so instead of showing an empty one.
+- A new build that failed Mynt's test reads "Conformance, new build" and "Didn't pass: removed". Its row opens what happened in words: the build that was serving kept serving.
+- **Put online**, **Archive** and **Restore** are for the workspace's owners and admins at the firm that offers the service. Mynt refuses anyone else and says why.
 
 ## The product workspace
 
