@@ -5,7 +5,7 @@ import { agreementScopeLabel } from "./app-agreements-schema.js";
 import type { Entity, HeldLicense, Store, User } from "./store.js";
 import { effectiveRoles } from "./store.js";
 import { practiceRunsOf, type PracticeRun } from "./vendor-sandbox.js";
-import { getOffering, offeringsOf, rampRefusal, serviceType, type Offering, type ServiceType } from "./vendors.js";
+import { getOffering, hostedCopy, offeringsOf, rampRefusal, serviceType, servingApp, type Offering, type ServiceType } from "./vendors.js";
 
 // A vendor's onboarding, as one ordered checklist (get_vendor_onboarding): what's done, what's next, and what waits on
 // someone else, firm-wide and per offering, each step in plain words with the tool that does it. It only reads: every
@@ -180,14 +180,26 @@ export interface OfferingOnboarding {
   service_type: string;
   service_name: string | null;
   status: Offering["status"];
+  // A service built on Mynt (services.ts), whose offering this is. Null for an offering served at the vendor's own endpoint.
+  service: { id: string; name: string | null; endpoint_path: string; paused: Offering["app_pause"] } | null;
   steps: OnboardingStep[];
   progress: Progress;
 }
 
+// The path of an app's vendor service endpoint, which Mynt derives from the service type and nobody types.
+export const appServicePath = (serviceTypeKey: string) => `/mynt/services/${serviceTypeKey}`;
+
 async function offeringOnboarding(store: Store, o: Offering, held: HeldLicense[], gate: string | null, runs: Run[], practice: PracticeRun | null): Promise<OfferingOnboarding> {
   const t = await serviceType(store.db, o.region, o.service_type);
-  const suspended = o.status === "suspended";
+  // An app-served offering its app took off (it went offline, or the vendor stopped serving it) isn't Mynt's suspension:
+  // its app steps below say what the vendor does about it.
+  const suspended = o.status === "suspended" && !o.app_pause;
   const suspendedWords = `Mynt suspended this service${o.status_note ? `: ${o.status_note}` : ""}. Waiting for Mynt to reinstate it.`;
+  const app = await servingApp(store.db, o);
+  const appName = app?.name ?? "your service";
+  const hosted = app ? await hostedCopy(store.db, app.id) : null;
+  // The app answers at the address this service points at.
+  const appOnline = Boolean(app && !o.app_pause && hosted?.status === "running" && o.test_base_url);
   const raws: Raw[] = [
     step("service_created", "Create the service", "done", `${t?.name ?? o.service_type} in ${o.region}.`, "create_vendor_offering", "vendor", { service_type: o.service_type, region: o.region }),
   ];
@@ -196,6 +208,36 @@ async function offeringOnboarding(store: Store, o: Offering, held: HeldLicense[]
   const ramp = t ? await rampRefusal(store, t, o.entity_id) : null;
 
   const passedNow = o.status === "conformance_passed" || o.status === "listed";
+  if (app) {
+    const path = appServicePath(o.service_type);
+    const facts = { app_id: app.id, app_name: app.name, hosted: hosted?.status ?? null, endpoint_path: path, paused: o.app_pause };
+    const title = "Put the service online";
+    if (o.app_pause === "stopped") raws.push(step("app_online", title, "todo", `${appName} is archived. Restore it to bring it back.`, "archive_service", "vendor", facts));
+    else if (appOnline) raws.push(step("app_online", title, "done", `${appName} is online. Mynt handed it the signing secret as a hosted setting and points the offering at its hosted address.`, "deploy_app", "vendor", facts));
+    else if (!hosted) raws.push(step("app_online", title, "todo", `Put the service online first: ${appName} isn't hosted on Mynt yet.`, "deploy_app", "vendor", facts));
+    else if (hosted.status === "deploying") raws.push(step("app_online", title, "todo", `${appName} is being put online. This step completes once it answers.`, "deploy_app", "vendor", facts));
+    else if (hosted.status === "running") raws.push(step("app_online", title, "todo", `Put ${appName} online again: Mynt hands it the signing secret, and points the offering at it, each time it is put online.`, "deploy_app", "vendor", facts));
+    else raws.push(step("app_online", title, "todo", `${appName} isn't online${hosted.error ? ": its last deploy failed" : ""}. Put it online again.`, "deploy_app", "vendor", facts));
+
+    // Mynt can't see inside the app: it knows the endpoint is there when its own test reaches it.
+    const endpointTitle = "Build the service endpoint";
+    const reached = Boolean(runs[0]?.passed) && passedNow;
+    const missing = !reached && appOnline && runs[0] && !runs[0].passed && runs[0].failures.some((f) => f.case.startsWith("fixture_") && f.problems.some((p) => /http 404/.test(p)));
+    if (reached) raws.push(step("service_endpoint", endpointTitle, "done", `${appName} answers Mynt's signed requests at ${path}.`, "start_build", "vendor", facts));
+    else if (missing) raws.push(step("service_endpoint", endpointTitle, "todo", `${appName} answered 404 at ${path}: the endpoint isn't in the build that is online. Ask the builder to add Mynt's service endpoint, then put the new build online.`, "start_build", "vendor", facts));
+    else
+      raws.push(
+        step(
+          "service_endpoint",
+          endpointTitle,
+          "todo",
+          `Ask the builder to build Mynt's service endpoint for ${t?.name ?? o.service_type} at ${path}, then put the build online. Mynt knows it is there once its conformance test reaches it.`,
+          "start_build",
+          "vendor",
+          facts,
+        ),
+      );
+  }
   const ownEndpoint = Boolean(o.test_base_url) || Boolean(o.adapter);
 
   // The practice run: the same cases against Mynt's sandbox. For information only: it never counts as conformance.
@@ -213,6 +255,8 @@ async function offeringOnboarding(store: Store, o: Offering, held: HeldLicense[]
   else if (ramp) raws.push(step("conformance", "Pass Mynt's conformance test", "blocked", `${ramp}.`, "set_mynt_ramp", "admin", conformanceFacts));
   else if (last?.passed && passedNow) raws.push(step("conformance", "Pass Mynt's conformance test", "done", `Passed on ${day(last.at)}.`, "run_conformance", "vendor", conformanceFacts));
   else if (licence && licence.state === "blocked") raws.push(step("conformance", "Pass Mynt's conformance test", "blocked", "Waits for Mynt to verify your licence first.", "run_conformance", "vendor", conformanceFacts));
+  else if (app && !appOnline) raws.push(step("conformance", "Pass Mynt's conformance test", "blocked", `Waits for ${appName} to be online: Mynt tests the service itself, at its hosted address.`, "run_conformance", "vendor", conformanceFacts));
+  else if (app && last?.passed) raws.push(step("conformance", "Pass Mynt's conformance test", "todo", `It passed on ${day(last.at)}, but a new build of ${appName} went online since. Run it again: each build that goes online is tested before the service is listed.`, "run_conformance", "vendor", conformanceFacts));
   else if (!ownEndpoint) raws.push(step("conformance", "Pass Mynt's conformance test", "todo", "This service has no test endpoint yet. Give Mynt yours, then run the conformance test. A practice run doesn't count.", "update_vendor_offering", "vendor", conformanceFacts));
   else if (!last) raws.push(step("conformance", "Pass Mynt's conformance test", "todo", "Mynt hasn't tested your endpoint yet. Run the conformance test.", "run_conformance", "vendor", conformanceFacts));
   else if (last.passed) raws.push(step("conformance", "Pass Mynt's conformance test", "todo", `It passed on ${day(last.at)}, but the endpoint or licences changed since. Run it again.`, "run_conformance", "vendor", conformanceFacts));
@@ -255,6 +299,8 @@ async function offeringOnboarding(store: Store, o: Offering, held: HeldLicense[]
   if (o.status === "listed")
     raws.push(step("listed", "List the service", "done", o.terms ? "Listed in the Marketplace." : "Listed in the Marketplace, without standard terms: app teams can't subscribe until you set them.", "update_vendor_offering", "vendor", listedFacts));
   else if (suspended) raws.push(step("listed", "List the service", "blocked", suspendedWords, "suspend_vendor_offering", "admin", listedFacts));
+  else if (app && o.status === "conformance_passed") raws.push(step("listed", "List the service", "todo", "It passed Mynt's test: move it to Production to list it in the Marketplace.", "promote_app", "vendor", listedFacts));
+  else if (app) raws.push(step("listed", "List the service", "todo", "Moving it to Production lists it in the Marketplace, once it passes Mynt's conformance test.", "promote_app", "vendor", listedFacts));
   else if (o.status === "conformance_passed") raws.push(step("listed", "List the service", "todo", "It passed Mynt's test: list it in the Marketplace.", "update_vendor_offering", "vendor", listedFacts));
   else raws.push(step("listed", "List the service", "todo", "List it once it passes Mynt's conformance test.", "update_vendor_offering", "vendor", listedFacts));
 
@@ -267,7 +313,17 @@ async function offeringOnboarding(store: Store, o: Offering, held: HeldLicense[]
   );
 
   const steps = settle(raws, gate);
-  return { offering_id: o.id, name: o.name, region: o.region, service_type: o.service_type, service_name: t?.name ?? null, status: o.status, steps, progress: progressOf(steps, o.id) };
+  return {
+    offering_id: o.id,
+    name: o.name,
+    region: o.region,
+    service_type: o.service_type,
+    service_name: t?.name ?? null,
+    status: o.status,
+    service: app ? { id: app.id, name: app.name, endpoint_path: appServicePath(o.service_type), paused: o.app_pause } : null,
+    steps,
+    progress: progressOf(steps, o.id),
+  };
 }
 
 // Every version of an offering's standard terms Mynt knows: the current one in full, earlier ones from the audit log

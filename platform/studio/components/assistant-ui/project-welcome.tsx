@@ -15,14 +15,18 @@ export const BUILDER_EXAMPLES = ["Add a savings goal screen", "Show recent trans
 // The newest builds the welcome lists; the rest are on the Builds page.
 export const WELCOME_BUILDS = 5;
 
-export const ProjectWelcome: FC = () => {
+// Examples for a service with no builds yet.
+export const SERVICE_BUILDER_EXAMPLES = ["Add Mynt's vendor service endpoint", "Verify Mynt's signature on every request", "Answer the fixture requests"] as const;
+
+// `kind`: an app's builds, or a service's (the same chat and builds, at /services/<id>).
+export const ProjectWelcome: FC<{ kind?: "app" | "service" }> = ({ kind = "app" }) => {
   const { conversations, onSelectConversation, projectId } =
     useProjectConversations();
 
   const hasConversations = projectId && conversations.length > 0;
 
   return (
-    <ChatWelcome title="" subtitle={projectId && !hasConversations ? "No builds for this app yet." : undefined} chips={projectId && !hasConversations ? BUILDER_EXAMPLES : []} fill>
+    <ChatWelcome title="" subtitle={projectId && !hasConversations ? `No builds for this ${kind} yet.` : undefined} chips={projectId && !hasConversations ? (kind === "service" ? SERVICE_BUILDER_EXAMPLES : BUILDER_EXAMPLES) : []} fill>
         {hasConversations && (
           <div className="mt-8 w-full max-w-(--thread-max-width) animate-in delay-100 duration-300 fade-in slide-in-from-bottom-2">
             <Section id="welcome-builds" title="Builds">

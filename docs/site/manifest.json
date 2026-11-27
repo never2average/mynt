@@ -171,6 +171,13 @@
           ]
         },
         {
+          "slug": "concepts/services",
+          "title": "Services",
+          "sources": [
+            { "file": "docs/reference/services.md", "heading": "Services" }
+          ]
+        },
+        {
           "slug": "concepts/earn",
           "title": "Earn & liquidity",
           "sources": [

@@ -1,0 +1,30 @@
+# One service, one Compose project. Mynt hosts it as it is: services labelled mynt.expose get a route on the
+# service's address (web at /, which forwards /mynt/services/* and /api/* to the api), nothing else is reachable.
+x-hardening: &hardening
+  read_only: true
+  tmpfs: ["/tmp"]
+  cap_drop: ["ALL"]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+
+services:
+  api:
+    <<: *hardening
+    build: { context: ., dockerfile: api/Dockerfile }
+    environment:
+      # Set by Mynt's hosting on every deploy; from .env for a local run. Never committed.
+      MYNT_VENDOR_SIGNING_SECRET: ${MYNT_VENDOR_SIGNING_SECRET:-}
+      PORT: "3000"
+    labels:
+      mynt.expose: "api"
+      mynt.port: "3000"
+
+  web:
+    <<: *hardening
+    build: { context: ., dockerfile: web/Dockerfile }
+    depends_on:
+      api: { condition: service_healthy }
+    ports: ["127.0.0.1:8080:8080"] # preview only; Mynt routes by label, not by this port
+    labels:
+      mynt.expose: "web"
+      mynt.port: "8080"

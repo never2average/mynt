@@ -76,7 +76,7 @@
       "id": "vendors",
       "title": "Vendors",
       "summary": "Standard services per region, vendors' offerings, conformance and subscriptions.",
-      "tools": 25
+      "tools": 33
     },
     {
       "id": "compliance",
@@ -122,7 +122,7 @@
     {
       "role": "developer",
       "summary": "the builder role, under its other name: builds apps (keys, webhooks, SDKs, journeys, GTM campaigns) with coding agents Mynt verifies and hosts, and composes and publishes products too. The same tools as innovator. Also a consumer.",
-      "tools": 261,
+      "tools": 266,
       "get_started": [
         {
           "tool": "list_buildable_products",
@@ -149,7 +149,7 @@
     {
       "role": "innovator",
       "summary": "the builder role: composes, tests, publishes and versions financial products from regulated primitives, decides who may build on them, and builds apps on them. Needn't be licensed: a licence provider can sponsor a product under its licences. The same tools as developer. Also a consumer.",
-      "tools": 261,
+      "tools": 266,
       "get_started": [
         {
           "tool": "create_entity",
@@ -176,7 +176,7 @@
     {
       "role": "vendor",
       "summary": "a firm offering standard services per region (identity, KYC, account data, bureau, e-sign, e-mandate, the ramp) that builders plug into products. A peer of builders.",
-      "tools": 47,
+      "tools": 54,
       "get_started": [
         {
           "tool": "get_my_entity",
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Also holds the builder, vendor and licence-provider roles (except the licence-provider tools that act as a member of the firm itself), but not the liquidity-provider role.",
-      "tools": 437,
+      "tools": 445,
       "get_started": [
         {
           "tool": "define_region",
@@ -2385,6 +2385,38 @@
         "required": [
           "product_id",
           "reason"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "archive_service",
+      "title": "Archive or restore a service",
+      "description": "Vendor (an owner or admin of the service's workspace): archive a service you built on Mynt (archived: true). Its offering comes off the Marketplace and Mynt stops calling it at once; products that hand off through it drift (new sales pause) and their builders are told. Its history (builds, conformance runs, terms, agreements) stays. archived: false restores it as a draft: put it online again and Mynt tests it; a service still in Production is listed again on a pass.",
+      "area": "vendors",
+      "roles": [
+        "vendor",
+        "admin"
+      ],
+      "access": "destructive",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "service_id": {
+            "type": "string"
+          },
+          "archived": {
+            "default": true,
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "service_id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -4684,6 +4716,92 @@
       }
     },
     {
+      "name": "create_service",
+      "title": "Create a service",
+      "description": "Vendor who builds on Mynt: create a service, the third kind of thing built on Mynt beside apps and financial products. It is one admin-defined standard service type in one region (list_service_types; request_service_type if none fits), built, verified and hosted like an app (start_build, deploy_app with its id) and listed in the Marketplace for other builders to plug in. You need the vendor role at your firm (ask a Mynt admin) and, to name a workspace, to be its owner or admin. Its vendor offering is made with it, as a draft. Mynt derives the endpoint (the service's hosted address plus /mynt/services/<service_type>; never typed), and the service authenticates Mynt by Mynt-Signature alone, with a signing secret Mynt hands it as the hosted setting MYNT_VENDOR_SIGNING_SECRET on deploy and shows to nobody. Stages: idea (draft), staging (online, conformance), production (listed): get_promotion_checks, promote_app and demote_app take its id.",
+      "area": "vendors",
+      "roles": [
+        "vendor",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "description": "The workspace it belongs to (list_workspaces). Omitted: the workspace you created, or a new one of your own if you created none",
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "description": "What the service does, in a sentence or two"
+          },
+          "service_type": {
+            "type": "string",
+            "maxLength": 60,
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "region": {
+            "type": "string",
+            "pattern": "^[A-Z]{2}$"
+          },
+          "price": {
+            "default": {
+              "amount": 0,
+              "currency": "USD"
+            },
+            "description": "Per call, for builders to see; change it later with update_vendor_offering. Billing is between you and them, never through Mynt",
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "number",
+                "minimum": 0
+              },
+              "currency": {
+                "type": "string",
+                "pattern": "^[A-Z]{3}$"
+              }
+            },
+            "required": [
+              "amount",
+              "currency"
+            ]
+          },
+          "sla_notes": {
+            "default": "",
+            "type": "string",
+            "maxLength": 2000
+          },
+          "licence_ids": {
+            "default": [],
+            "description": "Your firm's licences it relies on (get_my_entity)",
+            "maxItems": 10,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "service_type",
+          "region"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "create_test_consumer",
       "title": "Create a sandbox test consumer",
       "description": "Developer: an opaque consumer_ref to use as a test user in sandbox hand-offs. It identifies nobody and carries no personal or financial data.",
@@ -5020,6 +5138,37 @@
           "case_id",
           "decision",
           "note"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "decline_service_type_request",
+      "title": "Decline a requested standard service",
+      "description": "Admin: decline a request for a new standard service type (list_service_type_requests), with the reason the requester will read. To accept one instead, define the service type from it: define_service_type { service_type, from_request }.",
+      "area": "vendors",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 1000
+          }
+        },
+        "required": [
+          "request_id",
+          "reason"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -7228,6 +7377,12 @@
               "moves_money"
             ],
             "additionalProperties": false
+          },
+          "from_request": {
+            "description": "The request this answers (list_service_type_requests): it is marked defined, with this service type's key, for its requester to see",
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
           }
         },
         "required": [
@@ -9146,6 +9301,72 @@
         },
         "required": [
           "sdk_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "get_service",
+      "title": "A service you build on Mynt",
+      "description": "Builder (any member of the service's workspace): one service, whole. Its stage (idea, staging, or production, which is listed in the Marketplace), its service type's contract (the input and output as field tables, the endpoint Mynt derives, the signing rule, fixtures), its conformance and practice runs with their cases, its standard terms versions, the firms and apps subscribed with their agreements, reliability from Mynt's own records of calls (calls, error rate and incidents per day; a figure Mynt doesn't record is null with the reason, never 0), its activity, and the ordered checklist of what is left. It only reads.",
+      "area": "vendors",
+      "roles": [
+        "developer",
+        "innovator",
+        "vendor",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "service_id": {
+            "type": "string"
+          },
+          "days": {
+            "default": 30,
+            "description": "The reliability window",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 90
+          }
+        },
+        "required": [
+          "service_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "get_service_type_contract",
+      "title": "A standard service's contract",
+      "description": "Builder or vendor: everything an endpoint for one standard service type implements, as one JSON document to keep beside the code: the input, params and output JSON Schemas, the Mynt-Signature rule (HMAC-SHA256 over '<t>.<raw body>', 300 seconds' tolerance, 401 otherwise), the request and response shapes, fixture requests valid against the input schema, an example output, and the path a service Mynt hosts answers at (/mynt/services/<key>). Nothing in it is secret. A build reads the same document at GET /v1/service_types/<key>/contract?region=<region> with its key, and in job/service-contracts/.",
+      "area": "vendors",
+      "roles": [
+        "developer",
+        "innovator",
+        "vendor",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "maxLength": 60,
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "region": {
+            "type": "string",
+            "pattern": "^[A-Z]{2}$"
+          }
+        },
+        "required": [
+          "key",
+          "region"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -11112,6 +11333,30 @@
       }
     },
     {
+      "name": "list_my_services",
+      "title": "Services you build on Mynt",
+      "description": "Builder: the services of every workspace you belong to (or of one, with workspace_id), each with its stage (idea, staging, production), its service type and region, its offering's status in words, whether it is online and whether it is archived. A service is the third kind of thing built on Mynt, beside apps and financial products: create_service starts one.",
+      "area": "vendors",
+      "roles": [
+        "developer",
+        "innovator",
+        "vendor",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "description": "Only this workspace's services",
+            "type": "string"
+          }
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "list_my_sponsorships",
       "title": "Your sponsorship requests",
       "description": "Your firm's requests to licence providers to sponsor its products' components, with each one's status (pending, approved, declined, revoked), the licences and the jurisdictions approved. covenant_pauses says when the licence provider's covenant has paused new sales: the rule type and since when, and nothing about its thresholds or the figures.",
@@ -12038,6 +12283,34 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "list_service_type_requests",
+      "title": "Requested standard services",
+      "description": "The standard service types people asked Mynt to define (request_service_type), newest first, each with its status: waiting for Mynt, defined (with the service type's key) or declined (with the reason). Builders and vendors see their own and their firm's; Mynt admins see everyone's.",
+      "area": "vendors",
+      "roles": [
+        "developer",
+        "innovator",
+        "vendor",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "requested",
+              "defined",
+              "declined"
+            ]
+          }
+        },
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
     },
@@ -14678,6 +14951,61 @@
         },
         "required": [
           "app_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "request_service_type",
+      "title": "Ask Mynt for a new standard service",
+      "description": "Builder or vendor: ask Mynt's admins to define a standard service type that doesn't exist yet (service types stay admin-defined: list_service_types). Say what it is called, what it does, and give one example input and one example output as JSON objects. An admin defines it from your request or declines with a reason; list_service_type_requests shows where it stands.",
+      "area": "vendors",
+      "roles": [
+        "developer",
+        "innovator",
+        "vendor",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 120
+          },
+          "what_it_does": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 2000
+          },
+          "example_input": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          },
+          "example_output": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          },
+          "region": {
+            "default": "US",
+            "type": "string",
+            "pattern": "^[A-Z]{2}$"
+          }
+        },
+        "required": [
+          "name",
+          "what_it_does",
+          "example_input",
+          "example_output"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }

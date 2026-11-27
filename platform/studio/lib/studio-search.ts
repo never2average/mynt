@@ -18,7 +18,7 @@ export const STUDIO_PAGES: readonly StudioPage[] = [
   { href: "/settings", label: "Settings", keywords: "workspace members team invite invitations people roles apps repositories general rename" },
   { href: "/earn", label: "Earn", keywords: "liquidity pools opportunities capital commit withdraw positions invest wallet" },
   { href: "/builds", label: "Builds", keywords: "coding agent" },
-  { href: "/new", label: "Build", keywords: "new app create build start financial product" },
+  { href: "/new", label: "Build", keywords: "new app create build start financial product service type" },
   { href: "/docs", label: "Docs", keywords: "documentation reference tools mcp guides help api roles" },
   { href: "/connect", label: "Connect your agent", keywords: "mcp agent claude cursor vscode chatgpt connect plug docs documentation help guide" },
 ];
@@ -51,15 +51,21 @@ export function isProductPath(pathname: string): boolean {
   return parts[0] === "products" && parts.length >= 2;
 }
 
-/** Whether a path is inside an app (/<app id>, /<app id>/<build id>): every first segment that isn't a fixed page (or a product's workspace). */
-export function isAppPath(pathname: string): boolean {
-  const first = pathname.split("/").filter(Boolean)[0];
-  return first !== undefined && first !== "products" && !PAGE_BY_SEGMENT.has(first);
+/** Whether a path is a service's workspace (/services/<service id>, /services/<service id>/<build id>). */
+export function isServicePath(pathname: string): boolean {
+  const parts = pathname.split("/").filter(Boolean);
+  return parts[0] === "services" && parts.length >= 2;
 }
 
-/** The header's title for a fixed page: only the page's name. Null inside an app or a product (their own header names them). */
+/** Whether a path is inside an app (/<app id>, /<app id>/<build id>): every first segment that isn't a fixed page (or a product's or a service's workspace). */
+export function isAppPath(pathname: string): boolean {
+  const first = pathname.split("/").filter(Boolean)[0];
+  return first !== undefined && first !== "products" && first !== "services" && !PAGE_BY_SEGMENT.has(first);
+}
+
+/** The header's title for a fixed page: only the page's name. Null inside an app, a product or a service (their own header names them). */
 export function pageTitle(pathname: string): string | null {
-  if (isAppPath(pathname) || isProductPath(pathname)) return null;
+  if (isAppPath(pathname) || isProductPath(pathname) || isServicePath(pathname)) return null;
   const first = pathname.split("/").filter(Boolean)[0] ?? "";
   return PAGE_BY_SEGMENT.get(first)?.label ?? "Mynt Studio";
 }
@@ -87,8 +93,17 @@ export const APP_SEARCH_TABS = [
   { tab: "security", label: "Security & risk", keywords: "security risk risks register infosec fraud vendors conduct mitigation" },
 ] as const;
 
-export type SearchGroup = "Pages" | "Apps" | "Financial products" | "Members" | "Audit actions" | PlatformSearchGroup;
-export const SEARCH_GROUPS: readonly SearchGroup[] = ["Pages", "Apps", "Financial products", "Members", "Audit actions"];
+// A service's tabs that search finds by name and by what they hold; each opens the service on that tab.
+export const SERVICE_SEARCH_TABS = [
+  { tab: "contract", label: "Contract", keywords: "contract schema input output endpoint signature signing fixtures" },
+  { tab: "conformance", label: "Conformance", keywords: "conformance practice test runs cases passed failed" },
+  { tab: "terms", label: "Terms & pricing", keywords: "standard terms pricing price versions scope" },
+  { tab: "subscribers", label: "Subscribers", keywords: "subscribers subscriptions firms apps agreements" },
+  { tab: "reliability", label: "Reliability", keywords: "reliability calls errors error rate response time incidents uptime" },
+] as const;
+
+export type SearchGroup ="Pages" | "Apps" | "Financial products" | "Services" | "Members" | "Audit actions" | PlatformSearchGroup;
+export const SEARCH_GROUPS: readonly SearchGroup[] = ["Pages", "Apps", "Financial products", "Services", "Members", "Audit actions"];
 
 // `requires`: an item found only when one of the words typed is among these (an app's tab isn't listed for its name alone).
 export type SearchItem = { id: string; group: SearchGroup; label: string; hint?: string; href: string; text: string; requires?: string };
@@ -97,6 +112,8 @@ export type SearchSources = {
   apps?: { id: string; name: string; stage: Stage }[];
   // The user's own financial products: each opens its workspace (/products/<id>).
   products?: { id: string; name: string; stage?: Stage }[];
+  // The workspace's services: each opens its workspace (/services/<id>).
+  services?: { id: string; name: string; stage: Stage; typeName?: string }[];
   members?: { userId: string; name: string | null; email: string | null; role: string }[];
   auditActions?: string[];
   // A Mynt admin: the platform admin's sections are pages too (/platform/…), for nobody else.
@@ -140,6 +157,14 @@ export function searchIndex(sources: SearchSources): SearchItem[] {
   for (const p of sources.products ?? []) {
     const stage = p.stage ? STAGE_LABELS[p.stage] : undefined;
     items.push({ id: `product:${p.id}`, group: "Financial products", label: p.name, hint: stage, href: `/products/${encodeURIComponent(p.id)}`, text: lower(p.name, p.id, stage, p.stage, "financial product") });
+  }
+  // The workspace's services (built on Mynt, listed in the Marketplace): each opens its own workspace, never an app's.
+  for (const s of sources.services ?? []) {
+    const stage = STAGE_LABELS[s.stage];
+    const href = `/services/${encodeURIComponent(s.id)}`;
+    items.push({ id: `service:${s.id}`, group: "Services", label: s.name, hint: stage, href, text: lower(s.name, stage, s.stage, "service", s.typeName) });
+    for (const t of SERVICE_SEARCH_TABS)
+      items.push({ id: `servicetab:${s.id}:${t.tab}`, group: "Services", label: `${s.name}: ${t.label}`, hint: "Service tab", href: `${href}?tab=${t.tab}`, text: lower(s.name, t.label, t.keywords), requires: lower(t.label, t.keywords) });
   }
   for (const m of sources.members ?? []) {
     const label = m.name ?? m.email ?? "Member";
@@ -212,7 +237,7 @@ export function searchStudio(
     ? items.filter((i) => words.every((w) => i.text.includes(w) || i.label.toLowerCase().includes(w)) && (!i.requires || words.some((w) => i.requires!.includes(w))))
     : browse
       ? items.filter((i) => browse.includes(i.group) && !i.requires)
-      : items.filter((i) => i.group === "Pages" || (i.group === "Apps" && !i.requires) || i.group === "Financial products");
+      : items.filter((i) => i.group === "Pages" || (i.group === "Apps" && !i.requires) || i.group === "Financial products" || (i.group === "Services" && !i.requires));
   const rank = (i: SearchItem) => {
     const label = i.label.toLowerCase();
     return !q ? 0 : label.startsWith(q) ? 0 : label.includes(q) ? 1 : 2;

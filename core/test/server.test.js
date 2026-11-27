@@ -21,6 +21,9 @@ const CHAT_SESSION_TOOLS = ["append_chat_events", "create_chat_session", "delete
 const CONSUMER_TOOLS = ["block_firm_recovery", "cancel_enrollment", "enroll_in_product", "list_firm_notices", "list_my_enrollments", "list_my_product_requests", "list_offers", "request_product", "upgrade_enrollment", ...INVITATION_TOOLS, ...CHAT_SESSION_TOOLS];
 const DEVELOPER_TOOLS = [
   "create_app", "list_my_apps", "preview_app", "publish_app", "update_app",
+  // services, the third kind built on Mynt: reading one, the contract a build keeps, asking for a new service type
+  // (creating a service takes the vendor role)
+  "get_service", "get_service_type_contract", "list_my_services", "list_service_type_requests", "request_service_type",
   // building on innovators' products
   "check_experience", "get_developer_contract", "get_product_sdk", "list_app_ideas", "list_buildable_products", "list_my_requests", "list_product_ideas", "request_product_access",
   // GTM engineering
@@ -102,6 +105,8 @@ const VENDOR_TOOLS = [
   // its standard services, and where its onboarding stands
   "create_vendor_offering", "get_vendor_onboarding", "list_my_offerings", "list_my_subscribers", "list_service_types",
   "reveal_subscription_secret", "rotate_subscription_secret", "run_conformance", "run_practice_conformance", "update_vendor_offering",
+  // services it builds on Mynt, and asking Mynt for a new service type
+  "archive_service", "create_service", "get_service", "get_service_type_contract", "list_my_services", "list_service_type_requests", "request_service_type",
   // the Mynt Ramp's adapter
   "link_ramp_partner_customer", "set_ramp_adapter",
   // apps' agreements with its firm (never a licence provider's agreement templates: a vendor's terms are its offerings')

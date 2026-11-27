@@ -2,7 +2,7 @@
 
 This file covers the standard services vendors offer per region: service types, offerings and conformance, subscriptions, the marketplace and its standard terms, vendor onboarding, how Mynt calls a vendor, the Mynt Ramp and the wire contract. It is for vendors, for builders who subscribe to services, and for Mynt admins who define service types.
 
-See also: [Roles and tools](roles-and-tools.md), [Agreements](agreements.md), [Runtime API](runtime-api.md), [Money rails](money-rails.md), [Platform administration](platform-admin.md).
+See also: [Services](services.md), [Roles and tools](roles-and-tools.md), [Agreements](agreements.md), [Runtime API](runtime-api.md), [Money rails](money-rails.md), [Platform administration](platform-admin.md).
 
 Vendors are firms that offer standard services builders plug into their products, so that no builder has to integrate identity, verification, account data, bureau or ramp providers itself. Mynt Studio calls vendors "service providers".
 
@@ -11,6 +11,8 @@ A vendor's firm is a legal entity a Mynt admin adds by hand with `register_firm`
 1. A Mynt admin registers the firm (`register_firm`).
 2. The admin invites the vendor's people with the `vendor` role (`invite_user`) and attaches them to the firm (`add_entity_member`). Both can be done before the person has signed in: they join the firm when they first do.
 3. The vendor registers its licences (`register_license`), and an admin verifies them as for any firm.
+
+A vendor serves its offerings in one of two ways: at its own endpoints, as this file describes, or as a **service built on Mynt**, the third kind of thing built there beside apps and financial products. A service is built, verified and hosted like an app, its endpoint is derived by Mynt, and its stage is its listing. See [Services](services.md).
 
 ## Service types
 
@@ -87,6 +89,8 @@ Mynt tests the offering itself with `run_conformance`:
 
 A pass makes the offering `conformance_passed`. `update_vendor_offering { listed: true }` then lists it. Changing an endpoint or licences sends it back to draft.
 
+For a [service built on Mynt](services.md#a-new-build-and-conformance), putting a new build online is that change of endpoint: the offering goes back to draft, Mynt runs the test itself as soon as the build answers, and the service's stage decides the listing.
+
 ### Practising first: the vendor sandbox
 
 A vendor that has no test endpoint yet can still see Mynt's test run. Mynt serves a practice endpoint itself for every offering (`core/src/vendor-sandbox.ts`):
@@ -162,6 +166,8 @@ The signing secret is per subscription, and Mynt generates it.
 - `rotate_subscription_secret` replaces it. The new one is shown once, and the old one stops verifying at once.
 
 Conformance runs use the offering's own secret, shown once by `create_vendor_offering`.
+
+A [service built on Mynt](services.md#the-endpoint-and-the-signing-secret) has one secret for conformance and every subscriber, handed to it only as a hosted setting and never shown.
 
 ## The marketplace and standard terms
 
@@ -307,6 +313,8 @@ Mynt Studio shows the checklist to vendors as My services (`/vendor`, in the sid
 - the firm's services in a table;
 - each service's details: Conformance runs, Practice runs, Terms versions, Subscribers;
 - Run practice test, beside Run conformance on a service, opens a sheet with each case's result, what Mynt sends and expects, and the run's transcript (Download transcript saves it as JSON). Create service takes a service with no test endpoint yet, to practise on.
+
+A service built on Mynt has its own workspace at `/services/<id>` (see [Mynt Studio](studio.md)); My services lists it beside the offerings served elsewhere.
 
 The platform admin's Vendors section has a Vendor firms tab with each firm's onboarding progress (see [The platform admin in Studio](platform-admin.md#the-platform-admin-in-studio)).
 

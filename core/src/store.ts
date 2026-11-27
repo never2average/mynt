@@ -549,6 +549,9 @@ export interface App {
   disclosures: string[];
   actions: string[];
   status: "draft" | "published";
+  // 'service': a vendor service built on Mynt (services.ts), made by create_service with its one offering. It is built,
+  // hosted and staged like an app, has no products, and is never published as an app experience.
+  kind: "app" | "service";
   created_at: string;
   updated_at: string;
 }
@@ -1282,6 +1285,34 @@ const TABLES = `
   -- A draft may have no test endpoint yet, so a vendor can practise against Mynt's sandbox first (vendor-sandbox.ts).
   -- run_conformance and listing still need the vendor's own.
   ALTER TABLE financial_products.vendor_offerings ALTER COLUMN test_base_url DROP NOT NULL;
+  -- A service built on Mynt (services.ts): an app record of kind 'service', with the one vendor offering made with it
+  -- (app_id, 1:1). The offering's endpoint is the service's hosted address plus a path Mynt derives, never typed.
+  -- app_pause says the service took it off (it went offline, or was archived), as distinct from an admin's suspension;
+  -- app_build_id is the deployed build conformance must pass against. No foreign key to apps: remove_app unlinks an
+  -- archived service's offering and keeps the offering's history.
+  ALTER TABLE financial_products.apps ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'app' CHECK (kind IN ('app', 'service'));
+  ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS app_id uuid;
+  ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS app_pause text CHECK (app_pause IN ('offline', 'stopped'));
+  ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS app_build_id uuid;
+  ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS app_secret_at timestamptz;
+  CREATE UNIQUE INDEX IF NOT EXISTS vendor_offerings_app_idx ON financial_products.vendor_offerings (app_id) WHERE app_id IS NOT NULL;
+  -- A service type someone asked Mynt's admins to define (service types stay admin-defined).
+  CREATE TABLE IF NOT EXISTS financial_products.service_type_requests (
+    id uuid PRIMARY KEY,
+    requested_by uuid NOT NULL REFERENCES financial_products.users(id),
+    entity_id uuid,
+    region text NOT NULL,
+    name text NOT NULL,
+    what_it_does text NOT NULL,
+    example_input jsonb NOT NULL,
+    example_output jsonb NOT NULL,
+    status text NOT NULL DEFAULT 'requested' CHECK (status IN ('requested', 'defined', 'declined')),
+    decision_note text,
+    service_type_key text,
+    decided_by uuid REFERENCES financial_products.users(id),
+    decided_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
   -- Practice runs: the conformance cases against Mynt's own sandbox endpoint. Kept apart from vendor_conformance_runs
   -- on purpose, so nothing that reads real conformance (listing, the marketplace, ops, risk) can ever count one.
   CREATE TABLE IF NOT EXISTS financial_products.vendor_practice_runs (
@@ -2165,6 +2196,7 @@ const toApp = (r: Row): App => ({
   disclosures: (r.disclosures as string[]) ?? [],
   actions: (r.actions as string[]) ?? ["display"],
   status: r.status as App["status"],
+  kind: r.kind === "service" ? "service" : "app",
   created_at: iso(r.created_at)!,
   updated_at: iso(r.updated_at)!,
 });

@@ -61,7 +61,7 @@ Joining a workspace is always explicit, never automatic. Pending invitations sho
 
 ### The stage folders
 
-The three folders hold apps and financial products together, because both move through the same stages. Each item says which it is: an icon, and "App" or "Financial product" to screen readers.
+The three folders hold apps, financial products and services together, because all three move through the same stages. Each item says which it is: an icon, and "App", "Financial product" or "Service" to screen readers. A service opens its own workspace at `/services/<id>`.
 
 - Exactly one folder is open at a time. Opening one closes the others, and the open one can't be closed.
 - It starts at the stage of the app or product on screen, else the folder last picked (remembered in this browser), else Production.
@@ -132,7 +132,15 @@ A figure Mynt can't measure is a gap, never 0. Positions on rails carry no dated
 
 ## Build
 
-Build is the `/new` page and the **Build** button in every header. It has two modes, switched by a toggle in the composer: **App** and **Financial product**.
+Build is the `/new` page and the **Build** button in every header. A labelled **Type** menu in the composer picks what is being built:
+
+| Type | What it is |
+|---|---|
+| **App** | An app for customers, built on financial products |
+| **Financial product** | A regulated product composed from primitives |
+| **Service** | A service other builders plug in, listed in the Marketplace |
+
+The choice is kept in the address (`?type=app`, `product` or `service`) and remembered in this browser. Links with `?product=` or `?thread=` open as before.
 
 ### Building an app
 
@@ -150,6 +158,18 @@ The right side has two tabs:
 | **Products** | The products you may build on, and your own products with their stage |
 
 A few ideas also show as chips under the composer. How app kinds and ideas work is in [Kinds and ideas on the Build page](apps-and-builds.md#kinds-and-ideas-on-the-build-page).
+
+### Building a service
+
+A service is the third kind of thing built on Mynt (see [Services](services.md)).
+
+1. Pick **Service** in the Type menu.
+2. Pick the service type and region, in place of the products picker. Each type shows the licence it needs. **Request a service type** asks Mynt's admins for one that doesn't exist (`request_service_type`).
+3. Describe it and send. Studio creates the service (`create_service`), starts its first build, and opens `/services/<id>`.
+
+The right side has two tabs: **Service types**, and **Requested service types** with each request's status.
+
+A service needs the vendor role. Without it the Service choice stays visible, the page says "Ask a Mynt admin for the vendor role", and Send is disabled.
 
 ### The Products tab
 
@@ -253,6 +273,42 @@ The sheet shows the build, the repository and commit it deploys, and what happen
 
 A build that pushed to no repository can't be hosted. The sheet says so and offers **Choose repository**; the app's next build pushes there. The chat's composer offers the same **Put online** once a build has shipped. The full behaviour is in [Put online](apps-and-builds.md#put-online).
 
+## The service workspace
+
+A service's workspace is `/services/<id>`: the builder chat on the left, as for an app, and its tabs on the right.
+
+### The service's header
+
+The header shows the service's name, its stage and its offering's status in words (for example "Needs conformance" or "Listed in the Marketplace"). Its labelled actions:
+
+| Action | What it does |
+|---|---|
+| **Promote to Staging**, **Promote to Production** | Opens the approval sheet with Mynt's checks for a service. Production lists it in the Marketplace |
+| **Move back** | Moves it to an earlier stage. Out of Production unlists it |
+| **Put online** | Hosts its newest verified build. Mynt then tests that build itself |
+| **Archive**, **Restore** | Opens a confirm sheet (`archive_service`) |
+
+### The service's tabs
+
+Each tab is a read view. Changes are the labelled buttons.
+
+| Tab | What it shows |
+|---|---|
+| **Overview** | The service's details and its checklist, each step with its button: Put online, Ask the builder to add it, Run practice test, Run conformance, Set standard terms, Move to production. A blocked role step says to ask a Mynt admin |
+| **Contract** | The service type and region; what it takes in and gives back, as field tables (Field, Type, Required, Description); the endpoint Mynt derives; the signing rule; fixtures |
+| **Conformance** | Practice runs and real runs in one table (When, Kind, Build, Result, Cases passed, Run by). A row opens its cases. **Run practice test** and **Run conformance** |
+| **Terms & pricing** | The standard terms versions (Version, Scope, Summary, Pricing, Set on, Set by, the document). **Set standard terms** |
+| **Subscribers** | Firm, App, Terms version accepted, Since, Live or sandbox, Agreement status |
+| **Reliability** | Calls, error rate, response time and incidents from Mynt's own records. A figure Mynt doesn't record reads "Not measured" with the reason, never 0 |
+| **Security & risk** | The same view as an app's, for the service |
+| **Activity** | Builds, deploys, stage moves, conformance runs and terms changes (When, What, Detail, By) |
+
+A service has no Products, Agreements, Customers, P&L or SDK tab.
+
+- **Ask the builder to add it** sends a prepared message into the service's chat: "Add Mynt's vendor service endpoint for <service type>".
+- The Build column shows the tested build only on the passing run that stands. Other rows read "Not recorded".
+- A past practice run's row shows its failures. Its full transcript shows in Run practice test, right after a run.
+
 ## The product workspace
 
 A financial product has its own workspace at `/products/<id>`, laid out like an app's: the product's chat on the left and its tabs on the right. It opens from the stage folders, from the Build page, and right after a product is created.
@@ -340,6 +396,8 @@ My services (`/vendor`) is a vendor's own area, shown only to accounts with the 
 - A service opens its details: a card with its labelled actions, then the tabs Conformance runs, Terms versions and Subscribers, each a table.
 
 See [Onboarding a vendor](vendors-and-marketplace.md#onboarding-a-vendor).
+
+Services built on Mynt are listed here too, marked "Built on Mynt". Such a row opens the service's workspace at `/services/<id>`; other rows open their details as before. A **Requested service types** table shows the status of each service type you asked Mynt for, with a **Request a service type** button.
 
 ## My firm
 
@@ -513,6 +571,8 @@ The header's search box ("Search...", with its ⌘K key; an icon button named Se
 - Typing finds any of them, and also what sits under them: an app's tabs (shown as "the app › the tab"), members and audit actions.
 - Arrow keys move, Enter opens, Esc closes (or steps back out of a list). The bar's foot says so.
 - Mynt admins also find the platform admin's sections there.
+
+Search has a **Services** group, beside apps and products, and finds a service's tabs by what they hold.
 
 ### Ask AI
 

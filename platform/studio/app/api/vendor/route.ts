@@ -1,5 +1,6 @@
 import { callStudioTool, isAuthError } from "@/lib/studio-server";
 import { json } from "@/lib/studio-route";
+import { typeRequestsFrom } from "@/lib/services";
 import { fromMyOfferings, fromOnboarding, licenceOptions, serviceTypeOptions } from "@/lib/vendor-area";
 import { asVendor, hasVendorTools, UNSUPPORTED } from "@/lib/vendor-server";
 
@@ -27,6 +28,8 @@ export async function GET() {
     };
     const serviceTypes = await optional(async () => serviceTypeOptions(await callStudioTool(mynt, "list_service_types", {})), []);
     const licences = await optional(async () => licenceOptions(await callStudioTool(mynt, "get_my_entity", {})), []);
-    return json({ onboarding, offerings, serviceTypes, licences });
+    // The service types this account or its firm asked Mynt for, with where each stands (where this Mynt takes requests).
+    const requests = (await hasVendorTools(mynt, "list_service_type_requests")) ? await optional<ReturnType<typeof typeRequestsFrom> | null>(async () => typeRequestsFrom(await callStudioTool(mynt, "list_service_type_requests", {})), null) : undefined;
+    return json({ onboarding, offerings, serviceTypes, licences, ...(requests !== undefined ? { requests } : {}) });
   });
 }

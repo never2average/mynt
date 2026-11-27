@@ -75,7 +75,13 @@ export const APP_REMOVAL_STEPS: { table: string; where: string; list?: string }[
 ];
 
 // Tables with an app_id that remove_app never deletes from: their rows make it refuse (see the checks below).
-const REFUSING_TABLES = ["hosted_apps", "customer_state_history", "customer_verified_states", "customer_state_erasures"];
+const REFUSING_TABLES = ["hosted_apps", "customer_state_history", "customer_verified_states", "customer_state_erasures", "vendor_offerings"];
+
+// A service's vendor offering (services.ts). While the service isn't archived, remove_app refuses: the safer choice,
+// since suspending the offering here would pause other firms' products as a side effect of a removal. Once its builder
+// has archived it (archive_service), removal unlinks the offering and keeps it, with its conformance runs, terms and
+// agreements, as the vendor's and its subscribers' record.
+const OFFERINGS_SERVED = `SELECT id::text AS id, name, status FROM ${T}.vendor_offerings WHERE app_id = $1`;
 
 // Rows that are a live customer's: any of them and the app is refused.
 const LIVE: { table: string; where: string }[] = [
@@ -152,6 +158,12 @@ export async function planAppRemoval(q: Q, appId: string): Promise<RemovalPlan> 
   if (app.status === "published") refusals.push("The app is published (anyone can find it with list_apps); only an app that was never published is removed");
   const hosted = !present.has("hosted_apps") ? undefined : (await q.query(`SELECT status FROM ${T}.hosted_apps WHERE app_id = $1`, [app.id])).rows[0] as { status: string } | undefined;
   if (hosted) refusals.push(`The app is hosted on Mynt (${hosted.status}): undeploy it first (undeploy_app)`);
+
+  if (present.has("vendor_offerings")) {
+    const columns = (await q.query(`SELECT 1 FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'vendor_offerings' AND column_name = 'app_pause'`, [T])).rows.length;
+    const served = columns ? ((await q.query(`${OFFERINGS_SERVED} AND app_pause IS DISTINCT FROM 'stopped'`, [app.id])).rows as { id: string; name: string; status: string }[]) : [];
+    for (const o of served) refusals.push(`It is a service with a vendor offering, "${o.name}" (${o.status}): archive it first (archive_service)`);
+  }
 
   const programs = (
     (!present.has("solana_programs") ? { rows: [] } : await q.query(`SELECT id, program_id, name, cluster, status, operation FROM ${T}.solana_programs WHERE app_id = $1 ORDER BY created_at`, [app.id])).rows as Omit<
@@ -282,6 +294,11 @@ export async function removeApp(db: Db, solana: SolanaService | null, actor: Use
     if (again.refusals.length) throw new RemovalRefused(again.refusals);
     const present = await presentTables(tx);
     const out: Record<string, { count: number; ids?: string[] }> = {};
+    // An archived service's offering stays, unlinked (the refusals above let no other kind through).
+    if (present.has("vendor_offerings")) {
+      const unlinked = (await tx.query(`UPDATE ${T}.vendor_offerings SET app_id = NULL, app_build_id = NULL, updated_at = now() WHERE app_id = $1 RETURNING id::text AS k`, [plan.app!.id])).rows as { k: string }[];
+      if (unlinked.length) out.vendor_offerings_unlinked = { count: unlinked.length, ids: unlinked.map((x) => x.k) };
+    }
     for (const s of APP_REMOVAL_STEPS) {
       if (!usable(present, s.table, s.where)) continue;
       const r = (await tx.query(`DELETE FROM ${T}.${s.table} t WHERE ${s.where} RETURNING ${s.list ? `t.${s.list}::text AS k` : "1 AS k"}`, [plan.app!.id])).rows as { k: string }[];

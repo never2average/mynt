@@ -30,6 +30,7 @@ An app key belongs on the builder's server. A customer's browser or phone gets a
 | `GET /v1/products` | `{ products: [...] }`: the products this app may show right now (published, and access granted for the app), each with its fields, `version` and `build_terms`. Revoked or suspended products drop out immediately |
 | `GET /v1/products/{id}` | One of those, else `404` |
 | `GET /v1/products/{id}/contract` | The product's developer contract, for its live version |
+| `GET /v1/service_types/{key}/contract?region={region}` | A standard service type's contract (schemas, signature rule, fixtures), for a build of a [service](services.md#the-contract-a-build-reads) to keep beside its code. `404 service_type_not_found` otherwise |
 | `POST /v1/handoffs` | `{ product_id, action: "deep_link" \| "initiate_onboarding", consumer_ref? }` returns `201 { handoff_id, redirect_url, sandbox }`. Only if the product's build terms permit the action (`403` otherwise) |
 | `POST /v1/events` | `{ type: "view" \| "click" \| "handoff_started", product_id, screen? }` returns `202` |
 | `POST /v1/client_sessions` | Mints a client session for one customer's device. Server only |
