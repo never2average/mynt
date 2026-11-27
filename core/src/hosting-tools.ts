@@ -6,9 +6,10 @@ import type { HostingService, Tenant } from "./hosting.js";
 import { connectionApproval, requireApproved } from "./repo-approvals.js";
 import { appProducts, buildTerms } from "./runtime.js";
 import type { BuildService } from "./builds.js";
-import type { Store, User } from "./store.js";
+import type { App, Store, User } from "./store.js";
 import { isProduction } from "./promotion-schema.js";
-import { canSeeBuild, createdWorkspaces, memberApp, personalWorkspace, workspaceRole } from "./workspaces.js";
+import { productionDeployBlockers } from "./promotions.js";
+import { appRole, canSeeBuild, createdWorkspaces, memberApp, personalWorkspace, workspaceRole } from "./workspaces.js";
 import { candidateSettings, conformanceAfterDeploy, serviceBuildBeside, serviceDeployed, serviceHostingRefusal, serviceOffline, serviceOperatorRefusal, serviceSettings, servingOffering, testCandidate } from "./services.js";
 import type { VendorCallOptions } from "./vendor-call.js";
 
@@ -82,6 +83,22 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     return { id: ws };
   };
 
+  // An app in Production serves real customers on a live key. What is online there, and what runs inside it, is its
+  // workspace's owners' and admins' to change, as promoting it was: being a member of the workspace is not enough.
+  // Idea and Staging stay every member's, so building and testing aren't slowed. Reading status and logs stays every
+  // member's in every stage. A refused attempt is in the audit trail (deploy_app_refused, undeploy_app_refused,
+  // app_restart_refused, app_exec_refused; never the command). There is no automatic deploy of an app: nothing but
+  // deploy_app puts an app's build online, so nothing goes round this.
+  const productionOperatorRefusal = async (app: App, what: string, production: boolean): Promise<string | null> => {
+    if (!production) return null;
+    const role = await appRole(store, user, app);
+    if (role === "owner" || role === "admin") return null;
+    return app.kind === "service"
+      ? `This service is in Production: only its workspace's owners and admins ${what}. Ask one of them.`
+      : `This app is in Production: only its workspace's owners and admins ${what}. Ask one of them. In Idea and Staging any member of the workspace can.`;
+  };
+  const notOperator = (app: App) => ({ reason: "production_needs_owner_or_admin", stage: "production", workspace_id: app.workspace_id });
+
   server.registerTool(
     "request_hosting",
     {
@@ -138,7 +155,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     {
       title: "Host an app",
       description:
-        "Developer: run one of your apps on its own VM from a build Mynt verified (build_id from your coding-agent builds). The VM fetches exactly that commit, builds it and runs it; each Compose service listens on the port its mynt.port label names and is served publicly over HTTPS. Mynt gives the app a dedicated key (live once the app is in Production and published, else sandbox), added at the edge to its calls to Mynt and never stored on the VM. Deploying again with a newer build replaces it. A service (create_service) differs: only an owner or admin of its workspace, at the firm that offers it, puts a build online; it needs direct hosting; and while a build of it serves subscribers, a newer build goes online beside it, with a signing secret of its own, and takes over only after Mynt's conformance test passes on it (and, in Production, the other production checks). If it fails it is removed and the serving build, its offering and its listing are unchanged.",
+        "Developer: run one of your apps on its own VM from a build Mynt verified (build_id from your coding-agent builds). The VM fetches exactly that commit, builds it and runs it; each Compose service listens on the port its mynt.port label names and is served publicly over HTTPS. Mynt gives the app a dedicated key (live once the app is in Production and published, else sandbox), added at the edge to its calls to Mynt and never stored on the VM. Deploying again with a newer build replaces it. Any member of the app's workspace deploys it in Idea and Staging. In Production only the workspace's owners and admins do, and a build goes online only if it passes the production checks that are about the build, read for that build: it is a build of this app that Mynt verified, its independent audit passed, it has no open critical or high audit findings and, when the app moves value, a Mynt admin signed off that very build (ask first with request_promotion_signoff). Otherwise it is refused with the failing checks, in get_promotion_checks' words, and the build online stays as it is. A service (create_service) differs: only an owner or admin of its workspace, at the firm that offers it, puts a build online; it needs direct hosting; and while a build of it serves subscribers, a newer build goes online beside it, with a signing secret of its own, and takes over only after Mynt's conformance test passes on it (and, in Production, the other production checks). If it fails it is removed and the serving build, its offering and its listing are unchanged.",
       inputSchema: { app_id: z.string(), build_id: z.string() },
     },
     async ({ app_id, build_id }) => {
@@ -150,6 +167,14 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
         const refused = (await serviceOperatorRefusal(store, user, app)) ?? serviceHostingRefusal(hosting);
         if (refused) return fail(refused);
       }
+      // Read once: the stage that decides who may deploy and which checks the build must pass also decides the key, so
+      // a build that skipped the production checks (the app was promoted meanwhile) never gets a live one.
+      const production = await isProduction(store.db, app.id);
+      const notTheirs = await productionOperatorRefusal(app, "put a build online", production);
+      if (notTheirs) {
+        await store.audit(user.id, "deploy_app_refused", app_id, { ...notOperator(app), build_id });
+        return fail(notTheirs);
+      }
       // The app's workspace's hosting, whoever deploys it.
       const tenant = app.workspace_id ? await hosting.tenantOfWorkspace(app.workspace_id) : await hosting.tenantOf(user.id);
       if (!tenant) return fail("The workspace has no hosting yet: an owner or admin turns it on (request_hosting)");
@@ -157,6 +182,20 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       const found = await verifiedBuild(store, user, build_id);
       if ("error" in found) return fail(found.error!);
       if (found.build.app_id && found.build.app_id !== app_id) return fail(`Build '${build_id}' was for another app`);
+      // In Production a build goes online only if the production checks that are about the build pass for it
+      // (promotions.ts, productionDeployBlockers). A service has its own rule: its new build goes online beside the
+      // serving one and takes over only when those checks pass (services.ts).
+      if (production && app.kind !== "service") {
+        const blockers = await productionDeployBlockers(store, app, build_id);
+        if (blockers.length) {
+          await store.audit(user.id, "deploy_app_refused", app_id, { reason: "production_checks", stage: "production", build_id, failing: blockers.map((c) => c.id), workspace_id: app.workspace_id });
+          return fail(
+            `Build ${build_id.slice(0, 8)} can't go online: this app is in Production, where a build goes online only if it passes the production checks about the build. ${blockers
+              .map((c) => `${c.label}: ${c.detail}${c.fix?.tool ? ` (${c.fix.tool})` : ""}`)
+              .join("; ")}. The build that is online stays as it is`,
+          );
+        }
+      }
       // A teammate's build of this app in its managed repository: the deployer gets the same access its builders have.
       if (builds) await builds.ensureManagedConnection(user.id, app_id, found.build.repository).catch(() => undefined);
       // Hosting fetches the source through the developer's connection to the repository: only once an admin approved it.
@@ -166,7 +205,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
         return fail((e as Error).message);
       }
       // A live key only for a published app in Production (production gates real money); else sandbox.
-      const environment = app.status === "published" && (await isProduction(store.db, app.id)) ? "live" : "sandbox";
+      const environment = app.status === "published" && production ? "live" : "sandbox";
       let plan;
       try {
         plan = await hosting.planSource(user.id, found.build.repository, found.build.commit_sha);
@@ -221,7 +260,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     {
       title: "Stop hosting an app",
       description:
-        "Developer: stop hosting one of your apps; its public addresses go away and, under direct hosting, its VM is deleted. A service: only an owner or admin of its workspace, at the firm that offers it; its offering is suspended (subscribers' calls stop, and products that hand off through it drift) until it is online again and passes.",
+        "Developer: stop hosting one of your apps; its public addresses go away and, under direct hosting, its VM is deleted. Any member of the app's workspace in Idea and Staging; in Production only the workspace's owners and admins. A service: only an owner or admin of its workspace, at the firm that offers it; its offering is suspended (subscribers' calls stop, and products that hand off through it drift) until it is online again and passes.",
       inputSchema: { app_id: z.string() },
       annotations: { destructiveHint: true },
     },
@@ -231,6 +270,11 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       // Taking a service offline stops every subscriber's calls: its firm's owners and admins only.
       const refused = await serviceOperatorRefusal(store, user, app);
       if (refused) return fail(refused);
+      const notTheirs = await productionOperatorRefusal(app, "take it offline", await isProduction(store.db, app.id));
+      if (notTheirs) {
+        await store.audit(user.id, "undeploy_app_refused", app_id, notOperator(app));
+        return fail(notTheirs);
+      }
       if (!(await hosting.undeploy(app_id))) return fail(`'${app_id}' isn't hosted`);
       await store.audit(user.id, "undeploy_app", app_id);
       // A service's offering is suspended, with the reason, until it is online again.
@@ -289,6 +333,13 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     // subscribers: the same people who put it online. Reading its status and logs stays every member's.
     const refused = kind === "exec" || kind === "restart" ? await serviceOperatorRefusal(store, user, app) : null;
     if (refused) return fail(refused.replace("put a service online or take it offline", "run commands in a service or restart it").replace("put it online or take it offline", "run commands in it or restart it"));
+    // In Production a command can read what the app holds for real customers, and a restart interrupts them: owners and
+    // admins only. Status and logs stay every member's.
+    const notTheirs = kind === "exec" || kind === "restart" ? await productionOperatorRefusal(app, kind === "exec" ? "run commands in it" : "restart it", await isProduction(store.db, app.id)) : null;
+    if (notTheirs) {
+      await store.audit(user.id, kind === "exec" ? "app_exec_refused" : "app_restart_refused", app_id, notOperator(app));
+      return fail(notTheirs);
+    }
     const tenant = (await hosting.tenantHostingApp(app_id)) ?? (app.workspace_id ? await hosting.tenantOfWorkspace(app.workspace_id) : await hosting.tenantOf(user.id));
     if (!tenant) return fail("You have no hosting yet (request_hosting)");
     try {
@@ -329,7 +380,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     {
       title: "Run a command in a hosted app",
       description:
-        "Developer: run a shell command inside your hosted app's container (under gVisor, read-only apart from /tmp), e.g. 'node --version' or 'wget -qO- localhost:<your mynt.port>/healthz'. It never runs on the VM itself. Output is capped and secrets are scrubbed; every command is audited.",
+        "Developer: run a shell command inside your hosted app's container (under gVisor, read-only apart from /tmp), e.g. 'node --version' or 'wget -qO- localhost:<your mynt.port>/healthz'. It never runs on the VM itself. Output is capped and secrets are scrubbed; every command is audited. For an app in Production: only its workspace's owners and admins.",
       inputSchema: { app_id: z.string(), command: z.string().min(1).max(4000), timeout_seconds: z.number().int().min(1).max(120).default(30), service: SERVICE },
     },
     async ({ app_id, command, timeout_seconds, service }) => onVm(app_id, "exec", { command, timeout_seconds, ...(service ? { service } : {}) }, timeout_seconds + 15),
@@ -339,7 +390,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     "restart_app",
     {
       title: "Restart a hosted app",
-      description: "Developer: restart your hosted app's container on your VM (same verified commit).",
+      description: "Developer: restart your hosted app's container on your VM (same verified commit). For an app in Production: only its workspace's owners and admins.",
       inputSchema: { app_id: z.string(), service: SERVICE },
     },
     async ({ app_id, service }) => onVm(app_id, "restart", service ? { service } : {}, 60),

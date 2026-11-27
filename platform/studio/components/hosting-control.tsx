@@ -6,7 +6,9 @@
 // happens (its own address; the Mynt key added at Mynt's edge, never on the app's machine). Confirm
 // turns the workspace's hosting on if needed and deploys; the sheet then follows the deploy until
 // the app answers. A build that pushed nowhere can't be hosted: the sheet says so and offers
-// Choose repository for the app's next build. The builder chat's Put online (after a build ships)
+// Choose repository for the app's next build. In Production the sheet says up front who may put a
+// build online (owners and admins) and what Mynt checks of the build first, and shows Mynt's refusal
+// in its own words if it refuses. The builder chat's Put online (after a build ships)
 // opens the same sheet. The views are server-renderable, so the tests render them without a browser.
 import { useCallback, useEffect, useRef, useState } from "react"
 import { CloudUpload, ExternalLink, FolderGit2 } from "lucide-react"
@@ -21,6 +23,8 @@ import {
   ONLINE_LABELS,
   ONLINE_TONE,
   POLL_MS,
+  PRODUCTION_CHECKS,
+  PRODUCTION_OWNERS_ONLY,
   putOnlineLabel,
   runsBuild,
   shortCommit,
@@ -40,6 +44,9 @@ export type HostingMeta =
       supported: true
       app: { id: string; name: string; workspaceId: string | null }
       role: string
+      /** The app's stage, and whether this person may put a build online in it (Production: owners and admins). */
+      stage?: string
+      canPutOnline?: boolean
       canTurnOn: boolean
       hosting: WorkspaceHosting
       build: ShippedBuild | null
@@ -109,6 +116,8 @@ export function PutOnlineView({ meta, busy = false, error = null, result = null,
   const ready = deployable(build)
   const membersBlocked = !hosting.on && !meta.canTurnOn && !!meta["app"].workspaceId
   const already = runsBuild(online, build)
+  const production = meta.stage === "production"
+  const ownersOnly = production && meta.canPutOnline === false
   return (
     <div className="flex flex-col gap-4" data-put-online-view>
       <dl className="flex flex-col gap-3 rounded-lg border p-3" data-build={build.id}>
@@ -131,6 +140,7 @@ export function PutOnlineView({ meta, busy = false, error = null, result = null,
               <li key={w}>{w}</li>
             ))}
             {!hosting.on && meta.canTurnOn && <li>Your workspace&apos;s hosting is turned on first; its apps all run on it.</li>}
+            {production && !ownersOnly && !already && <li data-production-checks>{PRODUCTION_CHECKS}</li>}
           </ul>
         </div>
       ) : (
@@ -181,6 +191,11 @@ export function PutOnlineView({ meta, busy = false, error = null, result = null,
           {MEMBERS_HOSTING}
         </p>
       )}
+      {ownersOnly && ready && !already && (
+        <p className="text-sm text-muted-foreground" data-production-owners-note>
+          {PRODUCTION_OWNERS_ONLY}
+        </p>
+      )}
       {online.state === "not_online" && online.error && (
         <div className="flex flex-col gap-1" data-deploy-error>
           <p className="text-sm font-medium">The last deploy stopped. Mynt says:</p>
@@ -206,7 +221,7 @@ export function PutOnlineView({ meta, busy = false, error = null, result = null,
         </Button>
       )}
       {ready && !already && (
-        <Button onClick={onPutOnline} disabled={busy || membersBlocked} data-confirm-put-online>
+        <Button onClick={onPutOnline} disabled={busy || membersBlocked || ownersOnly} data-confirm-put-online>
           <CloudUpload />
           {busy ? "Putting it online…" : putOnlineLabel(online, build)}
         </Button>
