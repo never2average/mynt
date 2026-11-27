@@ -245,10 +245,18 @@ export type ServiceRun = {
   at: string | null;
   runBy: string | null;
   failures: { case: string; problems: string[] }[];
-  cases: RunCase[] | null; // null: Mynt keeps only a practice run's failures
+  cases: RunCase[] | null; // null: Mynt sent only the run's failures
   passedCases: number | null;
   totalCases: number | null;
+  // What Mynt sent and what came back, case by case, as Mynt keeps it: the signature's digest, the signing secret and
+  // any credential are already left out. null: none was kept, and transcriptNote says why.
+  transcript: RunExchange[] | null;
+  transcriptNote: string | null;
+  buildId: string | null; // the build this run tested, when Mynt recorded it
+  newBuild: boolean; // a test of a new build beside the serving one, which did not take over
+  outcome: string | null; // for such a run: what happened, in Mynt's words
 };
+export type RunExchange = { case: string; method: string; path: string; headers: [string, string][]; body: unknown; httpStatus: number | null; answer: unknown; error: string | null; expected: string };
 /** A figure Mynt measures, or null with why it doesn't. Never 0 for want of a measurement. */
 export type Measured = { value: number | null; notMeasured: string | null };
 export type ServiceSubscriber = { subscriptionId: string; firm: string; appName: string | null; termsVersion: number | null; since: string | null; environment: "Live" | "Sandbox"; subscriptionStatus: string; agreementStatus: string | null };
@@ -275,6 +283,12 @@ export type ServiceView = {
   serviceType: { key: string; name: string; region: string; category: string | null; description: string };
   offering: { id: string; name: string; status: string; statusWords: string; statusNote: string | null; price: { amount: number; currency: string } | null; buildId: string | null };
   hosted: { status: string; online: boolean; buildId: string | null; address: string | null } | null;
+  // A new build online beside the serving one while Mynt tests it; null: none.
+  newBuild: { buildId: string; status: string; statusWords: string; servingBuildId: string | null; note: string } | null;
+  // Whether builders can subscribe to it in the sandbox by its offering id (in Staging, passed), in Mynt's words.
+  testing: { open: boolean; offeringId: string; words: string; how: string | null };
+  // Set when Mynt left out who subscribes and the checklist: they are the offering firm's people's to read.
+  firmOnly: string | null;
   contract: ServiceContract | null;
   conformance: { runs: ServiceRun[]; needed: boolean; testedBuildId: string | null };
   terms: { current: VendorOffering["terms"]; versions: TermsVersion[] };
@@ -304,6 +318,32 @@ const measuredOf = (v: unknown): Measured => {
 const casesOf = (v: unknown): RunCase[] | null =>
   Array.isArray(v)
     ? v.filter(isObj).map((c) => ({ case: str(c.case) ?? "case", passed: c.passed === true, httpStatus: num(c.http_status), problems: arr(c.problems).map(str).filter((p): p is string => Boolean(p)) }))
+    : null;
+// Mynt redacts a transcript before it keeps it. The studio masks once more before showing one, so nothing shaped like a
+// signing secret, a key, a bearer credential or a signature's digest reaches the page even if a reply carried it.
+const SECRET_SHAPES = /mvs_[A-Za-z0-9_-]{8,}|mynt_(?:live|test)_[A-Za-z0-9_-]{8,}|\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{8,}|Bearer\s+(?!<redacted>)[A-Za-z0-9._~+/=-]{8,}|v1=[0-9a-f]{32,}/g;
+export const REDACTED = "<redacted>";
+export function masked<V>(value: V): V {
+  if (value === undefined) return value;
+  return JSON.parse(JSON.stringify(value ?? null).replace(SECRET_SHAPES, (m) => (m.startsWith("v1=") ? `v1=${REDACTED}` : REDACTED))) as V;
+}
+const exchangesOf = (v: unknown): RunExchange[] | null =>
+  Array.isArray(v)
+    ? v.filter(isObj).map((x) => {
+        const req = isObj(x.request) ? x.request : {};
+        const res = isObj(x.response) ? x.response : {};
+        return masked({
+          case: str(x.case) ?? "case",
+          method: str(req.method) ?? "POST",
+          path: str(req.path) ?? "",
+          headers: Object.entries(isObj(req.headers) ? req.headers : {}).map(([k, val]): [string, string] => [k, String(val)]),
+          body: req.body ?? null,
+          httpStatus: num(res.http_status),
+          answer: res.body ?? null,
+          error: str(res.error),
+          expected: str(x.expected) ?? "",
+        });
+      })
     : null;
 const termsOf = (t: unknown): VendorOffering["terms"] => {
   if (!isObj(t) || num(t.version) === null) return null;
@@ -350,6 +390,23 @@ export function serviceFrom(reply: unknown): ServiceView | null {
     serviceType: { key: str(t.key) ?? "", name: str(t.name) ?? str(t.key) ?? "Service", region: str(t.region) ?? "—", category: str(t.category), description: str(t.description) ?? "" },
     offering: { id: str(o.id)!, name: str(o.name) ?? "Service", status: str(o.status) ?? "draft", statusWords: str(o.status_words) ?? "", statusNote: str(o.status_note), price, buildId: str(o.build_id) },
     hosted: h ? { status: str(h.status) ?? "unknown", online: h.online === true, buildId: str(h.build_id), address: str(h.address) } : null,
+    newBuild:
+      isObj(reply.new_build) && str(reply.new_build.build_id)
+        ? {
+            buildId: str(reply.new_build.build_id)!,
+            status: str(reply.new_build.status) ?? "testing",
+            statusWords: str(reply.new_build.status_words) ?? "Being tested by Mynt",
+            servingBuildId: str(reply.new_build.serving_build_id),
+            note: str(reply.new_build.note) ?? "",
+          }
+        : null,
+    testing: {
+      open: isObj(reply.testing) && reply.testing.open === true,
+      offeringId: (isObj(reply.testing) ? str(reply.testing.offering_id) : null) ?? str(o.id)!,
+      words: (isObj(reply.testing) ? str(reply.testing.words) : null) ?? "",
+      how: isObj(reply.testing) ? str(reply.testing.how) : null,
+    },
+    firmOnly: str(reply.firm_only),
     contract: c
       ? {
           endpoint: { method: str(ce.method) ?? "POST", path: str(ce.app_path) ?? "", address: str(ce.address), note: str(ce.note) ?? "" },
@@ -389,6 +446,11 @@ export function serviceFrom(reply: unknown): ServiceView | null {
                   cases: casesOf(r.cases),
                   passedCases: num(r.passed_cases),
                   totalCases: num(r.total_cases),
+                  transcript: exchangesOf(r.transcript),
+                  transcriptNote: str(r.transcript_note),
+                  buildId: str(r.build_id),
+                  newBuild: r.new_build === true,
+                  outcome: str(r.outcome),
                 },
               ]
             : [],
@@ -473,11 +535,15 @@ export const measuredWords = (m: Measured, format: (n: number) => string = Strin
 export const percent = (n: number) => `${(n * 100).toFixed(n > 0 && n < 0.001 ? 2 : 1)}%`;
 /** The build a run is recorded against: only the passing conformance run that stands (the newest one), never a guess. */
 export function runBuild(s: Pick<ServiceView, "conformance">, run: ServiceRun): string | null {
+  // Mynt records the build each real run tested; a run from before it did is named only when it is the one that stands.
+  if (run.buildId) return run.buildId;
   if (!s.conformance.testedBuildId || run.kind !== "conformance" || !run.passed) return null;
   const standing = s.conformance.runs.find((r) => r.kind === "conformance");
   return standing?.runId === run.runId ? s.conformance.testedBuildId : null;
 }
 export function casesWords(run: ServiceRun): string {
+  // A run in which nothing was sent (the build never answered) has no cases to count: it says so, never "0 of 0".
+  if (run.totalCases === 0) return "None run";
   if (run.passedCases !== null && run.totalCases !== null) return `${run.passedCases} of ${run.totalCases}`;
   if (run.cases) return `${run.cases.filter((c) => c.passed).length} of ${run.cases.length}`;
   return run.failures.length ? `${run.failures.length} failed` : NOT_RECORDED;

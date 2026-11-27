@@ -403,6 +403,9 @@ const WORKSPACE = [
   "service_build_online",
   "service_conformance_after_deploy",
   "service_offline",
+  "service_build_beside",
+  "service_build_switched",
+  "service_build_not_switched",
   // a service type asked of Mynt's admins, and declined (defining it is define_service_type)
   "request_service_type",
   "decline_service_type_request",

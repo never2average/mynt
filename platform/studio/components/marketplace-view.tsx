@@ -8,8 +8,9 @@
 // Pricing, Prerequisites, Conformance, Regions), each a table, and a labelled Subscribe button opening the Subscribe
 // sheet (components/marketplace-subscribe-sheet.tsx). Server-renderable for the tests.
 import { useMemo, useState } from "react"
-import { Download, ExternalLink, FileCheck2, Search, Upload } from "lucide-react"
+import { Download, ExternalLink, FileCheck2, FlaskConical, Search, Upload } from "lucide-react"
 
+import { AdminSheet, Field, fieldClass } from "@/components/admin-kit"
 import { FiltersPopover, picksOf, type Facet } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
 import { ListPager, TOOLBAR_ROW, TOOLBAR_SEARCH, usePaged } from "@/components/list-layout"
@@ -24,7 +25,11 @@ import {
   conformanceText,
   distinctSorted,
   filterOfferings,
+  IN_TESTING,
+  IN_TESTING_NOTE,
   marketplaceCsv,
+  offeringIdOf,
+  testingHref,
   NO_MARKETPLACE_FILTERS,
   prerequisiteText,
   subscribeBlocker,
@@ -63,6 +68,7 @@ export function MarketplaceView({
   const [openId, setOpenId] = useState<string | null>(initialOfferingId)
   const [subscribing, setSubscribing] = useState<Offering | null>(null)
   const [subscribed, setSubscribed] = useState(false)
+  const [adding, setAdding] = useState(false)
   const open = offerings.find((o) => o.id === openId) ?? null
   const set = (patch: Partial<MarketplaceFilters>) => {
     setF({ ...f, ...patch })
@@ -90,6 +96,10 @@ export function MarketplaceView({
           <Input value={f.query} onChange={(e) => set({ query: e.target.value })} placeholder="Search provider, service, category, region or pricing" className="pl-8" aria-label="Search the marketplace" />
         </div>
         <FiltersPopover facets={facets} onClear={() => set({ region: [], category: [], service: [] })} />
+        <Button variant="outline" onClick={() => setAdding(true)} data-add-testing>
+          <FlaskConical />
+          Add a service in testing
+        </Button>
         <Button variant="outline" disabled title={MARKETPLACE_IMPORT_NOTE} aria-description={MARKETPLACE_IMPORT_NOTE} data-import>
           <Upload />
           Import
@@ -123,6 +133,7 @@ export function MarketplaceView({
                   </TableCell>
                   <TableCell className="whitespace-normal">
                     {o.name}
+                    {o.inTesting && <div className="text-xs text-muted-foreground" title={IN_TESTING_NOTE} data-in-testing>{IN_TESTING}: sandbox only</div>}
                     {o.subscriptionId && <div className="text-xs text-muted-foreground" data-subscribed>Subscribed</div>}
                   </TableCell>
                   <TableCell>{categoryLabel(o.category)}</TableCell>
@@ -147,6 +158,7 @@ export function MarketplaceView({
         </Table>
       </div>
       <ListPager page={page} pages={pages} total={shown.length} onPage={setPage} noun={["service", "services"]} />
+      <AddTestingSheet open={adding} onClose={() => setAdding(false)} appId={forApp?.id ?? null} />
       <OfferingPeek
         offering={open}
         onClose={() => setOpenId(null)}
@@ -263,6 +275,41 @@ export function peekRows(o: Offering, tab: PeekTab): Pair[] {
   }
 }
 
+/** Add a service in testing: its builder gives the offering id; the Marketplace then shows it, marked, to subscribe to in the sandbox. */
+export function AddTestingSheet({ open, onClose, appId = null, navigate }: { open: boolean; onClose: () => void; appId?: string | null; navigate?: (href: string) => void }) {
+  const [text, setText] = useState("")
+  const id = offeringIdOf(text)
+  return (
+    <AdminSheet
+      id="add-testing"
+      open={open}
+      onClose={onClose}
+      title="Add a service in testing"
+      description="A service still in Staging isn't listed here. Its builder gives you its offering id; with it you can subscribe and call the service in the sandbox only. Once they move it to Production it is listed, and your subscription carries over."
+      error={text.trim() && !id ? "That isn't an offering id. It looks like 1b4e28ba-2fa1-41d2-883f-0016d3cca427." : null}
+    >
+      <form
+        className="flex flex-col gap-3"
+        onSubmit={(e) => {
+          e.preventDefault()
+          if (!id) return
+          ;(navigate ?? ((href: string) => window.location.assign(href)))(testingHref(id, appId))
+        }}
+      >
+        <Field label="Offering id">
+          <input className={fieldClass} value={text} onChange={(e) => setText(e.target.value)} placeholder="The id the service's builder gave you" aria-label="Offering id" data-testing-id />
+        </Field>
+        <div>
+          <Button type="submit" disabled={!id} data-testing-show>
+            <FlaskConical />
+            Show this service
+          </Button>
+        </div>
+      </form>
+    </AdminSheet>
+  )
+}
+
 export function OfferingPeek({ offering, onClose, onSubscribe, canSubscribe = true, initialTab = "overview" }: { offering: Offering | null; onClose: () => void; onSubscribe: (o: Offering) => void; canSubscribe?: boolean; initialTab?: PeekTab }) {
   const [tab, setTab] = useState<PeekTab>(initialTab)
   return (
@@ -294,6 +341,8 @@ export function OfferingDetail({ offering: o, tab, onTab, onSubscribe, canSubscr
     ["Standard terms", o.terms ? `v${o.terms.version}` : "None on file"],
     ["Conformance", conformanceText(o.conformance)],
     ["Prerequisites", o.canSubscribe ? "You meet them" : "Not met"],
+    // Only a service in testing says so: everything else here is listed.
+    ...(o.inTesting ? ([["Availability", IN_TESTING_NOTE]] as Pair[]) : []),
   ]
   return (
     <div className="flex flex-col gap-4 px-4 pb-4" data-offering-detail={o.id}>
