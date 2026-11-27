@@ -97,6 +97,8 @@ const TABLES = `
     finished_at timestamptz
   );
   CREATE INDEX IF NOT EXISTS benchmark_runs_created_idx ON ${T}.benchmark_runs (created_at DESC);
+  -- One run at a time, held by the database: of two starts at the same moment, only one can be queued.
+  CREATE UNIQUE INDEX IF NOT EXISTS benchmark_runs_one_active_idx ON ${T}.benchmark_runs ((true)) WHERE status IN ('queued', 'running');
   CREATE TABLE IF NOT EXISTS ${T}.benchmark_results (
     id uuid PRIMARY KEY,
     run_id uuid NOT NULL REFERENCES ${T}.benchmark_runs(id),
@@ -205,6 +207,7 @@ export class BenchmarkService {
   private bench: Db;
   private connectorClock = new Date();
   private connectorCapUsd = MIN_TASK_USD;
+  private ticking = false;
 
   private constructor(
     private readonly db: Db,
@@ -736,6 +739,11 @@ export class BenchmarkService {
     const unknown = (o.task_ids ?? []).filter((id) => !set.tasks.some((t) => t.id === id));
     if (unknown.length || !tasks.length) throw refuse(`the task set has no task ${unknown.map((u) => `'${u}'`).join(", ") || "to run"}`);
     const id = randomUUID();
+    // Another start can get in between the check above and this insert; the index benchmark_runs_one_active_idx
+    // refuses the second, and so does this start, in the same words.
+    const taken = (e: { code?: string }) => {
+      throw e.code === "23505" ? refuse("another benchmark run is still going (it was started at the same moment); one runs at a time, so stop it or let it finish") : e;
+    };
     await this.db.query(
       `INSERT INTO ${T}.benchmark_runs (id, agent, task_set, task_set_version, task_set_sha256, label, status, cap_usd, model, workspace_revisions, source_commit, options, started_by)
        VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8, $9, $10, $11, $12)`,
@@ -753,7 +761,7 @@ export class BenchmarkService {
         JSON.stringify({ ...(o.repository ? { repository: o.repository.toLowerCase() } : {}), ...(o.task_ids?.length ? { task_ids: o.task_ids } : {}), ...(o.host_restored ? { host_restored: true } : {}) }),
         admin.id,
       ],
-    );
+    ).catch(taken);
     for (const [n, t] of tasks.entries()) await this.db.query(`INSERT INTO ${T}.benchmark_results (id, run_id, task_id, position, status) VALUES ($1, $2, $3, $4, 'pending')`, [randomUUID(), id, t.id, n]);
     return (await this.run(id))!;
   }
@@ -798,8 +806,27 @@ export class BenchmarkService {
     this.timer = null;
   }
 
-  /** One step of the run in progress, if any: move its task along, score it when Mynt has decided, start the next. */
+  /**
+   * One step of the run in progress (below), never two at once: a second tick overlapping the first would see the
+   * same task waiting and start it again, and count a scored task's cost twice. A pool holds an advisory lock for the
+   * step on one connection, so this holds across every server on the database; in-process Postgres has one connection.
+   */
   async tick() {
+    if (this.ticking) return;
+    this.ticking = true;
+    try {
+      if (!this.db.transaction) return await this.step();
+      await this.db.transaction(async (tx) => {
+        const lock = (await tx.query(`SELECT pg_try_advisory_xact_lock(hashtext('mynt:benchmark-tick')) AS mine`)).rows[0] as { mine: boolean };
+        if (lock.mine) await this.step();
+      });
+    } finally {
+      this.ticking = false;
+    }
+  }
+
+  /** One step of the run in progress, if any: move its task along, score it when Mynt has decided, start the next. */
+  private async step() {
     const run = await this.one(`SELECT * FROM ${T}.benchmark_runs WHERE status = ANY($1) ORDER BY created_at LIMIT 1`, [ACTIVE]);
     if (!run) return;
     const agent = run.agent as BenchmarkAgent;

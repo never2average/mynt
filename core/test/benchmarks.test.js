@@ -225,9 +225,9 @@ test("every agent has a task set, in JSON, that passes its schema and Mynt's own
   assert.ok(files.length >= 6);
   for (const f of files) assert.match(f, /^[a-z-]+\.v\d+\.json$/, `${f}: task sets are JSON files named <agent>.v<n>.json`);
   const sets = taskSets();
-  assert.deepEqual(sets.map((s) => s.agent).sort(), [...BENCHMARK_AGENTS].sort());
-  const size = Object.fromEntries(sets.map((s) => [s.agent, s.tasks.length]));
-  assert.deepEqual(size, { coding: 8, connector: 5, "governance-review": 6, "product-desk": 6, "program-audit": 4, "program-red-team": 4 });
+  assert.deepEqual([...new Set(sets.map((s) => s.agent))].sort(), [...BENCHMARK_AGENTS].sort());
+  const size = Object.fromEntries(BENCHMARK_AGENTS.map((a) => [a, taskSetFor(a).tasks.length]));
+  assert.deepEqual(size, { coding: 8, connector: 5, "governance-review": 15, "product-desk": 6, "program-audit": 4, "program-red-team": 4 });
   for (const s of sets) {
     assert.match(s.sha256, /^[0-9a-f]{64}$/);
     assert.deepEqual(taskSetErrors(s.file, JSON.parse(readFileSync(join(BENCHMARKS_DIR, s.file), "utf8"))), []);
@@ -509,7 +509,8 @@ test("the cap is an operational setting with a safe default", () => {
 test("governance samples: a bad sample must be rejected on the planted item, a good one must not be flagged", async () => {
   const w = await world();
   const set = taskSetFor("governance-review");
-  const runId = await start(w, { agent: "governance-review", cap_usd: 20 });
+  // The six product samples (version 1's, kept in version 2); the firm and licence samples are run in benchmarks-governance.test.js.
+  const runId = await start(w, { agent: "governance-review", cap_usd: 20, task_ids: set.tasks.filter((t) => t.subject_kind === "product").map((t) => t.id) });
   // Stand-in reviewers, one per sample: quotes are copied from the case, as the real agent must.
   const answers = (kase, over = {}) => ({
     items: kase.items.map((i) => ({ id: i.id, status: "met", evidence: [{ source_url: "mynt://case", quote: kase.subject.product.description.slice(0, 40) }], note: "Checked against the recorded regulation", ...(over[i.id] ?? {}) })),
@@ -763,7 +764,7 @@ test("the gate script exits non-zero on a regression, and the tools compare the 
   // Validating the task sets needs no run at all (what CI does).
   const valid = gate("--validate");
   assert.equal(valid.status, 0, valid.stderr + valid.stdout);
-  assert.match(valid.stdout, /6 task sets/);
+  assert.match(valid.stdout, /7 task sets are sound: .*governance-review v1 \(6 tasks\), governance-review v2 \(15 tasks\)/);
 
   // compare_benchmark_runs over two recorded runs.
   const w = await world();
