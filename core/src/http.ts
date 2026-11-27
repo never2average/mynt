@@ -90,7 +90,6 @@ function publicBase(clerk: ClerkAuth | null, runtimeOptions: RuntimeApiOptions, 
 }
 
 interface Handlers {
-  attestation: AttestationLimits;
   meta: (() => Promise<unknown>) | null;
   runtime: ReturnType<typeof createRuntimeApi>;
   llmsFull: (base: string) => Promise<string>;
@@ -133,7 +132,7 @@ async function handle(store: Store, clerk: ClerkAuth | null, ctx: AdminContext, 
     return sendJson(res, 200, { origins: live ? [...live.provider.signingOrigins] : [] }, { "Cache-Control": "public, max-age=300" });
   }
   // The confidential service's attestation, for partners to check before sealing their books to it (verify-mynt-enclave).
-  if (readOnly && url.pathname === "/confidential/attestation") return confidentialAttestation(ctx, h.attestation, req, res, url);
+  if (readOnly && url.pathname === "/confidential/attestation") return confidentialAttestation(ctx, req, res, url);
   // A ramp partner's webhooks, for an offering Mynt runs through an adapter: verified with the partner's own scheme.
   if (url.pathname.startsWith(RAMP_ADAPTER_WEBHOOK_PATH)) return rampAdapterWebhook(store, req, res, url);
   // The runtime API for developers' apps authenticates with app keys, not Clerk.
@@ -203,7 +202,7 @@ export function createMcpHttpServer(
 ): Server {
   const meta = clerk ? authServerMetadata(clerk.issuer) : null;
   const runtime = createRuntimeApi(store, { hosting: ctx.hosting ?? null, ...runtimeOptions });
-  const handlers: Handlers = { meta, runtime, llmsFull: llmsFullCache(store, ctx), runtimeOptions, attestation: attestationLimits() };
+  const handlers: Handlers = { meta, runtime, llmsFull: llmsFullCache(store, ctx), runtimeOptions };
   return createHttpServer((req, res) =>
     handle(store, clerk, ctx, handlers, req, res).catch((err) => {
       console.error(err);
@@ -220,12 +219,10 @@ export function createMcpHttpServer(
 // one caller can't keep everyone else from checking, and ATTESTATIONS_PER_SECOND across all callers as the ceiling.
 export const CONFIDENTIAL_ATTESTATION_PATH = "/confidential/attestation";
 export const ATTESTATIONS_PER_SECOND = 5;
-interface AttestationLimits {
-  caller: RateLimiter;
-  all: RateLimiter;
-}
-const attestationLimits = (): AttestationLimits => ({ caller: new RateLimiter(1, 60), all: new RateLimiter(ATTESTATIONS_PER_SECOND, ATTESTATIONS_PER_SECOND * 60) });
-async function confidentialAttestation(ctx: AdminContext, limits: AttestationLimits, req: IncomingMessage, res: ServerResponse, url: URL) {
+// Kept for the whole process, like the one limit they replace: the confidential host is one, however many servers ask.
+const attestationLimits = { caller: new RateLimiter(1, 60), all: new RateLimiter(ATTESTATIONS_PER_SECOND, ATTESTATIONS_PER_SECOND * 60) };
+async function confidentialAttestation(ctx: AdminContext, req: IncomingMessage, res: ServerResponse, url: URL) {
+  const limits = attestationLimits;
   const host = ctx.confidential ?? null;
   if (!host) return sendJson(res, 404, { error: "not_configured", message: "This Mynt has no confidential host" });
   const nonce = url.searchParams.get("nonce");

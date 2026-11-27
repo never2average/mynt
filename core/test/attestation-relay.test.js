@@ -81,6 +81,8 @@ test("attestations without a trusted header: callers behind one connection addre
   delete process.env.TRUSTED_PROXY_HEADER;
   const w = await world();
   try {
+    // The limits are the process's: let the ceiling the last test used up refill.
+    await new Promise((r) => setTimeout(r, 1500));
     assert.equal((await w.get("198.51.100.1")).status, 200);
     assert.equal((await w.get("198.51.100.2")).status, 429, "the header isn't believed, so both are the same caller");
   } finally {
