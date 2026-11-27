@@ -80,13 +80,17 @@ describe("Put online's sheet", () => {
     expect((screen.getByRole("button", { name: "Put online" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("in Staging, a member still puts a build online, with no word about Production", () => {
-    const html = renderToStaticMarkup(<PutOnlineView meta={meta({ role: "member", canTurnOn: false, stage: "staging", canPutOnline: true, hosting: { on: true, status: "running", app: notOnline } })} onPutOnline={noop} onChooseRepository={noop} />);
-    expect(html).not.toContain("Production, ");
+  it("in Staging, a member still puts a build online, with no word about who may in Production", () => {
+    const m = meta({ role: "member", canTurnOn: false, stage: "staging", canPutOnline: true, hosting: { on: true, status: "running", app: notOnline } });
+    const html = renderToStaticMarkup(<PutOnlineView meta={m} onPutOnline={noop} onChooseRepository={noop} />);
     expect(html).not.toContain("data-production-owners-note");
     expect(html).not.toContain("data-production-checks");
-    expect(html).not.toMatch(/data-confirm-put-online[^>]*disabled/);
-    expect(html).not.toMatch(/disabled[^>]*data-confirm-put-online/);
+    const clicks: number[] = [];
+    render(<PutOnlineView meta={m} onPutOnline={() => clicks.push(1)} onChooseRepository={noop} />);
+    const button = screen.getByRole("button", { name: "Put online" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    expect(clicks).toHaveLength(1);
   });
 
   it("shows the live address once the app runs this build, and offers the newer build when it runs an older one", () => {
