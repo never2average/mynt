@@ -1,0 +1,64 @@
+{
+  "contract_version": 1,
+  "service_type": {
+    "key": "sample_service",
+    "region": "US",
+    "name": "Sample service",
+    "category": "other",
+    "description": "A placeholder contract: the scaffold replaces this file with your service type's contract from Mynt.",
+    "consent_purpose": "sample_purpose"
+  },
+  "endpoint": {
+    "method": "POST",
+    "app_path": "/mynt/services/sample_service"
+  },
+  "signature": {
+    "header": "Mynt-Signature",
+    "format": "t=<unix seconds>,v1=<lowercase hex HMAC-SHA256 of \"<t>.<raw request body>\" with the signing secret>",
+    "algorithm": "HMAC-SHA256",
+    "tolerance_seconds": 300,
+    "compare": "constant-time",
+    "refuse_with": 401,
+    "secret_setting": "MYNT_VENDOR_SIGNING_SECRET"
+  },
+  "request": {
+    "input_schema": {
+      "type": "object",
+      "required": [
+        "reference"
+      ],
+      "properties": {
+        "reference": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "params_schema": null
+  },
+  "response": {
+    "output_schema": {
+      "type": "object",
+      "required": [
+        "accepted"
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "fixtures": [
+    {
+      "input": {
+        "reference": "sample-1"
+      }
+    }
+  ],
+  "example_output": {
+    "accepted": true
+  }
+}

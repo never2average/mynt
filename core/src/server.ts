@@ -793,7 +793,11 @@ export function offboardingServices(ctx: Pick<AdminContext, "builds" | "hosting"
 // Developers build software on innovators' products; they never issue, sell or hold funds.
 function registerDeveloperTools(server: McpServer, store: Store, user: User) {
   // An app of a workspace the developer belongs to (workspaces.ts).
-  const ownApp = (id: string) => memberApp(store, user, id);
+  // An app experience of the caller's. A service (services.ts) is another kind: it has its own tools (get_service).
+  const ownApp = async (id: string) => {
+    const app = await memberApp(store, user, id);
+    return app?.kind === "service" ? undefined : app;
+  };
 
   // Products an app may include: published, and not private unless this developer was let in. A product in staging
   // only on an app not in production (sandbox builds): `production` says the app is in production.

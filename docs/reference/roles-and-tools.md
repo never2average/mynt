@@ -159,6 +159,7 @@ Workspaces, agreements and risk:
 Vendor services and pools:
 
 - Vendor services: `list_service_types`, `list_vendor_offerings`, `subscribe_vendor_service`, `list_my_vendor_subscriptions`, `set_subscription_live`, `unsubscribe_vendor_service` (see [Subscriptions](vendors-and-marketplace.md#subscriptions))
+- Services (a builder reads a service of its workspace; creating one takes the vendor role): `get_service`, `list_my_services`, `get_service_type_contract`, `request_service_type`, `list_service_type_requests` (see [Services](services.md))
 - Results from vendor services: `create_firm_webhook`, `list_firm_webhooks`, `delete_firm_webhook` (see [Firm webhooks](vendors-and-marketplace.md#firm-webhooks))
 - Liquidity pools on its products: see [Liquidity pools](liquidity-and-treasury.md#liquidity-pools)
 
@@ -186,6 +187,7 @@ A vendor offers standard services that builders plug into their products instead
 
 - Offerings: `list_service_types`, `create_vendor_offering`, `update_vendor_offering`, `run_practice_conformance`, `run_conformance`, `list_my_offerings` (see [Offerings and conformance](vendors-and-marketplace.md#offerings-and-conformance))
 - Onboarding: `get_vendor_onboarding` (see [Onboarding a vendor](vendors-and-marketplace.md#onboarding-a-vendor))
+- Services built on Mynt, the third kind beside apps and financial products: `create_service`, `archive_service`, and with builders `get_service`, `list_my_services`, `get_service_type_contract`, `request_service_type`, `list_service_type_requests` (see [Services](services.md)). Building one also takes the builder's tools (`start_build`, `deploy_app`, `promote_app`)
 - Subscribers: `list_my_subscribers`, `reveal_subscription_secret`, `rotate_subscription_secret` (see [Subscriptions](vendors-and-marketplace.md#subscriptions))
 - The Mynt Ramp, for the firm that runs it: `set_ramp_adapter`, `link_ramp_partner_customer` (see [The Mynt Ramp](vendors-and-marketplace.md#the-mynt-ramp))
 - The firm: `get_my_entity`, `register_license`
@@ -212,6 +214,7 @@ A Mynt admin (`admin`) runs Mynt itself, from inside Mynt: regions, product type
 - App ideas for the Build page: `create_app_idea`, `update_app_idea`, `retire_app_idea`, `seed_app_ideas` (see [Coding-agent builds](apps-and-builds.md#coding-agent-builds))
 - Product ideas: `create_product_idea`, `update_product_idea`, `retire_product_idea`, `seed_product_ideas` (see [Product ideas](products.md#product-ideas))
 - Vendors: `define_service_type`, `load_service_types`, `suspend_vendor_offering`, `set_mynt_ramp`, `set_ramp_adapter`, `link_ramp_partner_customer` (see [Vendors and the marketplace](vendors-and-marketplace.md))
+- Requested service types: `list_service_type_requests`, `decline_service_type_request`, and `define_service_type` with `from_request` (see [Asking for a service type](services.md#asking-for-a-service-type))
 
 The rest of an admin's work is in [Platform administration](platform-admin.md).
 

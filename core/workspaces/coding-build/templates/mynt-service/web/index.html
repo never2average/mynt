@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Service status</title>
+    <style>
+      body { font: 16px/1.5 system-ui, sans-serif; margin: 0; padding: 32px 16px; color: #1a1a1a; background: #fafafa; }
+      main { max-width: 560px; margin: 0 auto; }
+      h1 { font-size: 22px; margin: 0 0 4px; }
+      dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 24px 0 0; }
+      dt { color: #555; }
+      dd { margin: 0; }
+      @media (prefers-color-scheme: dark) { body { color: #eee; background: #161616; } dt { color: #aaa; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="name">Service</h1>
+      <p>A service on Mynt. It answers Mynt's signed requests; there is nothing to sign in to here.</p>
+      <dl>
+        <dt>Status</dt><dd id="status">Checking</dd>
+        <dt>Service type</dt><dd id="type">Not known yet</dd>
+        <dt>Region</dt><dd id="region">Not known yet</dd>
+        <dt>Endpoint</dt><dd id="endpoint">Not known yet</dd>
+        <dt>Signing secret</dt><dd id="secret">Not known yet</dd>
+      </dl>
+    </main>
+    <script src="/status.js"></script>
+  </body>
+</html>

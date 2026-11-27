@@ -18,6 +18,7 @@ const ADMIN_TOOLS = [
   "add_risk_model", "update_risk_model", "validate_risk_model", "retire_risk_model", "list_risk_models", "admin_list_product_risk_models",
   "get_risk_grading", "set_risk_grading",
   "list_platform_keys", "set_platform_key", "remove_platform_key", "set_platform_setting",
+  "decline_service_type_request",
 ];
 
 async function setup() {
