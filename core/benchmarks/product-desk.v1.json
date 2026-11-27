@@ -1,0 +1,290 @@
+{
+  "$schema": "../schemas/benchmark-task-set.schema.json",
+  "agent": "product-desk",
+  "version": 1,
+  "title": "Feasibility models for the starter product ideas",
+  "description": "Six product ideas from the starter set (workspaces/coding-build/templates/product-ideas.seed.json), each as a product record that must pass Mynt's product checks, with a term sheet. The desk agent must build a feasibility model for it in the benchmark firm's repository; a task passes when Mynt itself runs that model in a clean sandbox and gets a well-formed report with one of the expected verdicts.",
+  "workspaces": [
+    "product-desk"
+  ],
+  "tasks": [
+    {
+      "id": "gig-worker-no-penalty-cd",
+      "idea": "gig-worker-no-penalty-cd",
+      "product": {
+        "name": "6-Month No-Penalty CD",
+        "product_line": "account_operations",
+        "category": "deposits",
+        "region": "US",
+        "risk_level": "low",
+        "liquidity": "moderate",
+        "typical_horizon": "short",
+        "return_type": "fixed_interest",
+        "regulator": "FDIC",
+        "description": "A 6-month certificate of deposit that can be closed early without an early withdrawal penalty after the first week.",
+        "key_features": [
+          "Fixed rate for a 6-month term, set by the firm at opening",
+          "Close it and take the whole balance any time after the first 7 days, with no early withdrawal penalty",
+          "Opening minimum and maximum set in the firm's terms",
+          "Reminder before maturity with the choice to renew or move the money out"
+        ]
+      },
+      "terms": {
+        "inputs": {
+          "term_months": 6,
+          "apy_pct": 4.1,
+          "cost_of_funds_pct": 3.2,
+          "opex_pct": 0.35,
+          "early_close_rate_pct": 22,
+          "average_balance_usd": 4000,
+          "minimum_opening_usd": 500
+        },
+        "assumptions": {
+          "penalty_free_after_days": 7,
+          "rate_environment": "flat"
+        }
+      },
+      "goal": "Build a feasibility model for 6-Month No-Penalty CD: unit economics per account at the term sheet's inputs, a stress scenario, and the regulatory limits that apply, then run it.",
+      "expect": {
+        "verdicts": [
+          "feasible",
+          "marginal",
+          "infeasible"
+        ],
+        "min_checks": 1,
+        "min_metrics": 2
+      }
+    },
+    {
+      "id": "goal-locked-mma",
+      "idea": "goal-locked-mma",
+      "product": {
+        "name": "Goal-Locked Money Market Sub-Accounts",
+        "product_line": "account_operations",
+        "category": "deposits",
+        "region": "US",
+        "risk_level": "low",
+        "liquidity": "moderate",
+        "typical_horizon": "short_to_medium",
+        "return_type": "variable_interest",
+        "regulator": "FDIC",
+        "description": "A money market account split into named sub-accounts, each locked to a goal date the holder chooses.",
+        "key_features": [
+          "Up to ten named sub-accounts under one money market account",
+          "Each sub-account has a goal amount and a goal date the holder sets",
+          "Taking money out of a sub-account before its date needs a waiting period the holder chose at opening",
+          "One statement shows every sub-account's balance"
+        ]
+      },
+      "terms": {
+        "inputs": {
+          "apy_pct": 3.6,
+          "asset_yield_pct": 4.9,
+          "opex_pct": 0.6,
+          "average_balance_usd": 6500,
+          "sub_accounts_per_customer": 3,
+          "monthly_fee_usd": 0
+        },
+        "assumptions": {
+          "reserve_requirement_pct": 0,
+          "balance_attrition_pct_per_year": 18
+        }
+      },
+      "goal": "Build a feasibility model for Goal-Locked Money Market Sub-Accounts: unit economics per account at the term sheet's inputs, a stress scenario, and the regulatory limits that apply, then run it.",
+      "expect": {
+        "verdicts": [
+          "feasible",
+          "marginal",
+          "infeasible"
+        ],
+        "min_checks": 1,
+        "min_metrics": 2
+      }
+    },
+    {
+      "id": "rate-reset-cd",
+      "idea": "rate-reset-cd",
+      "product": {
+        "name": "24-Month CD with One Rate Reset",
+        "product_line": "account_operations",
+        "category": "deposits",
+        "region": "US",
+        "risk_level": "low",
+        "liquidity": "low",
+        "typical_horizon": "medium",
+        "return_type": "fixed_interest",
+        "regulator": "FDIC",
+        "description": "A 24-month certificate of deposit with one request during the term to move to the rate the firm then offers for new CDs of the same term.",
+        "key_features": [
+          "Fixed rate for a 24-month term",
+          "One reset request allowed during the term, to the rate the firm offers that day for new 24-month CDs",
+          "The rate after a reset may be higher or lower than the opening rate, and applies for the rest of the term",
+          "Early withdrawal penalty as stated in the firm's terms"
+        ]
+      },
+      "terms": {
+        "inputs": {
+          "term_months": 24,
+          "apy_pct": 4,
+          "cost_of_funds_pct": 3.3,
+          "opex_pct": 0.3,
+          "reset_uptake_pct": 40,
+          "expected_rate_rise_pct": 0.5,
+          "average_balance_usd": 12000
+        },
+        "assumptions": {
+          "resets_allowed": 1,
+          "early_withdrawal_penalty_days": 180
+        }
+      },
+      "goal": "Build a feasibility model for 24-Month CD with One Rate Reset: unit economics per account at the term sheet's inputs, a stress scenario, and the regulatory limits that apply, then run it.",
+      "expect": {
+        "verdicts": [
+          "feasible",
+          "marginal",
+          "infeasible"
+        ],
+        "min_checks": 1,
+        "min_metrics": 2
+      }
+    },
+    {
+      "id": "starter-payday-ira",
+      "idea": "starter-payday-ira",
+      "product": {
+        "name": "Starter IRA with Payday Contributions",
+        "product_line": "wealth",
+        "category": "retirement",
+        "region": "US",
+        "risk_level": "moderate",
+        "liquidity": "low",
+        "typical_horizon": "long",
+        "return_type": "market_linked",
+        "regulator": "SEC",
+        "description": "An individual retirement account with no opening minimum, funded by a small fixed amount from each paycheck.",
+        "key_features": [
+          "No minimum opening amount",
+          "A fixed amount the holder picks moves in on each payday",
+          "Contributions this year shown next to the yearly limit in the account's terms",
+          "Holdings limited to the firm's listed fund menu"
+        ]
+      },
+      "terms": {
+        "inputs": {
+          "contribution_per_payday_usd": 50,
+          "paydays_per_year": 26,
+          "annual_account_fee_usd": 12,
+          "fund_expense_ratio_pct": 0.08,
+          "servicing_cost_per_account_usd": 9,
+          "expected_accounts": 20000
+        },
+        "assumptions": {
+          "annual_contribution_limit_usd": 7000,
+          "dropout_pct_per_year": 15
+        }
+      },
+      "goal": "Build a feasibility model for Starter IRA with Payday Contributions: unit economics per account at the term sheet's inputs, a stress scenario, and the regulatory limits that apply, then run it.",
+      "expect": {
+        "verdicts": [
+          "feasible",
+          "marginal",
+          "infeasible"
+        ],
+        "min_checks": 1,
+        "min_metrics": 2
+      }
+    },
+    {
+      "id": "quarterly-tax-reserve-mmf",
+      "idea": "quarterly-tax-reserve-mmf",
+      "product": {
+        "name": "Quarterly Tax Reserve in a Money Market Fund",
+        "product_line": "wealth",
+        "category": "mutual_funds",
+        "region": "US",
+        "risk_level": "low",
+        "liquidity": "high",
+        "typical_horizon": "short",
+        "return_type": "market_linked",
+        "regulator": "SEC",
+        "description": "A money market fund holding with a separate balance for each estimated tax quarter and reminders before each due date.",
+        "key_features": [
+          "A separate balance for each estimated tax quarter",
+          "Reminders before each estimated tax due date",
+          "Shares sold and cash sent to a linked bank account on any business day",
+          "States plainly that a money market fund is not a deposit account"
+        ]
+      },
+      "terms": {
+        "inputs": {
+          "average_balance_usd": 18000,
+          "fund_net_yield_pct": 4.4,
+          "fund_expense_ratio_pct": 0.2,
+          "distribution_fee_pct": 0.1,
+          "servicing_cost_per_account_usd": 14,
+          "redemptions_per_year": 4
+        },
+        "assumptions": {
+          "fund_type": "government money market fund",
+          "stable_nav_usd": 1
+        }
+      },
+      "goal": "Build a feasibility model for Quarterly Tax Reserve in a Money Market Fund: unit economics per account at the term sheet's inputs, a stress scenario, and the regulatory limits that apply, then run it.",
+      "expect": {
+        "verdicts": [
+          "feasible",
+          "marginal",
+          "infeasible"
+        ],
+        "min_checks": 1,
+        "min_metrics": 2
+      }
+    },
+    {
+      "id": "tips-ladder-bundle",
+      "idea": "tips-ladder-bundle",
+      "product": {
+        "name": "TIPS Ladder Bundle",
+        "product_line": "credit",
+        "category": "bonds",
+        "region": "US",
+        "risk_level": "low",
+        "liquidity": "low",
+        "typical_horizon": "medium_to_long",
+        "return_type": "inflation_linked",
+        "regulator": "U.S. Department of the Treasury",
+        "description": "One purchase of Treasury Inflation-Protected Securities with staggered maturities, one rung maturing each year over a span the holder picks.",
+        "key_features": [
+          "One rung maturing each year over a span of 3 to 10 years the holder picks",
+          "Every rung's maturity date and interest payment dates shown before purchase",
+          "Principal adjusted for changes in the Consumer Price Index as the securities' terms state",
+          "Each rung's cash moves to a linked account at maturity"
+        ]
+      },
+      "terms": {
+        "inputs": {
+          "rungs": 5,
+          "rung_amount_usd": 2000,
+          "real_yield_pct": 1.9,
+          "servicing_fee_pct": 0.15,
+          "custody_cost_per_account_usd": 6,
+          "expected_accounts": 8000
+        },
+        "assumptions": {
+          "inflation_pct": 2.5,
+          "held_to_maturity": true
+        }
+      },
+      "goal": "Build a feasibility model for TIPS Ladder Bundle: unit economics per account at the term sheet's inputs, a stress scenario, and the regulatory limits that apply, then run it.",
+      "expect": {
+        "verdicts": [
+          "feasible",
+          "marginal",
+          "infeasible"
+        ],
+        "min_checks": 1,
+        "min_metrics": 2
+      }
+    }
+  ]
+}

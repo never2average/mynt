@@ -1,3 +1,4 @@
+import { inheritBenchmark } from "./benchmark-marker.js";
 import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -284,7 +285,7 @@ export async function personalWorkspace(db: Db, userId: string): Promise<string>
   const linked = await withOrgs(db, userId);
   const made = await one(
     db,
-    `INSERT INTO ${T}.workspaces (id, name, created_by, personal, org_sync) VALUES ($1, $2, $3, true, $4) ON CONFLICT (created_by) WHERE personal DO NOTHING RETURNING id`,
+    `INSERT INTO ${T}.workspaces (id, name, created_by, personal, org_sync, benchmark) VALUES ($1, $2, $3, true, $4, ${inheritBenchmark("$3")}) ON CONFLICT (created_by) WHERE personal DO NOTHING RETURNING id`,
     [randomUUID(), personalName(u ?? {}), userId, linked ? "creating" : null],
   );
   const id = (made?.id as string | undefined) ?? ((await one(db, `SELECT id FROM ${T}.workspaces WHERE created_by = $1 AND personal`, [userId]))!.id as string);

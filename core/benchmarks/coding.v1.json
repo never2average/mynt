@@ -1,0 +1,210 @@
+{
+  "$schema": "../schemas/benchmark-task-set.schema.json",
+  "agent": "coding",
+  "version": 1,
+  "title": "App builds on the starter ideas",
+  "description": "Eight app builds, one or two per app kind, each from an app idea in the coding agents' own starter set (workspaces/coding-build/templates/ideas.v2.seed.json). A task passes when Mynt's own verification ships the build: the source is packaged, re-checked in a clean sandbox, and none of the listed checks fails.",
+  "workspaces": [
+    "coding-build",
+    "build-audit"
+  ],
+  "tasks": [
+    {
+      "id": "two-key-household-fund",
+      "idea": "two-key-household-fund",
+      "kind": "savings-goals",
+      "prompt": "A two-key household emergency fund on a money market account. Two adults in one household open the account together and set a target. Either can add money from their bank account through the provider's hosted flow at any time. To take money out, one adult writes what it's for and the amount, and the other gets a request to approve or decline; only an approved request starts the withdrawal through the provider's hosted flow. The home screen shows the balance, the target, and a log of every request with who asked, who approved and when. Show the account's terms, interest rate, fees and limits exactly as the product's offer states them, the amount before each move, and every document the product requires before either adult agrees. The app shows information, not advice.",
+      "products": [
+        {
+          "name": "Money Market Account",
+          "product_line": "account_operations",
+          "category": "deposits"
+        }
+      ],
+      "checks": [
+        "source",
+        "tests",
+        "lint_typecheck",
+        "secrets_scan",
+        "secrets_history",
+        "static_scan",
+        "dependency_audit",
+        "sbom",
+        "disclosures"
+      ]
+    },
+    {
+      "id": "tax-refund-split",
+      "idea": "tax-refund-split",
+      "kind": "savings-goals",
+      "prompt": "A tax refund split app on a money market account. Before the refund arrives, a customer names up to five goals (a trip, a repair, a cushion) and drags a slider to share the expected refund between them. When they record that the refund has landed in their bank account, the app shows the split and moves the total into the account through the provider's hosted flow, then tracks each goal's part of the balance. Each goal can be renamed, merged or moved back to the bank account later. Show the account's terms, interest rate, fees and limits exactly as the product's offer states them, the amount before each move, and every document the product requires before the customer agrees. The app shows information, not advice.",
+      "products": [
+        {
+          "name": "Money Market Account",
+          "product_line": "account_operations",
+          "category": "deposits"
+        }
+      ],
+      "checks": [
+        "source",
+        "tests",
+        "lint_typecheck",
+        "secrets_scan",
+        "secrets_history",
+        "static_scan",
+        "dependency_audit",
+        "sbom",
+        "disclosures"
+      ]
+    },
+    {
+      "id": "wedding-cd-ladder",
+      "idea": "wedding-cd-ladder",
+      "kind": "certificates-of-deposit",
+      "prompt": "A wedding fund CD ladder. A couple lists each planned wedding payment (the venue's deposit, the caterer, the photographer, the final balance) with its amount and due date. For each payment the app shows the CD terms from the product's offer that mature before that date, and the couple opens one CD per payment through the provider's hosted flow. A timeline shows every rung: its amount, rate, maturity date and the payment it is for, and reminds the couple a week before each matures. Show each CD's terms, rate, early withdrawal penalty and documents exactly as the product's offer states them before the couple agrees. The app shows information, not advice.",
+      "products": [
+        {
+          "name": "Certificate of Deposit",
+          "product_line": "account_operations",
+          "category": "deposits"
+        }
+      ],
+      "checks": [
+        "source",
+        "tests",
+        "lint_typecheck",
+        "secrets_scan",
+        "secrets_history",
+        "static_scan",
+        "dependency_audit",
+        "sbom",
+        "disclosures"
+      ]
+    },
+    {
+      "id": "closing-date-cd",
+      "idea": "closing-date-cd",
+      "kind": "certificates-of-deposit",
+      "prompt": "A closing date CD app. A home buyer enters their expected closing date and the down payment amount. The app filters the product's offer to the CD terms that mature before that date, shows each one's rate and maturity date side by side, and the buyer opens one through the provider's hosted flow. The home screen counts down to closing and to maturity, and if the closing date moves, shows what the terms say about taking the money out early. Show the terms, rate, early withdrawal penalty and documents exactly as the product's offer states them before the buyer agrees. The app shows information, not advice.",
+      "products": [
+        {
+          "name": "Certificate of Deposit",
+          "product_line": "account_operations",
+          "category": "deposits"
+        }
+      ],
+      "checks": [
+        "source",
+        "tests",
+        "lint_typecheck",
+        "secrets_scan",
+        "secrets_history",
+        "static_scan",
+        "dependency_audit",
+        "sbom",
+        "disclosures"
+      ]
+    },
+    {
+      "id": "payroll-buffer",
+      "idea": "payroll-buffer",
+      "kind": "cash-reserve",
+      "prompt": "A payroll buffer on a money market account. A small employer enters their pay dates and the usual amount of each payroll run, and how many runs to keep in reserve. The app keeps the reserve in the account and, three business days before each pay date, offers to move that run's amount to the business bank account through the provider's hosted flow. A calendar shows the coming pay dates, the reserve, and every move made. Show the account's terms, interest rate, fees and limits exactly as the product's offer states them, the amount before each move, and every document the product requires before the employer agrees. The app shows information, not advice.",
+      "products": [
+        {
+          "name": "Money Market Account",
+          "product_line": "account_operations",
+          "category": "deposits"
+        }
+      ],
+      "checks": [
+        "source",
+        "tests",
+        "lint_typecheck",
+        "secrets_scan",
+        "secrets_history",
+        "static_scan",
+        "dependency_audit",
+        "sbom",
+        "disclosures"
+      ]
+    },
+    {
+      "id": "nonprofit-reserve-explainer",
+      "idea": "nonprofit-reserve-explainer",
+      "kind": "cash-reserve",
+      "prompt": "A reserve explainer for a nonprofit treasurer. The app shows a money market account and a money market fund side by side, each with its terms, fees, limits, how money comes out and how long it takes, exactly as each product states them, and says plainly that a money market fund is not a deposit account. The treasurer can add notes and export a one-page summary for the board. When the board decides, the treasurer opens either product and moves reserve cash through the provider's hosted flow, with every document each product requires shown before agreeing. The app shows information, not advice.",
+      "products": [
+        {
+          "name": "Money Market Account",
+          "product_line": "account_operations",
+          "category": "deposits"
+        },
+        {
+          "name": "Money Market Fund",
+          "product_line": "wealth",
+          "category": "mutual_funds"
+        }
+      ],
+      "checks": [
+        "source",
+        "tests",
+        "lint_typecheck",
+        "secrets_scan",
+        "secrets_history",
+        "static_scan",
+        "dependency_audit",
+        "sbom",
+        "disclosures"
+      ]
+    },
+    {
+      "id": "turning-50-catch-up",
+      "idea": "turning-50-catch-up",
+      "kind": "retirement-account",
+      "prompt": "A turning-50 catch-up planner on an individual retirement account. A saver enters their birth year and how often they are paid. If they turn 50 this year or are older, the app shows the yearly limit and the catch-up amount exactly as the product's terms state them, what they have put in so far this year, and the room left. It splits the room left across their remaining paydays, which they can change, and each contribution goes through the provider's hosted flow. Show the account's terms, fees and every required document before the saver agrees. The app shows information, not advice.",
+      "products": [
+        {
+          "name": "Individual Retirement Account",
+          "product_line": "wealth",
+          "category": "retirement"
+        }
+      ],
+      "checks": [
+        "source",
+        "tests",
+        "lint_typecheck",
+        "secrets_scan",
+        "secrets_history",
+        "static_scan",
+        "dependency_audit",
+        "sbom",
+        "disclosures"
+      ]
+    },
+    {
+      "id": "tips-yearly-ladder",
+      "idea": "tips-yearly-ladder",
+      "kind": "treasury-securities",
+      "prompt": "A yearly TIPS ladder. A retiree picks the first year they want cash and how many years, and the app shows, for each year, the TIPS terms from the product's offer that mature in it. The retiree buys each rung through the provider's hosted flow. A list shows every rung's amount, maturity date and interest payment days, with the principal adjustments the product reports so far, and reminds them before each maturity. Never say what a holding will be worth, explain the adjustment exactly as the product's terms describe it, and show every required document before the retiree agrees. The app shows information, not advice.",
+      "products": [
+        {
+          "name": "Treasury Inflation-Protected",
+          "product_line": "credit",
+          "category": "bonds"
+        }
+      ],
+      "checks": [
+        "source",
+        "tests",
+        "lint_typecheck",
+        "secrets_scan",
+        "secrets_history",
+        "static_scan",
+        "dependency_audit",
+        "sbom",
+        "disclosures"
+      ]
+    }
+  ]
+}

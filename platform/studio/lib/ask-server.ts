@@ -14,7 +14,7 @@ import { readCapped, STREAM_HEADERS, TOO_LARGE } from "./ai-route";
 import { runAsk, type AskDeps } from "./ask";
 import { cleanAnswer, conversationFrom, hasUncited, NOT_COVERED, questionFrom, type AskAnswer, type AskArea, type AskSource, type AskStreamEvent } from "./ask-answer";
 import { argsSummary, readLabel, readSummary, sourcesOf } from "./ask-sources";
-import { askModels, createLlm } from "./llm";
+import { askModels, createLlm, type Llm } from "./llm";
 import { scrub, scrubStream, scrubText } from "./scrub";
 import type { Session } from "./session-store";
 import { sessionStore } from "./session-store";
@@ -133,7 +133,12 @@ const parsed = (text: string): unknown => {
   }
 };
 
-async function writeAnswer(area: AskArea, what: string, history: MessageParam[], run: AnswerRun, send: (e: AskStreamEvent) => void, signal: AbortSignal) {
+/**
+ * Writes one answer to `send`, event by event. The routes call it through answerQuestion; Ask AI's benchmark
+ * (lib/ask-benchmark.ts) calls it directly, with the reads answered from a fixture and the model metered against the
+ * task's budget (`using.llm`), so what is measured is this code and no copy of it.
+ */
+export async function writeAnswer(area: AskArea, what: string, history: MessageParam[], run: AnswerRun, send: (e: AskStreamEvent) => void, signal: AbortSignal, using: { llm?: Llm; models?: string[] } = {}) {
   const sources: AskSource[] = [];
   let text = "";
   // What the model writes and thinks is scrubbed as it streams (scrub.ts scrubStream): it has only seen scrubbed reads,
@@ -174,9 +179,9 @@ async function writeAnswer(area: AskArea, what: string, history: MessageParam[],
   let thoughtMs = 0;
   let thought = false;
 
-  const llm = createLlm();
+  const llm = using.llm ?? createLlm();
   let model: string | null = null;
-  for (const candidate of askModels()) {
+  for (const candidate of using.models ?? askModels()) {
     try {
       await runAsk(history, {
         ...run,

@@ -88,7 +88,7 @@
       "id": "admin",
       "title": "Admin & governance",
       "summary": "Regions and the regulatory model, categories, take rates, invitations, oversight and operations.",
-      "tools": 57
+      "tools": 64
     }
   ],
   "roles": [
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Also holds the builder, vendor and licence-provider roles (except the licence-provider tools that act as a member of the firm itself), but not the liquidity-provider role.",
-      "tools": 438,
+      "tools": 445,
       "get_started": [
         {
           "tool": "define_region",
@@ -3105,6 +3105,54 @@
           "amount_cents",
           "state",
           "idempotency_key"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "compare_benchmark_runs",
+      "title": "Compare two benchmark runs",
+      "description": "Admin: a candidate run against a baseline run of the same agent and task set: pass rate, cost and median time with their deltas, each task's outcome in both with its cost and time deltas, the regressions (passed before, fails now on the agent's own account) and fixes listed, and the regression gate's verdict over it (pass, fail, or inconclusive when the runs can't be compared or too few tasks were scored in both). Tasks that failed for infrastructure reasons or didn't run are never counted as regressions or as passes.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "baseline": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The run to compare against"
+          },
+          "candidate": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The run being judged"
+          },
+          "max_regressions": {
+            "description": "Tasks that may regress (default 0)",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "max_pass_rate_drop_points": {
+            "description": "How far the pass rate may fall, in percentage points (default 0)",
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "max_cost_increase_pct": {
+            "description": "How far cost may rise, in percent (default: cost doesn't gate)",
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "baseline",
+          "candidate"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -8230,6 +8278,30 @@
       }
     },
     {
+      "name": "get_benchmark_run",
+      "title": "A benchmark run's scoreboard",
+      "description": "Admin: one benchmark run: the agent, task set, model and the content hash of each agent workspace folder it ran with, its cap and what the cap has counted, why it stopped if it did, its scoreboard, and every task with its outcome, the check that failed, whether the failure was the agent's or the infrastructure's, each of Mynt's checks, cost and duration.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "run_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "get_build",
       "title": "Track a build",
       "description": "Developer: one build in full: its phase, timeline, cost against the cap, the Maxwell security summary, readiness checks, preview URL and pull request.",
@@ -8692,7 +8764,7 @@
     {
       "name": "get_platform_settings",
       "title": "Operational settings",
-      "description": "Admin: the operational settings this server runs with that aren't secrets (build, audit, desk, review and exploration budgets and limits, the build audit, the hosted VM hour's price): each one's value in effect, its default, where the value comes from (the server's environment, which wins; what an admin set in Mynt; or Mynt's default), how a new value is checked, and what it's for. Change one with set_platform_setting.",
+      "description": "Admin: the operational settings this server runs with that aren't secrets (build, audit, desk, review, exploration and benchmark budgets and limits, the build audit, the hosted VM hour's price): each one's value in effect, its default, where the value comes from (the server's environment, which wins; what an admin set in Mynt; or Mynt's default), how a new value is checked, and what it's for. Change one with set_platform_setting.",
       "area": "admin",
       "roles": [
         "admin"
@@ -10393,6 +10465,42 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "list_benchmark_runs",
+      "title": "Agent benchmark runs",
+      "description": "Admin: the agent benchmark runs, newest first, each with its scoreboard (tasks passed and failed on the agent's own account, the pass rate over those, infrastructure failures and tasks not run listed apart, cost and time), plus every agent that has a task set: how many tasks, each task's id, what a run needs, whether one could start here now (and if not, why), and its budget: what the whole set could cost at most against BENCHMARK_CAP_USD, how many tasks that cap is sure to cover in full, and a plain statement when it can't cover even one. Also the benchmarks' own records (their account, apps, stand-in firm and draft products), which no other list shows. A figure nothing measured is null with a note saying why, never 0.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "description": "Only this agent's runs",
+            "type": "string",
+            "enum": [
+              "coding",
+              "product-desk",
+              "algorithm-explorer",
+              "governance-review",
+              "program-audit",
+              "program-red-team",
+              "connector",
+              "ask-ai"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
     },
@@ -12722,6 +12830,43 @@
           }
         },
         "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "next_benchmark_task",
+      "title": "Take a benchmark task to run",
+      "description": "Admin: for the runner of an agent whose code runs outside this server (Ask AI, which is Mynt Studio's): the task waiting in the Ask AI benchmark run that is going, if any. It answers with the question, the one scope of the invented fixture dataset its reads are to be answered from, the task's budget in US dollars with Mynt's rates for the models named, a claim to hand back with the record, and when the record is due. It never says what the task expects. Taking a task holds it for a while, so two runners don't spend on one question. It starts nothing: a run exists only once an admin has started it with start_benchmark_run and a cap.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "models": {
+            "minItems": 1,
+            "maxItems": 4,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "description": "The models the runner will ask, in order; the first is recorded as the run's model"
+          },
+          "instructions_sha256": {
+            "description": "A hash of the instructions and limits the runner's agent runs with, recorded on the run so two runs can be told apart",
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "models"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       }
     },
     {
@@ -17079,7 +17224,8 @@
               "DESK_JOB_CAP_USD",
               "DESK_MONTHLY_CAP_USD",
               "REVIEW_CASE_CAP_USD",
-              "REVIEW_MONTHLY_CAP_USD"
+              "REVIEW_MONTHLY_CAP_USD",
+              "BENCHMARK_CAP_USD"
             ]
           },
           "value": {
@@ -18250,6 +18396,63 @@
       }
     },
     {
+      "name": "start_benchmark_run",
+      "title": "Start a benchmark run",
+      "description": "Admin: run one agent's benchmark task set for real: each task goes through the same service, sandbox, budgets and verification by Mynt as production work, in a benchmark context of its own (its own queues and budgets; no real workspace's data or budget is touched, and no repository: a run takes none). This spends money on the model and on sandboxes, up to cap_usd, which is required and may not be more than BENCHMARK_CAP_USD; the run stops, and says so, when the cap is reached. Refused with the reason when it can't run here (no sandbox host or model backend, the host's allowance used up, another run going, something the agent's run needs missing). One run at a time. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": "string",
+            "enum": [
+              "coding",
+              "product-desk",
+              "algorithm-explorer",
+              "governance-review",
+              "program-audit",
+              "program-red-team",
+              "connector",
+              "ask-ai"
+            ]
+          },
+          "cap_usd": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "The most this run may spend, in US dollars. Required: there is no default."
+          },
+          "label": {
+            "description": "What this run is for, e.g. 'baseline before changing the secure skill'",
+            "type": "string",
+            "maxLength": 120
+          },
+          "task_ids": {
+            "description": "Only these tasks, by id (default: the whole set). list_benchmark_runs gives each agent's tasks and how many the cap is sure to cover in full",
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "host_restored": {
+            "description": "Say true once the sandbox host's allowance, used up when a build last ran, has been restored",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "agent",
+          "cap_usd"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "start_build",
       "title": "Start a coding-agent build",
       "description": "Developer: have Mynt's coding agent build or ship one of your experiences in a sandbox: it writes the code, passes a Maxwell security audit (critical/high findings block it) and a production-readiness checklist, deploys a preview and, with a connected repository, opens a pull request. Spend is capped per build and per month. Track it with get_build.",
@@ -18407,6 +18610,37 @@
           "message"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "stop_benchmark_run",
+      "title": "Stop a benchmark run",
+      "description": "Admin: stop a benchmark run that is still going. The task in flight is stopped (its sandboxes too) and recorded as stopped by the harness, not as the agent's failure; the tasks left are recorded as not run. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 300
+          }
+        },
+        "required": [
+          "run_id",
+          "reason"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       }
     },
     {
@@ -18571,6 +18805,51 @@
           "evidence"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "submit_benchmark_answer",
+      "title": "Hand in a benchmark task's record",
+      "description": "Admin: for the runner that took a task with next_benchmark_task: the raw record of what the agent did on it (for Ask AI: the answer as shown and as written, its flags, the sources it numbered, every read it attempted with what the model was handed, each model call's token usage, and whether it was stopped at its budget). The record is kept as it arrives and scored by Mynt on the benchmark's next tick, against expectations the runner was never given; a record Mynt can't read is the benchmark's failure, not the agent's. Refused when the run has ended, the task is closed or already answered, or the claim isn't the one holding the task. Audited.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "task_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "claim": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "record": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "run_id",
+          "task_id",
+          "claim",
+          "record"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false
       }
     },
     {

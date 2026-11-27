@@ -142,6 +142,7 @@ export type AskDeps = {
 
 export const REFUSED = "Ask AI can't help with that request.";
 export const TOO_MANY_STEPS = "That took too many steps. Try asking in a different way.";
+export const CUT_SHORT = "The answer was cut short. Please try again.";
 
 /** Answers the last question in `history`: streams the model's reply, runs its reads through Mynt, and repeats until it has answered. */
 export async function runAsk(history: MessageParam[], deps: AskDeps): Promise<void> {
@@ -205,7 +206,7 @@ export async function runAsk(history: MessageParam[], deps: AskDeps): Promise<vo
     }
     const calls = message.content.filter((b): b is ToolUse => b.type === "tool_use");
     if (calls.length > 0 && message.stop_reason === "max_tokens") {
-      emitText(deps, "The answer was cut short. Please try again.");
+      emitText(deps, CUT_SHORT);
       return;
     }
     // The whole turn goes back, thinking blocks and their signatures included: the API requires

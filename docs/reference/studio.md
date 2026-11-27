@@ -551,7 +551,7 @@ The rules are in [Members and invitations](workspaces-and-sign-in.md#members-and
 
 ## Platform admin
 
-The platform admin (`/platform`) is for Mynt admins only. It has its own layout, not Studio's: its own sidebar with eight sections (Overview, Workspaces, Regulated firms, Vendors, Audit trails, Risk models, Risk register and Platform settings) and **Back to Studio** at its foot. Licences are reviewed inside Regulated firms, on its Licences tab (`/platform/firms?tab=licences`).
+The platform admin (`/platform`) is for Mynt admins only. It has its own layout, not Studio's: its own sidebar with nine sections (Overview, Workspaces, Regulated firms, Vendors, Audit trails, Risk models, Risk register, Agent benchmarks and Platform settings) and **Back to Studio** at its foot. Licences are reviewed inside Regulated firms, on its Licences tab (`/platform/firms?tab=licences`).
 
 In Studio, only accounts Mynt says hold the `admin` role get the **Platform admin** entry above their name in the sidebar. For everyone else `/platform` is a 404.
 
@@ -561,6 +561,7 @@ Each section is described in [The platform admin in Studio](platform-admin.md#th
 | --- | --- |
 | `/platform/risk-register/<id>` | One risk in full: Mynt's own, or an app's or a product's opened from the register's table (read-only). See [A risk's detail](risk.md#a-risks-detail) |
 | `/platform/risk-models/<id>` | One of Mynt's risk models, with its health in words and the risks linked to it |
+| `/platform/benchmarks` | [Agent benchmarks](platform-admin.md#agent-benchmarks-section): three tabs, Runs, Task sets and Records, each one table, with **Start run**; a run opens at `/platform/benchmarks/<id>` with four tabs, Tasks, Failures, Cost and Compare |
 | `/platform/settings` | [Platform settings](platform-admin.md#platform-settings), four tabs that are each one table: Key vault, Operational settings, E-signature and Risk grading |
 
 ## Docs and search

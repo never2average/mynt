@@ -1,0 +1,12 @@
+{
+  "name": "eligibility",
+  "description": "Eligibility as it stands: only applicants with a bureau score of 740 or more and three years in their work are accepted.",
+  "applies_to": {
+    "product_lines": [
+      "account_operations",
+      "wealth",
+      "credit"
+    ]
+  },
+  "decide": "python3 decide.py"
+}

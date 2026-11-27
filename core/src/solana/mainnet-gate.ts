@@ -3,17 +3,18 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { AgentMeter } from "../agent-meter.js";
 import type { AgentRun } from "../agent-proxy.js";
-import { agentState, launchAgent, workspaceCwd, type AgentHostConfig } from "../agent-host.js";
+import { agentState, launchAgent, workspaceCwd, workspaceFiles, type AgentHostConfig } from "../agent-host.js";
 import type { SandboxHost } from "../sandbox-host.js";
 import type { Db } from "../db.js";
 import { emitFirmEvent } from "../runtime.js";
 import type { Store, User } from "../store.js";
 import { defaultGraceMs, failureMessage, GraceTracker } from "../transient.js";
 import { serialLoop } from "../worker.js";
-import { GATE_ANALYSIS_SCRIPT, GATE_CONFIRM_SCRIPT, GATE_TOOLS } from "./gate-scripts.js";
+import { buildCheck, readBackJson, readBuiltPrograms } from "./built-programs.js";
+import { GATE_ANALYSIS_SCRIPT, GATE_CONFIRM_SCRIPT, GATE_SAMPLE_SCRIPT, GATE_TOOLS } from "./gate-scripts.js";
 import { checkProgramRules, upgradeAuthorityRule, type RuleFinding } from "./program-rules.js";
-import type { MainnetGateCheck, MainnetGateClaim, ProgramRecord, SolanaService } from "./service.js";
-import { SOLANA_TOOLCHAIN_SCRIPT } from "./toolchain.js";
+import type { DepsCapture, MainnetGateCheck, MainnetGateClaim, ProgramRecord, SolanaService } from "./service.js";
+import { SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT } from "./toolchain.js";
 import { agentChecklist, entryProblems, loadCrateAllowlist, loadVulnDb, VULN_CATEGORIES, type CrateAllowlist, type VulnDb } from "./vuln-db.js";
 import { crossCheck, dependencyVerdict, evaluateDepInfo, resolveCrateTree, stripIdlDocs, uncompiledHitExceptions, verifyIdl, workspaceExceptions, type DepInfoCapture, type Exception } from "./crate-tree.js";
 import { runDetections } from "./program-rules.js";
@@ -74,7 +75,7 @@ export function gateConfigFromEnv(host: AgentHostConfig, env = process.env): Gat
 }
 
 const T = "financial_products";
-const TABLES = `
+const REVIEW_TABLES = `
   CREATE TABLE IF NOT EXISTS ${T}.solana_mainnet_reviews (
     id uuid PRIMARY KEY,
     program uuid NOT NULL REFERENCES ${T}.solana_programs(id),
@@ -146,6 +147,8 @@ const TABLES = `
     created_at timestamptz NOT NULL DEFAULT now()
   );
   CREATE INDEX IF NOT EXISTS solana_mainnet_review_log_idx ON ${T}.solana_mainnet_review_log (review, created_at);
+`;
+const FLAG_TABLES = `
   -- A deployed mainnet program that a newer vulnerability database's hard rules refuse: its firm and admins are
   -- told, and its upgrades wait until an admin has reviewed it. Nothing is ever taken down.
   CREATE TABLE IF NOT EXISTS ${T}.solana_program_flags (
@@ -173,6 +176,22 @@ const TABLES = `
     created_at timestamptz NOT NULL DEFAULT now()
   );
 `;
+const TABLES = REVIEW_TABLES + FLAG_TABLES;
+
+// Benchmark samples (requestSample) are reviews of no program: they live in tables of their own, which no deploy,
+// list, count or admin decision ever reads, with no link to the program registry and the sample itself in the row.
+const SAMPLE_NAMES = /\bsolana_mainnet_review(?:s|_log)/g;
+const sampleSql = (sql: string) => sql.replace(SAMPLE_NAMES, (name) => `bench_${name}`);
+const SAMPLE_TABLES = sampleSql(
+  REVIEW_TABLES.replace(` REFERENCES ${T}.solana_programs(id)`, "") + `ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS sample jsonb;`,
+);
+function sampleDb(db: Db): Db {
+  return {
+    query: (sql, params) => db.query(sampleSql(sql), params),
+    exec: (sql) => db.exec(sampleSql(sql)),
+    close: async () => undefined,
+  };
+}
 
 // started: a deploy or upgrade claimed (consumed) the approval; executed: the program holds exactly the reviewed bytes.
 export const REVIEW_STATUSES = ["running", "awaiting_approval", "approved", "started", "executed", "blocked", "rejected", "cancelled", "failed"] as const;
@@ -184,6 +203,7 @@ type Severity = (typeof SEVERITIES)[number];
 const BLOCKING: Severity[] = ["critical", "high"];
 
 const GATE_DIR = "/home/user/mynt-gate";
+const SAMPLE_DIR = "/home/user/mynt-sample";
 const CONFIRM_DIR = "/home/user/mynt-confirm";
 const AUDIT_WS = "program-audit";
 const RED_WS = "program-red-team";
@@ -203,7 +223,18 @@ const parse = <X>(text: string | null | undefined): X | null => {
     return null;
   }
 };
-const JSON_COLS = new Set(["rules", "static_analysis", "audit", "red_team", "confirmations", "exceptions", "allowed_exceptions", "dependencies", "idl_check"]);
+const JSON_COLS = new Set(["rules", "static_analysis", "audit", "red_team", "confirmations", "exceptions", "allowed_exceptions", "dependencies", "idl_check", "sample"]);
+
+// A benchmark sample as its row keeps it: what was asked, and, once Mynt prepared it, what the agents and Mynt's
+// own checks work from (the whole workspace; for the red team, the bytes and IDL of Mynt's own build of it).
+export interface GateSample {
+  mode: "audit" | "red_team";
+  name: string;
+  program_id: string;
+  files: Record<string, string>;
+  ref: string;
+  prepared?: { sources: Record<string, string>; program_b64: string | null; idl: unknown; deps: unknown; depinfo: unknown };
+}
 
 // Said with every review, and with every approval: what the gate can't promise.
 export const REVIEW_CAVEATS = [
@@ -324,6 +355,8 @@ export class MainnetGateService implements MainnetGateCheck {
     private readonly solana: SolanaService,
     readonly sandboxes: SandboxHost | null,
     readonly config: GateConfig,
+    // A gate for benchmark samples only (openForSamples): it reviews no program and can approve nothing.
+    private readonly samples = false,
   ) {}
 
   // The vulnerability database the hard rules and the agents' checklist come from (tests swap in another version).
@@ -334,6 +367,18 @@ export class MainnetGateService implements MainnetGateCheck {
     const gate = new MainnetGateService(db, store, solana, sandboxes, config);
     solana.gate = gate;
     return gate;
+  }
+
+  // The gate for benchmark samples: the same agents, sandboxes, scripts and verdict logic, over tables of its own
+  // (bench_solana_mainnet_reviews, bench_solana_mainnet_review_log). It has no program registry: it can't register,
+  // approve, deploy or upgrade anything, no deploy ever asks it, and no month's review budget is touched.
+  static async openForSamples(db: Db, store: Store, sandboxes: SandboxHost | null, config: GateConfig) {
+    await db.exec(SAMPLE_TABLES);
+    return new MainnetGateService(sampleDb(db), store, null as unknown as SolanaService, sandboxes, config, true);
+  }
+
+  private realOnly() {
+    if (this.samples) throw new GateError("This gate only reviews benchmark samples: it has no programs to review, approve or deploy");
   }
 
   // Sandboxes, the agents' model backend and a public URL for their proxy: without all three no review can run,
@@ -424,6 +469,7 @@ export class MainnetGateService implements MainnetGateCheck {
   // ---- requesting a review ----
 
   async request(user: User, programId: string, buildId: string) {
+    this.realOnly();
     if (!this.enabled) throw new GateError("The mainnet program gate isn't available on this Mynt (it needs sandboxes, the agents' model backend and PUBLIC_URL), so mainnet deploys can't be reviewed");
     const p = await this.solana.get(programId);
     if (!p || !this.solana.canAct(user, p)) throw new GateError(`No program of yours with id '${programId}'`);
@@ -543,6 +589,41 @@ export class MainnetGateService implements MainnetGateCheck {
     return (await this.row(id))!;
   }
 
+  // ---- benchmark samples ----
+
+  // Puts sample source through the gate's agents for a benchmark: no program is registered, no program record is
+  // read or written, nothing can be approved or deployed from it, and the month's review budget isn't touched (the
+  // benchmark run's own cap governs). `audit` runs static analysis and the program-audit agent on the source;
+  // `red_team` has Mynt build the sample and runs the red team on the bytes, then Mynt's own re-run of its proofs.
+  // Mynt's hard rules are recorded but stop nothing here, and aren't shown to the auditor: a real audit only ever
+  // sees a program that passed them, and a sample with a planted flaw must reach the agent being measured.
+  async requestSample(o: { mode: "audit" | "red_team"; name: string; program_id: string; files: Record<string, string>; ref: string; requested_by: string; cap_usd: number }) {
+    if (!this.samples) throw new GateError("Samples are reviewed only by the benchmark's own gate");
+    if (!this.enabled) throw new GateError("The gate's agents can't run on this Mynt (they need sandboxes, the agents' model backend and PUBLIC_URL)");
+    if (!/^[a-z][a-z0-9_]{1,40}$/.test(o.name)) throw new GateError(`'${o.name}' isn't a program name`);
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(o.program_id)) throw new GateError("The sample declares no program address");
+    const files = Object.fromEntries(Object.entries(o.files).filter(([path]) => /^[A-Za-z0-9_.\/-]+$/.test(path) && !path.split("/").includes("..") && !path.startsWith("/")));
+    if (!Object.keys(files).some((f) => f.endsWith(".rs"))) throw new GateError("The sample has no Rust source");
+    const id = randomUUID();
+    const sample: GateSample = { mode: o.mode, name: o.name, program_id: o.program_id, files, ref: o.ref };
+    await this.db.query(
+      `INSERT INTO ${T}.solana_mainnet_reviews (id, program, program_id, build_id, sha256, action, status, step, phase_message, requested_by, audit_cap_usd, red_cap_usd, step_started_at, sample)
+       VALUES ($1, $2, $3, $4, $5, 'deploy', 'running', 'sample_provisioning', 'Preparing the sample', $6, $7, $7, now(), $8)`,
+      [id, randomUUID(), o.program_id, randomUUID(), hash(JSON.stringify(files)), o.requested_by, o.cap_usd, JSON.stringify(sample)],
+    );
+    await this.log(id, o.requested_by, "sample_requested", { mode: o.mode, ref: o.ref, name: o.name });
+    return (await this.row(id))!;
+  }
+
+  // Stops a sample's review (its benchmark run was stopped): its sandboxes too.
+  async stopSample(id: string, reason: string) {
+    if (!this.samples) throw new GateError("Samples are reviewed only by the benchmark's own gate");
+    const r = await this.row(id);
+    if (!r || r.status !== "running") return;
+    await this.end(r, "cancelled", { error: reason.slice(0, 1000), phase_message: "Stopped" });
+    await this.log(id, null, "cancelled", { reason: reason.slice(0, 500) });
+  }
+
   // The crate allowlist (tests swap in another).
   allowlist: CrateAllowlist = loadCrateAllowlist();
 
@@ -575,6 +656,7 @@ export class MainnetGateService implements MainnetGateCheck {
   // ---- decisions ----
 
   async decide(admin: User, id: string, decision: "approve" | "reject", note: string, allowExceptions: string[] = []) {
+    this.realOnly();
     const r = await this.row(id);
     if (!r) throw new GateError("No such mainnet review");
     if (r.status !== "awaiting_approval") throw new GateError(`The review is ${r.status}; only one awaiting approval can be ${decision === "approve" ? "approved" : "rejected"}`);
@@ -624,6 +706,7 @@ export class MainnetGateService implements MainnetGateCheck {
   }
 
   async cancel(user: User, id: string, admin: boolean) {
+    this.realOnly();
     const r = await this.row(id);
     if (!r) throw new GateError("No such mainnet review");
     const p = await this.solana.get(r.program_id as string);
@@ -655,6 +738,7 @@ export class MainnetGateService implements MainnetGateCheck {
   // upgrade claims it, so going A -> B -> A needs a fresh review (and, for an upgrade, a fresh timelock and
   // announcement).
   async check(p: ProgramRecord, sha256: string, action: "deploy" | "upgrade") {
+    this.realOnly();
     if (action === "upgrade") {
       const flag = await this.openFlag(p.id);
       if (flag) throw new GateError(`Upgrades of this program are paused: vulnerability database v${flag.db_version} flagged it (${flag.id}); an admin must review it first`);
@@ -757,6 +841,7 @@ export class MainnetGateService implements MainnetGateCheck {
         await this.log(r.id as string, null, "failed", { error: failureMessage(e).slice(0, 500) });
       }
     }
+    if (this.samples) return;
     await this.recheckDeployed();
     await this.runDueUpgrades();
     await this.markExecuted();
@@ -826,6 +911,13 @@ export class MainnetGateService implements MainnetGateCheck {
   }
 
   private async material(r: Row) {
+    if (this.samples) {
+      const s = r.sample as GateSample | null;
+      if (!s?.prepared) throw new Error("The sample wasn't prepared");
+      const program = s.prepared.program_b64 ? new Uint8Array(Buffer.from(s.prepared.program_b64, "base64")) : new Uint8Array();
+      const m = { name: s.name, sha256: r.sha256 as string, sources: s.prepared.sources as Record<string, string> | null, program, idl: s.prepared.idl, deps: s.prepared.deps as DepsCapture | null };
+      return { p: { program_id: s.program_id }, m };
+    }
     const p = await this.solana.get(r.program_id as string);
     if (!p) throw new Error("The program is gone");
     const m = await this.solana.reviewMaterial(null, p, r.build_id as string);
@@ -871,6 +963,78 @@ export class MainnetGateService implements MainnetGateCheck {
     const id = r.id as string;
     await this.cost(r);
 
+    // 0. A benchmark sample: made whole (and, for the red team, built) in a sandbox of Mynt's.
+    if (r.step === "sample_provisioning") {
+      if (!r.analysis_sandbox_id) {
+        const s = await this.newSandbox(r, "program-sample");
+        await this.update(id, { analysis_sandbox_id: s.id, step_started_at: new Date() });
+        return;
+      }
+      if (!(await this.sandboxReady(r.analysis_sandbox_id as string))) return;
+      const sample = r.sample as GateSample;
+      // The coding agents' own starter program and scaffold script, as shipped: the sample's files go over it.
+      const kit = workspaceFiles("coding-build");
+      const files: Record<string, string> = {
+        [`${SAMPLE_DIR}/sample.sh`]: GATE_SAMPLE_SCRIPT,
+        [`${SAMPLE_DIR}/solana-verify.sh`]: SOLANA_VERIFY_SCRIPT,
+        [`${SAMPLE_DIR}/allowlist.json`]: JSON.stringify(this.allowlist),
+      };
+      for (const [path, text] of Object.entries(kit)) if (path === "scripts/scaffold_program.py" || path.startsWith("templates/solana-program/")) files[`${SAMPLE_DIR}/kit/${path}`] = text;
+      for (const [path, text] of Object.entries(sample.files)) files[`${SAMPLE_DIR}/sample/${path}`] = text;
+      await this.writeFiles(r.analysis_sandbox_id as string, files);
+      const run = await sandboxes.exec(r.analysis_sandbox_id as string, `bash ${SAMPLE_DIR}/sample.sh ${SAMPLE_DIR} ${sample.name} ${sample.program_id} ${sample.mode === "red_team" ? "build" : "capture"}`, { detached: true });
+      await this.update(id, {
+        step: "sample_preparing",
+        analysis_process_id: String(run.processId ?? ""),
+        step_started_at: new Date(),
+        phase_message: sample.mode === "red_team" ? "Mynt is building the sample" : "Mynt is laying out the sample's source",
+      });
+      await this.log(id, null, "sample_preparing", { mode: sample.mode });
+      return;
+    }
+
+    if (r.step === "sample_preparing") {
+      const sb = r.analysis_sandbox_id as string;
+      const sample = r.sample as GateSample;
+      const timedOut = this.minutes(r) > this.config.analysisMinutes;
+      if (!timedOut && (await sandboxes.commandStatus(sb, Number(r.analysis_process_id))).running) return;
+      const unprepared = (why: string) => this.end(r, "failed", { error: `Mynt couldn't prepare the sample: ${why}`.slice(0, 1000), phase_message: "Failed" });
+      const prep = parse<{ error?: string; sources_size?: number; sources_sha256?: string }>(await sandboxes.readFile(sb, `${SAMPLE_DIR}/prep.json`));
+      if (!prep) return unprepared(timedOut ? `it didn't finish within ${this.config.analysisMinutes} minutes` : "the preparation left no result");
+      if (prep.error) return unprepared(prep.error);
+      const out = `${SAMPLE_DIR}/build/out`;
+      let prepared: NonNullable<GateSample["prepared"]>;
+      let sha256 = r.sha256 as string;
+      let idlCheck: Row = { source: null, verified: false, checked: 0, problems: ["no IDL was built for this sample"] };
+      if (sample.mode === "red_team") {
+        const built = (await readBuiltPrograms(sandboxes, sb, out)).find((b) => b.name === sample.name);
+        if (!built) return unprepared(`Mynt's Solana build produced no program '${sample.name}' (${(await buildCheck(sandboxes, sb, out)).detail || "no detail"})`);
+        if (built.declared_id !== sample.program_id) return unprepared(`the built program declares ${built.declared_id ?? "no address"}, not ${sample.program_id}`);
+        prepared = { sources: built.sources?.files ?? sample.files, program_b64: Buffer.from(built.program).toString("base64"), idl: built.idl, deps: built.deps, depinfo: built.depinfo };
+        sha256 = built.sha256;
+        if (built.idl) idlCheck = { source: "build", ...verifyIdl(built.idl, built.program) };
+      } else {
+        const captured = await readBackJson<{ files?: Record<string, string> }>(sandboxes, sb, `${out}/sample.sources.json`, prep.sources_size, prep.sources_sha256);
+        if (!captured?.files || !Object.keys(captured.files).some((f) => f.endsWith(".rs"))) return unprepared("the sample's source couldn't be read back");
+        prepared = { sources: captured.files, program_b64: null, idl: null, deps: null, depinfo: null };
+        sha256 = prep.sources_sha256!;
+      }
+      // Mynt's hard rules, for the record only: a sample must reach the agent being measured whatever they say.
+      const result = checkProgramRules({ name: sample.name, program_id: sample.program_id, program: prepared.program_b64 ? new Uint8Array(Buffer.from(prepared.program_b64, "base64")) : null, idl: null, sources: prepared.sources, mynt_signer: null }, this.vulnDb);
+      const rules = { sample: true, passed: result.passed, db_version: result.db_version, findings: result.findings, signals: result.signals, limits: result.limits, note: "Recorded only: a benchmark sample isn't stopped by the hard rules, and the auditor isn't shown them" };
+      await this.update(id, { sample: { ...sample, prepared }, sha256, rules, idl_check: idlCheck });
+      await this.log(id, null, "sample_prepared", { mode: sample.mode, files: Object.keys(prepared.sources).length, hard_rules_would_pass: result.passed });
+      if (sample.mode === "audit") {
+        // The same sandbox goes on to static analysis and the audit, as for any review.
+        await this.update(id, { step: "analysis_provisioning", step_started_at: new Date(), phase_message: "The sample is ready; starting static analysis" });
+        return;
+      }
+      await sandboxes.stop(sb).catch(() => {});
+      const s = await this.newSandbox(r, "program-red-team");
+      await this.update(id, { step: "red_provisioning", red_sandbox_id: s.id, step_started_at: new Date(), phase_message: "Starting the red team's sandbox" });
+      return;
+    }
+
     // 2a. Static analysis, in a sandbox of Mynt's with only the captured source.
     if (r.step === "analysis_provisioning") {
       if (!r.analysis_sandbox_id) {
@@ -904,8 +1068,10 @@ export class MainnetGateService implements MainnetGateCheck {
       const record = { passed: verdict.passed, reasons: verdict.reasons, tools: verdict.tools, ...(timedOut ? { timed_out: true } : {}) };
       await this.update(id, { static_analysis: record });
       await this.log(id, null, verdict.passed ? "analysis_passed" : "analysis_blocked", { reasons: verdict.reasons });
+      if (timedOut && !report && this.samples) return this.end(r, "failed", { error: `Static analysis didn't finish within ${this.config.analysisMinutes} minutes`, phase_message: "Failed" });
       if (timedOut && !report) return this.block(r, `Static analysis didn't finish within ${this.config.analysisMinutes} minutes`);
-      if (!verdict.passed) return this.block(r, `Static analysis: ${verdict.reasons.join("; ")}`);
+      // A sample goes on to the auditor whatever the tools said: their verdict is recorded, and the agent is measured.
+      if (!verdict.passed && !this.samples) return this.block(r, `Static analysis: ${verdict.reasons.join("; ")}`);
       // 2b. The program-audit agent, in the same sandbox, after Mynt has the tools' results.
       const token = `mynt_paudit_${randomBytes(24).toString("base64url")}`;
       await this.update(id, { audit_token_hash: hash(token) });
@@ -923,7 +1089,7 @@ export class MainnetGateService implements MainnetGateCheck {
               program: { name: m.name, program_id: p.program_id, sha256: m.sha256, action: r.action },
               source_dir: `${GATE_DIR}/src`,
               files: Object.keys(m.sources ?? {}).sort(),
-              deterministic_rules: (r.rules as Row | null) ?? null,
+              deterministic_rules: this.samples ? null : ((r.rules as Row | null) ?? null),
               static_analysis: record,
               idl: this.agentIdl(r, m),
               dependency_dirs: Object.fromEntries(Object.keys(m.deps?.sources ?? {}).filter((k) => ((r.exceptions as Exception[] | null) ?? []).some((e) => e.id === `crate:${k}`)).map((k) => [k, `${GATE_DIR}/deps/${k}`])),
@@ -958,6 +1124,8 @@ export class MainnetGateService implements MainnetGateCheck {
       await this.log(id, null, "audit_finished", { finished: audit.finished, findings: a.findings.length, blocking: a.blocking.length });
       if (!audit.finished) return this.block(r, `No complete independent audit (the program-audit agent: ${audit.agent.result ?? "no result"}${a.finished ? "" : ", no valid findings.json"}); a mainnet program can't pass without one`);
       if (a.blocking.length) return this.block(r, `Audit: ${a.blocking.length} verified critical/high finding(s): ${a.blocking.slice(0, 5).map((f) => `${f.severity} ${f.title} (${f.file}${f.line ? `:${f.line}` : ""})`).join("; ")}`);
+      // An audit sample ends here: the red team has samples of its own.
+      if (this.samples) return this.gatesPassed({ ...r, audit });
       // 3. The red team, in a sandbox of its own.
       const s = await this.newSandbox(r, "program-red-team");
       await this.update(id, { step: "red_provisioning", red_sandbox_id: s.id, step_started_at: new Date(), phase_message: "Starting the red team's sandbox" });
@@ -1092,6 +1260,12 @@ export class MainnetGateService implements MainnetGateCheck {
   private async gatesPassed(r: Row) {
     const id = r.id as string;
     await this.settle(id);
+    if (this.samples) {
+      // Nothing to approve: the benchmark reads what Mynt's checks recorded.
+      await this.update(id, { status: "awaiting_approval", step: null, phase_message: "The sample passed the checks it was put through" });
+      await this.log(id, null, "sample_passed", {});
+      return;
+    }
     if (r.action === "upgrade") {
       const executesAt = new Date(Date.now() + this.config.timelockHours * 3600_000);
       await this.update(id, { status: "awaiting_approval", step: null, executes_at: executesAt, announced_at: new Date(), phase_message: `Gates passed; awaiting an admin's approval. The upgrade can run from ${executesAt.toISOString()}` });

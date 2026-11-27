@@ -2,7 +2,7 @@
 // answers. Every list is platform-wide (all workspaces, all firms), never scoped to a workspace picked in the studio. Pure, for
 // the routes, the views and the tests. A figure Mynt didn't measure is null here and "Not measured" on screen, never 0.
 
-export const ADMIN_TABS = ["overview", "workspaces", "firms", "vendors", "audit", "risk-models", "risk-register", "settings"] as const
+export const ADMIN_TABS = ["overview", "workspaces", "firms", "vendors", "audit", "risk-models", "risk-register", "benchmarks", "settings"] as const
 export type AdminTab = (typeof ADMIN_TABS)[number]
 export const ADMIN_TAB_LABELS: Record<AdminTab, string> = {
   overview: "Overview",
@@ -12,6 +12,7 @@ export const ADMIN_TAB_LABELS: Record<AdminTab, string> = {
   audit: "Audit trails",
   "risk-models": "Risk models",
   "risk-register": "Risk register",
+  benchmarks: "Agent benchmarks",
   settings: "Platform settings",
 }
 // Sections that moved: Security & risk (risks) is the Risk register now, and Licences is the Regulated firms section's Licences
@@ -32,7 +33,7 @@ export const adminTabOf = (v: unknown): AdminTab => (ADMIN_TABS.includes(v as Ad
 export const PLATFORM_BASE = "/platform"
 export const PLATFORM_NAME = "Mynt platform admin"
 // The sections whose rows open a detail page.
-export const ADMIN_DETAIL_TABS: readonly AdminTab[] = ["workspaces", "firms", "audit", "risk-models", "risk-register"]
+export const ADMIN_DETAIL_TABS: readonly AdminTab[] = ["workspaces", "firms", "audit", "risk-models", "risk-register", "benchmarks"]
 // An id in the address: letters, digits and dashes (Mynt's uuids), nothing that could leave the path.
 export const ADMIN_ID = /^[A-Za-z0-9-]{1,100}$/
 /** Whether an id may be opened in a section: a detail section, and an id of its kind. */

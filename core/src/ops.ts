@@ -225,11 +225,11 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
   // owner acts), backfills left part-way, and the reconcile worker stopped by its circuit breaker.
   const orgMissing = (await exists("workspaces"))
     ? ((await db.query(
-        `SELECT id::text AS workspace_id, name, org_missing_at FROM financial_products.workspaces WHERE org_missing_at IS NOT NULL AND archived_at IS NULL ORDER BY org_missing_at`,
+        `SELECT id::text AS workspace_id, name, org_missing_at FROM financial_products.workspaces WHERE NOT benchmark AND org_missing_at IS NOT NULL AND archived_at IS NULL ORDER BY org_missing_at`,
       )).rows as { workspace_id: string; name: string; org_missing_at: string }[])
     : [];
   const backfillPending = (await exists("workspaces"))
-    ? Number((await db.query(`SELECT count(*)::int AS n FROM financial_products.workspaces WHERE org_sync = 'backfill' AND archived_at IS NULL`)).rows[0]?.n ?? 0)
+    ? Number((await db.query(`SELECT count(*)::int AS n FROM financial_products.workspaces WHERE NOT benchmark AND org_sync = 'backfill' AND archived_at IS NULL`)).rows[0]?.n ?? 0)
     : 0;
   const orgSync = (await exists("org_sync_status"))
     ? (((await db.query(`SELECT last_run_at, last_ok_at, halted_at, halted_reason FROM financial_products.org_sync_status WHERE id = 1`)).rows[0] as

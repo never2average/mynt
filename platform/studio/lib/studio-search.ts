@@ -129,6 +129,7 @@ export const PLATFORM_SEARCH_PAGES: readonly StudioPage[] = [
   { href: "/platform/audit", label: "Platform admin: Audit trails", keywords: "audit log trail history who changed what actions security financial obligations" },
   { href: "/platform/risk-models", label: "Platform admin: Risk models", keywords: "risk models model validation versions thresholds method health linked risks financial compliance third-party operations business process technology regulated product scorecard" },
   { href: "/platform/risk-register", label: "Platform admin: Risk register", keywords: "risk register risks platform inherent control residual treatment controls factors security signals attention backups conformance financial compliance third-party vendor operations business process technology regulated product" },
+  { href: "/platform/benchmarks", label: "Platform admin: Agent benchmarks", keywords: "agent benchmarks benchmark runs task sets pass rate regression gate coding agents product desk governance desk connector scoreboard start run cap cost compare" },
   { href: "/platform/settings", label: "Platform admin: Platform settings", keywords: "platform settings key vault keys api key secret operational settings esign e-signature pricing budget audit risk grading levels bands heat map residual method inherent control" },
 ];
 
