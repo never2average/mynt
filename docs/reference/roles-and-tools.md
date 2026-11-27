@@ -137,7 +137,7 @@ Apps:
 
 - Apps: `create_app`, `update_app`, `list_my_apps`, `preview_app`, `publish_app` (see [Apps](apps-and-builds.md#apps))
 - Access to products: see [Building on a product](apps-and-builds.md#building-on-a-product)
-- Builds, repositories and hosting: see [Coding-agent builds](apps-and-builds.md#coding-agent-builds), [Repositories](apps-and-builds.md#repositories) and [Hosting](apps-and-builds.md#hosting)
+- Builds, repositories and hosting: see [Coding-agent builds](apps-and-builds.md#coding-agent-builds), [Repositories](apps-and-builds.md#repositories) and [Hosting](apps-and-builds.md#hosting). For an app in Production, `deploy_app`, `undeploy_app`, `restart_app` and `app_run` are for its workspace's owners and admins only (see [Who puts a build online](apps-and-builds.md#who-puts-a-build-online))
 - Campaigns: `create_segment`, `list_my_segments`, `create_campaign`, `update_campaign`, `lint_campaign`, `launch_campaign`, `pause_campaign`, `end_campaign`, `list_my_campaigns`, `get_campaign_metrics` (see [Campaigns](apps-and-builds.md#campaigns))
 - Keys: `create_api_key`, `list_api_keys`, `rotate_api_key`, `revoke_api_key` (see [Keys](runtime-api.md#keys))
 - Webhooks: `create_webhook`, `list_webhooks`, `delete_webhook`, `rotate_webhook_secret`, `list_webhook_deliveries` (see [Webhooks](runtime-api.md#webhooks))

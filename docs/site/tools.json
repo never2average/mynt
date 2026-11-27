@@ -1929,7 +1929,7 @@
     {
       "name": "app_run",
       "title": "Run a command in a hosted app",
-      "description": "Developer: run a shell command inside your hosted app's container (under gVisor, read-only apart from /tmp), e.g. 'node --version' or 'wget -qO- localhost:<your mynt.port>/healthz'. It never runs on the VM itself. Output is capped and secrets are scrubbed; every command is audited.",
+      "description": "Developer: run a shell command inside your hosted app's container (under gVisor, read-only apart from /tmp), e.g. 'node --version' or 'wget -qO- localhost:<your mynt.port>/healthz'. It never runs on the VM itself. Output is capped and secrets are scrubbed; every command is audited. For an app in Production: only its workspace's owners and admins.",
       "area": "hosting",
       "roles": [
         "developer",
@@ -7657,7 +7657,7 @@
     {
       "name": "deploy_app",
       "title": "Host an app",
-      "description": "Developer: run one of your apps on its own VM from a build Mynt verified (build_id from your coding-agent builds). The VM fetches exactly that commit, builds it and runs it; each Compose service listens on the port its mynt.port label names and is served publicly over HTTPS. Mynt gives the app a dedicated key (live once the app is in Production and published, else sandbox), added at the edge to its calls to Mynt and never stored on the VM. Deploying again with a newer build replaces it. A service (create_service) differs: only an owner or admin of its workspace, at the firm that offers it, puts a build online; it needs direct hosting; and while a build of it serves subscribers, a newer build goes online beside it, with a signing secret of its own, and takes over only after Mynt's conformance test passes on it (and, in Production, the other production checks). If it fails it is removed and the serving build, its offering and its listing are unchanged.",
+      "description": "Developer: run one of your apps on its own VM from a build Mynt verified (build_id from your coding-agent builds). The VM fetches exactly that commit, builds it and runs it; each Compose service listens on the port its mynt.port label names and is served publicly over HTTPS. Mynt gives the app a dedicated key (live once the app is in Production and published, else sandbox), added at the edge to its calls to Mynt and never stored on the VM. Deploying again with a newer build replaces it. Any member of the app's workspace deploys it in Idea and Staging. In Production only the workspace's owners and admins do, and a build goes online only if it passes the production checks that are about the build, read for that build: it is a build of this app that Mynt verified, its independent audit passed, it has no open critical or high audit findings and, when the app moves value, a Mynt admin signed off that very build (ask first with request_promotion_signoff). Otherwise it is refused with the failing checks, in get_promotion_checks' words, and the build online stays as it is. A service (create_service) differs: only an owner or admin of its workspace, at the firm that offers it, puts a build online; it needs direct hosting; and while a build of it serves subscribers, a newer build goes online beside it, with a signing secret of its own, and takes over only after Mynt's conformance test passes on it (and, in Production, the other production checks). If it fails it is removed and the serving build, its offering and its listing are unchanged.",
       "area": "hosting",
       "roles": [
         "developer",
@@ -14939,7 +14939,7 @@
     {
       "name": "request_promotion_signoff",
       "title": "Ask a Mynt admin to sign off a production promotion",
-      "description": "Developer (the workspace's owners and admins): when get_promotion_checks says needs_admin_signoff, ask Mynt's admins to sign off the app's latest verified build for production. The sign-off is for that build only: a newer verified build needs a new one. Asking again for the same build returns the open request.",
+      "description": "Developer (the workspace's owners and admins): when get_promotion_checks says needs_admin_signoff, ask Mynt's admins to sign off the app's latest verified build for production. The sign-off is for that build only: a newer verified build needs a new one. Asking again for the same build returns the open request. In Staging the build must be the one deployed. For an app already in Production that moves value, ask before deploying a newer build: deploy_app puts it online only once it is signed off.",
       "area": "workspaces",
       "roles": [
         "developer",
@@ -15432,7 +15432,7 @@
     {
       "name": "restart_app",
       "title": "Restart a hosted app",
-      "description": "Developer: restart your hosted app's container on your VM (same verified commit).",
+      "description": "Developer: restart your hosted app's container on your VM (same verified commit). For an app in Production: only its workspace's owners and admins.",
       "area": "hosting",
       "roles": [
         "developer",
@@ -19199,7 +19199,7 @@
     {
       "name": "undeploy_app",
       "title": "Stop hosting an app",
-      "description": "Developer: stop hosting one of your apps; its public addresses go away and, under direct hosting, its VM is deleted. A service: only an owner or admin of its workspace, at the firm that offers it; its offering is suspended (subscribers' calls stop, and products that hand off through it drift) until it is online again and passes.",
+      "description": "Developer: stop hosting one of your apps; its public addresses go away and, under direct hosting, its VM is deleted. Any member of the app's workspace in Idea and Staging; in Production only the workspace's owners and admins. A service: only an owner or admin of its workspace, at the firm that offers it; its offering is suspended (subscribers' calls stop, and products that hand off through it drift) until it is online again and passes.",
       "area": "hosting",
       "roles": [
         "developer",

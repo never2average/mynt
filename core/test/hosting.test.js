@@ -919,3 +919,144 @@ test("a login the provider no longer has never locks anyone out: vm_access clear
     w.close();
   }
 });
+
+test("an app in Production: only owners and admins change what is online or run commands in it, and a build goes online only if the production checks about the build pass for it", async () => {
+  const provider = fakeDirect();
+  const w = await world({ provider, config: DIRECT });
+  try {
+    const { call, dev } = w;
+    const db = w.store.db;
+    // What the builds service keeps on a build, which the production checks read (the stand-in table has only the basics).
+    await db.exec(
+      `ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS maxwell jsonb, ADD COLUMN IF NOT EXISTS solana boolean DEFAULT false, ADD COLUMN IF NOT EXISTS source_sha256 text DEFAULT 'abab',
+         ADD COLUMN IF NOT EXISTS error text, ADD COLUMN IF NOT EXISTS finished_at timestamptz, ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT clock_timestamp(), ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT clock_timestamp()`,
+    );
+    const build = async (maxwell, solana = false) => {
+      const id = await w.build("succeeded");
+      await db.query("UPDATE financial_products.build_runs SET maxwell = $2, solana = $3 WHERE id = $1", [id, maxwell ? JSON.stringify(maxwell) : null, solana]);
+      return id;
+    };
+    const CLEAN = { counts: { critical: 0, high: 0, medium: 1, low: 2 } };
+    const online = async () => (await db.query("SELECT build_id::text AS build_id FROM financial_products.hosted_apps WHERE app_id = $1", [w.app.id])).rows[0]?.build_id ?? null;
+    const setStage = (stage) => db.query("INSERT INTO financial_products.app_promotions (app_id, stage) VALUES ($1, $2) ON CONFLICT (app_id) DO UPDATE SET stage = EXCLUDED.stage", [w.app.id, stage]);
+    const refusals = async () => (await db.query("SELECT action, actor_id::text AS actor_id, details FROM financial_products.audit_log WHERE action LIKE '%\\_refused' ORDER BY created_at")).rows;
+
+    const [ws] = (await call(dev, "list_workspaces")).data;
+    const { user: benUser } = await w.store.createUser("Ben", ["developer"]);
+    const { user: memUser } = await w.store.createUser("Mem", ["developer"]);
+    const ben = await w.connectWith(benUser);
+    const mem = await w.connectWith(memUser);
+    await db.query("INSERT INTO financial_products.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'admin'), ($1, $3, 'member')", [ws.id, benUser.id, memUser.id]);
+    await db.query("INSERT INTO financial_products.repo_connections (developer_id, repository, approval) VALUES ($1, 'dev/saver', 'approved'), ($2, 'dev/saver', 'approved')", [benUser.id, memUser.id]);
+    await call(dev, "request_hosting", { workspace_id: ws.id });
+
+    // Idea and Staging are unchanged: any member puts a build online, takes it offline, and nothing reads the audit.
+    const first = await build(null);
+    for (const stage of ["idea", "staging"]) {
+      await setStage(stage);
+      const d = await call(mem, "deploy_app", { app_id: w.app.id, build_id: first });
+      assert.equal(d.isError, false, `${stage}: ${JSON.stringify(d.data)}`);
+      await w.hosting.pending;
+      // A build with a critical finding isn't held back here either: that is promotion's to catch, as before.
+      const flawed = await build({ counts: { critical: 1, high: 0 } });
+      assert.equal((await call(mem, "deploy_app", { app_id: w.app.id, build_id: flawed })).isError, false, stage);
+      await w.hosting.pending;
+      for (const [tool, args] of [["restart_app", {}], ["app_run", { command: "true", timeout_seconds: 1 }]])
+        assert.doesNotMatch(JSON.stringify((await call(mem, tool, { app_id: w.app.id, ...args })).data), /owners and admins/, `${stage}: ${tool}`);
+      assert.equal((await call(mem, "undeploy_app", { app_id: w.app.id })).data.hosted, false, stage);
+    }
+    assert.deepEqual(await refusals(), [], "nothing was refused before Production");
+    assert.equal((await call(mem, "deploy_app", { app_id: w.app.id, build_id: first })).isError, false);
+    await w.hosting.pending;
+    assert.equal(await online(), first);
+
+    // Production: a member is refused each of them, plainly, and told who can.
+    await setStage("production");
+    const good = await build(CLEAN);
+    for (const [tool, args, what] of [
+      ["deploy_app", { build_id: good }, /put a build online/],
+      ["undeploy_app", {}, /take it offline/],
+      ["restart_app", {}, /restart it/],
+      ["app_run", { command: "cat /proc/self/environ" }, /run commands in it/],
+    ]) {
+      const r = await call(mem, tool, { app_id: w.app.id, ...args });
+      assert.equal(r.isError, true, tool);
+      assert.match(r.data.error, /^This app is in Production: only its workspace's owners and admins /, tool);
+      assert.match(r.data.error, what, tool);
+      assert.match(r.data.error, /Ask one of them\. In Idea and Staging any member of the workspace can\./, tool);
+    }
+    assert.equal(await online(), first, "what is online didn't change");
+    // Each refused attempt is in the audit trail, with who and why, never the command.
+    const refused = await refusals();
+    assert.deepEqual(refused.map((r) => r.action), ["deploy_app_refused", "undeploy_app_refused", "app_restart_refused", "app_exec_refused"]);
+    for (const r of refused) {
+      assert.equal(r.actor_id, memUser.id);
+      assert.equal(r.details.reason, "production_needs_owner_or_admin");
+      assert.ok(!JSON.stringify(r.details).includes("environ"), "the command isn't recorded");
+    }
+    // Reading stays every member's.
+    assert.equal((await call(mem, "hosting_status", { workspace_id: ws.id })).data.apps.length, 1);
+    assert.doesNotMatch(JSON.stringify((await call(mem, "app_logs", { app_id: w.app.id })).data), /owners and admins/);
+
+    // An owner, with a build whose independent audit found a critical issue: refused, in promotion's words; the
+    // build online stays.
+    const critical = await build({ counts: { critical: 1, high: 0, medium: 0, low: 0 } });
+    const r = await call(dev, "deploy_app", { app_id: w.app.id, build_id: critical });
+    assert.equal(r.isError, true);
+    assert.match(r.data.error, /this app is in Production, where a build goes online only if it passes the production checks about the build/);
+    assert.match(r.data.error, /Independent audit passed: 1 critical or high finding\(s\) in the independent audit/);
+    assert.match(r.data.error, /No open blocking audit findings: 1 critical or high finding\(s\)/);
+    assert.equal(await online(), first);
+    const last = (await refusals()).at(-1);
+    assert.deepEqual([last.action, last.actor_id, last.details.reason, last.details.build_id, last.details.failing], ["deploy_app_refused", w.devUser.id, "production_checks", critical, ["audit_passed", "audit_findings"]]);
+    // So is an admin; and a build that isn't this app's.
+    assert.match((await call(ben, "deploy_app", { app_id: w.app.id, build_id: critical })).data.error, /Independent audit passed: 1 critical/);
+    const stray = await build(CLEAN);
+    await db.query("UPDATE financial_products.build_runs SET app_id = NULL WHERE id = $1", [stray]);
+    assert.match((await call(dev, "deploy_app", { app_id: w.app.id, build_id: stray })).data.error, /isn't a build of this app that passed Mynt's verification/);
+    assert.equal(await online(), first);
+
+    // A build that passes them goes online for an owner, and for an admin.
+    const ok = await call(dev, "deploy_app", { app_id: w.app.id, build_id: good });
+    assert.equal(ok.isError, false, JSON.stringify(ok.data));
+    await w.hosting.pending;
+    assert.equal(await online(), good);
+    const next = await build(CLEAN);
+    assert.equal((await call(ben, "deploy_app", { app_id: w.app.id, build_id: next })).isError, false);
+    await w.hosting.pending;
+    assert.equal(await online(), next);
+    // A build no independent audit ran on only warns in promotion (the app moves no value), so it isn't refused here.
+    const unaudited = await build(null);
+    assert.equal((await call(dev, "deploy_app", { app_id: w.app.id, build_id: unaudited })).isError, false);
+    await w.hosting.pending;
+    for (const [tool, args] of [["restart_app", {}], ["app_run", { command: "true", timeout_seconds: 1 }]])
+      assert.doesNotMatch(JSON.stringify((await call(ben, tool, { app_id: w.app.id, ...args })).data), /owners and admins/, tool);
+
+    // An app that moves value (its build carries Solana programs): the build also needs a Mynt admin's sign-off, for
+    // that very build, and the independent audit. In Production it is asked before the build is online.
+    const bare = await build(null, true);
+    const strict = (await call(dev, "deploy_app", { app_id: w.app.id, build_id: bare })).data.error;
+    assert.match(strict, /Independent audit passed: No independent audit ran on this build/);
+    assert.match(strict, /Mynt admin sign-off: Needed because the app has Solana programs \(request_promotion_signoff\)/);
+    const valued = await build(CLEAN, true);
+    assert.match((await call(dev, "deploy_app", { app_id: w.app.id, build_id: valued })).data.error, /^Build [0-9a-f]{8} can't go online[\s\S]*Mynt admin sign-off: Needed because the app has Solana programs/);
+    assert.match((await call(mem, "request_promotion_signoff", { app_id: w.app.id })).data.error, /owners and admins/);
+    const asked = await call(dev, "request_promotion_signoff", { app_id: w.app.id });
+    assert.equal(asked.isError, false, JSON.stringify(asked.data));
+    assert.equal(asked.data.signoff.build_id, valued);
+    // Asked, not decided: pending stops it like a failure.
+    assert.match((await call(dev, "deploy_app", { app_id: w.app.id, build_id: valued })).data.error, /Mynt admin sign-off: .*waiting for a Mynt admin/);
+    const { user: adminUser } = await w.store.createUser("Ada", ["admin"]);
+    const decided = await call(await w.connectWith(adminUser), "decide_promotion_signoff", { id: asked.data.signoff.id, approve: true });
+    assert.equal(decided.isError, false, JSON.stringify(decided.data));
+    assert.equal(await online(), unaudited, "nothing went online meanwhile");
+    assert.equal((await call(dev, "deploy_app", { app_id: w.app.id, build_id: valued })).isError, false);
+    await w.hosting.pending;
+    assert.equal(await online(), valued);
+
+    // Taking it offline: an owner or admin.
+    assert.equal((await call(ben, "undeploy_app", { app_id: w.app.id })).data.hosted, false);
+  } finally {
+    w.close();
+  }
+});

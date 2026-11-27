@@ -32,8 +32,8 @@ A member of a workspace is an `owner`, an `admin` or a `member`. These are works
 
 | Workspace role | May |
 | --- | --- |
-| `member` | Build, and invite members |
-| `admin` | Also invite admins, rename the workspace, change roles, remove people, create live API keys and rotate keys |
+| `member` | Build, invite members, and put builds online for apps in Idea and Staging |
+| `admin` | Also invite admins, rename the workspace, change roles, remove people, create live API keys and rotate keys, move apps between stages, and for an app in Production put a build online, take it offline, restart it and run commands in it |
 | `owner` | Also make, unmake or remove owners, and invite one |
 
 A workspace always keeps an owner who can manage it: one with a builder's role on Mynt. Its last owner can't leave, be demoted or be removed. Every change is in the audit log.
@@ -145,7 +145,8 @@ Hosting is the workspace's.
 
 - An owner or admin turns it on (`request_hosting` with `workspace_id`).
 - Every app of the workspace runs on it, whoever deploys it, fetched through the deployer's own approved connection or the managed repository.
-- Any member can deploy, check, log, run commands in, restart and undeploy its apps.
+- Any member can check its apps and read their logs. Any member can also deploy, run commands in, restart and undeploy an app in Idea or Staging.
+- For an app in Production, only owners and admins deploy, undeploy, restart and run commands in it, and a build goes online only if it passes the production checks about the build. See [Who puts a build online](apps-and-builds.md#who-puts-a-build-online).
 - Only owners and admins get VM logins (`vm_access`).
 
 A builder's own hosting from before workspaces keeps the apps it runs until they are deployed again. `hosting_status` lists them with `legacy: true`, and logging in to it needs owner or admin standing in every workspace whose apps it runs.
@@ -184,7 +185,7 @@ An app moves one step at a time, `idea` to `staging` to `production`, after chec
 | `set_app_target_states({ app_id, states })` | Owners and admins | Sets the US states the app serves (`us-ny`, …, `us-dc`) |
 | `promote_app({ app_id, to_stage })` | Owners and admins | Runs every check again and moves the app up |
 | `demote_app({ app_id, to_stage, reason })` | Owners and admins | Moves the app one step down |
-| `request_promotion_signoff({ app_id })` | Owners and admins | Asks a Mynt admin to sign off a production promotion |
+| `request_promotion_signoff({ app_id })` | Owners and admins | Asks a Mynt admin to sign off a production promotion, or a newer build of an app already in Production |
 
 In a frozen or archiving workspace, `promote_app`, `demote_app` and `request_promotion_signoff` are refused until an owner relinks or unarchives it.
 
@@ -276,7 +277,7 @@ A production promotion needs a Mynt admin's sign-off when the app moves value:
 
 How it works:
 
-1. An owner or admin asks with `request_promotion_signoff({ app_id })`. The request is for the latest verified build, and only once that build is the one running on Mynt's hosting. Asking again for the same build returns the open request.
+1. An owner or admin asks with `request_promotion_signoff({ app_id })`. The request is for the latest verified build. For an app in Staging, only once that build is the one running on Mynt's hosting. Asking again for the same build returns the open request.
 2. Mynt admins see requests with `list_promotion_signoffs`.
 3. A Mynt admin decides with `decide_promotion_signoff({ id, approve, note? })`. An admin never decides one they asked for themselves, and never one for an app in a workspace they are a member of, in any role.
 
@@ -284,6 +285,8 @@ A sign-off is for one verified build (its id and source hash) and the basis that
 
 - A newer verified build, or a change to that basis without one, makes `signoff.status` `none` again and needs a new sign-off.
 - A request whose build or basis changed before it was decided can't be decided: it is marked superseded.
+
+**After promotion.** The sign-off still goes with the build. For an app in Production that moves value, `deploy_app` puts a newer build online only once a Mynt admin has signed off that build, so there the order is the other way round: an owner or admin asks first, for the latest verified build, before it is hosted, and deploys it once it is approved. A build signed off earlier can be put online again without a new one. See [Who puts a build online](apps-and-builds.md#who-puts-a-build-online).
 
 `signoff` is `{ status: none | requested | approved | rejected, by?, at? }`.
 

@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { panelApp } from "@/lib/app-panel-server";
 import {
+  canPutOnline,
   canTurnOnHosting,
   deployable,
   fromHostingStatus,
@@ -76,6 +77,9 @@ export async function GET(req: Request, { params }: Params) {
       supported: true,
       app: { id: app.id, name: app.name, workspaceId: app.workspaceId },
       role,
+      // In Production only owners and admins put a build online (Mynt refuses anyone else): said before the click.
+      stage: app.stage,
+      canPutOnline: canPutOnline(app.stage, role),
       // Turning the workspace's hosting on is for owners and admins; Put online does it on the way.
       canTurnOn: canTurnOnHosting(role),
       hosting,
@@ -95,7 +99,9 @@ const Change = z.discriminatedUnion("action", [
 // POST: Put online ({ action: "put_online", build_id }): the build must be this app's, verified by
 // Mynt and pushed to a repository. The app's workspace's hosting is turned on first if it isn't
 // (request_hosting, which Mynt keeps idempotent; owners and admins only), then deploy_app hosts the
-// build. The app is deploying when this answers; GET ?only=status follows it until it's online.
+// build. For an app in Production Mynt puts it online only for an owner or admin of its workspace, and only
+// if the build passes the production checks about it; its refusal comes back in its own words (422) and
+// is shown in the sheet. The app is deploying when this answers; GET ?only=status follows it until it's online.
 // Or choose the repository the app's next builds push to ({ action: "set_repository", repository }).
 export async function POST(req: Request, { params }: Params) {
   if (!fromOwnOrigin(req)) return json({ error: "forbidden" }, 403);
