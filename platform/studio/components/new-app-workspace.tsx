@@ -14,7 +14,13 @@
 // it's in Staging (sandbox builds) or Production. The user's own products move between stages from their
 // rows (Move to staging, Move to production, Move back), each through the approval sheet
 // (components/product-stage-sheet.tsx), as apps move.
-// The composer's toggle switches between Build app and Create product (so does /create-product, and
+// The composer's Type dropdown ("Type: App"; components/build-type.tsx) picks what's built: an app, a financial product
+// or a service. Service is a vendor service built like an app: in place of the products, a service type and region
+// picker (Mynt's admin-defined service types, each with its licence prerequisite; Request a service type asks Mynt for
+// one); its tabs are Service types and Requested service types; sending creates the service and its first build and
+// opens /services/<id>. It needs Mynt's vendor role: without it the choice still shows, with "Ask a Mynt admin for the
+// vendor role", and nothing can be sent. The page keeps the type in the address (?type=) and remembers it per browser.
+// It switches between Build app and Create product (so does /create-product, and
 // "/create-product <description>" sent from Build app goes there with its description). In Create
 // product the chat drafts a product with the assistant (components/product-chat.tsx, lib/product-chat.ts);
 // its draft card opens the same sheet, filled in. Its chips and Templates rows are product ideas
@@ -26,7 +32,7 @@
 import { useChat } from "@ai-sdk/react"
 import { AssistantRuntimeProvider, useExternalStoreRuntime, type AppendMessage, type ThreadMessageLike } from "@assistant-ui/react"
 import { DefaultChatTransport, type ChatTransport, type UIMessage } from "ai"
-import { Check, ChevronDown, LayoutTemplate, Package, Plus } from "lucide-react"
+import { Check, ChevronDown, Inbox, LayoutTemplate, Package, Plus, ServerCog } from "lucide-react"
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { Thread } from "@/components/assistant-ui/thread"
@@ -37,7 +43,9 @@ import { ChatSaver, chatForProduct, LIST_LIMIT_MAX, listChats, loadChat, migrate
 import { announceThreads, type AppThreadSource, type MyProduct, type OpenThreadDetail, type ProductChatRecord } from "@/lib/threads"
 import { EmptyRow, pagerOf } from "@/components/earn-view"
 import { COL, matches, PanelList, useFitRows, usePaged } from "@/components/list-layout"
-import { ModeToggle, ProductChat, type DraftCards } from "@/components/product-chat"
+import { ProductChat, type DraftCards } from "@/components/product-chat"
+import { RequestServiceTypeSheet, ServiceTypePicker, ServiceTypesTab, TypeMenu, TypeRequestsTab } from "@/components/build-type"
+import { NEEDS_VENDOR_ROLE, NewServiceRequest, serviceBlockedReason, typeChoiceId, type BuildType, type ServiceTypeChoice, type ServiceTypeRequest } from "@/lib/services"
 import { askFetch, withoutReasoning } from "@/lib/ask-client"
 import { asksForProduct, PRODUCT_WELCOME_TITLE, productCommandText, SWITCH_SUGGESTION, type NewAppMode, type ProductDraft } from "@/lib/product-chat"
 import { Badge } from "@/components/ui/badge"
@@ -60,8 +68,13 @@ export type NewAppProduct = StudioProduct
 export type NewAppTab = "templates" | "products"
 
 export const WELCOME_TITLE = "What do you want to build?"
+export const SERVICE_WELCOME_TITLE = "What service do you want to build?"
+export const SERVICE_PLACEHOLDER = "Describe the service: what it takes in and what it gives back…"
+// Service's tabs, in the same two places: the service types to pick from, and the ones this account asked Mynt for.
+const SERVICE_TAB_LABELS: Record<NewAppTab, string> = { templates: "Service types", products: "Requested service types" }
 const TAB_LABELS: Record<NewAppTab, string> = { templates: "Templates", products: "Products" }
 const TAB_ICONS: Record<NewAppTab, typeof Package> = { templates: LayoutTemplate, products: Package }
+const SERVICE_TAB_ICONS: Record<NewAppTab, typeof Package> = { templates: ServerCog, products: Inbox }
 export const lineLabel = (line: string) => line.replace(/_/g, " ")
 // A welcome chip, in either mode: its short label on one line, never wrapping (the full text is its tooltip).
 const CHIP_CLASS =
@@ -101,21 +114,34 @@ export function pickerLabel(picked: readonly string[], products: readonly NewApp
 
 // Build app's commands. /create-product switches to Create product (typed with a description after it
 // and sent, it sends that description there).
-export function newAppCommands(go: { tab: (t: NewAppTab) => void; applyKind: (k: AppKind) => void; createProduct?: () => void }, kinds: readonly AppKind[]): SlashCommand[] {
+export function newAppCommands(go: { tab: (t: NewAppTab) => void; applyKind: (k: AppKind) => void; createProduct?: () => void; buildService?: () => void }, kinds: readonly AppKind[]): SlashCommand[] {
   return [
     { name: "templates", description: "Open Templates", run: () => go.tab("templates") },
     { name: "products", description: "Open Products", run: () => go.tab("products") },
     ...(go.createProduct ? [{ name: "create-product", description: "Create a product: describe it in the chat", run: go.createProduct }] : []),
+    ...(go.buildService ? [{ name: "build-service", description: "Build a service: switch Type to Service", run: go.buildService }] : []),
     ...kinds.map((k) => ({ name: k.id, description: `Start from ${k.title}`, run: () => go.applyKind(k) })),
   ]
 }
 
 // Create product's commands: back to Build app, and the tabs.
-export function productModeCommands(go: { tab: (t: NewAppTab) => void; buildApp: () => void }): SlashCommand[] {
+export function productModeCommands(go: { tab: (t: NewAppTab) => void; buildApp: () => void; buildService?: () => void }): SlashCommand[] {
   return [
     { name: "build-app", description: "Build an app instead", run: go.buildApp },
+    ...(go.buildService ? [{ name: "build-service", description: "Build a service instead", run: go.buildService }] : []),
     { name: "templates", description: "Open Templates", run: () => go.tab("templates") },
     { name: "products", description: "Open Products", run: () => go.tab("products") },
+  ]
+}
+
+// Service's commands: back to an app or a financial product, its two tabs, and asking Mynt for a service type.
+export function serviceModeCommands(go: { tab: (t: NewAppTab) => void; buildApp: () => void; createProduct: () => void; requestType: () => void }): SlashCommand[] {
+  return [
+    { name: "build-app", description: "Build an app instead", run: go.buildApp },
+    { name: "create-product", description: "Create a financial product instead", run: go.createProduct },
+    { name: "service-types", description: "Open Service types", run: () => go.tab("templates") },
+    { name: "requested", description: "Open Requested service types", run: () => go.tab("products") },
+    { name: "request-service-type", description: "Ask Mynt for a service type that doesn't exist yet", run: go.requestType },
   ]
 }
 
@@ -681,7 +707,26 @@ export function NewAppWorkspace({
   openRequest = null,
   onOpenApp,
   onOpenProduct,
+  initialType = "app",
+  onType,
+  serviceTypes = null,
+  typeRequests = null,
+  vendor = null,
+  onBuildService,
+  onTypeRequested,
 }: {
+  // The type the page opens on (the address's ?type=, else the last one picked in this browser), and where a change goes.
+  initialType?: BuildType
+  onType?: (type: BuildType) => void
+  // Service: Mynt's admin-defined service types (null while loading), the ones this account asked Mynt for (null: this
+  // Mynt takes no requests), and whether the account holds Mynt's vendor role (null while that's being read).
+  serviceTypes?: ServiceTypeChoice[] | null
+  typeRequests?: ServiceTypeRequest[] | null
+  vendor?: boolean | null
+  // Creates the service and starts its build; returns an error to show, or null once it's on its way.
+  onBuildService?: (request: NewServiceRequest) => Promise<string | null>
+  // A service type was requested: the page reads the requests again.
+  onTypeRequested?: () => void
   products: NewAppProduct[] | null
   kinds: AppKind[] | null
   // Financial product mode's ideas for new products (list_product_ideas): its chips and Templates rows.
@@ -768,7 +813,34 @@ export function NewAppWorkspace({
   }
   const [chatTransport] = useState(() => transport ?? productTransport())
   const productChat = useChat<UIMessage>({ id: "studio-new-product", transport: chatTransport })
-  const [mode, setMode] = useState<NewAppMode>("build")
+  const [mode, setMode] = useState<NewAppMode>(initialType === "product" ? "product" : "build")
+  // The Type dropdown's third choice. A service is described and built in the app's composer (never the product chat).
+  const [service, setService] = useState(initialType === "service")
+  const type: BuildType = service ? "service" : mode === "product" ? "product" : "app"
+  // The type the page last gave (or was last told): a change made here is passed up once, one the page made isn't echoed.
+  const reported = useRef<BuildType>(initialType)
+  const incoming = useRef<BuildType | null>(null)
+  useEffect(() => {
+    if (reported.current === initialType) return
+    incoming.current = initialType
+    setService(initialType === "service")
+    setMode(initialType === "product" ? "product" : "build")
+  }, [initialType])
+  const onTypeRef = useRef(onType)
+  onTypeRef.current = onType
+  useEffect(() => {
+    if (incoming.current !== null) {
+      if (incoming.current !== type) return
+      incoming.current = null
+      reported.current = type
+      return
+    }
+    if (reported.current === type) return
+    reported.current = type
+    onTypeRef.current?.(type)
+  }, [type])
+  const [serviceType, setServiceType] = useState<string | null>(null)
+  const [requesting, setRequesting] = useState(false)
   const [ai, setAi] = useState<"loading" | "enabled" | "disabled">("loading")
   const aiChecked = useRef(false)
   useEffect(() => {
@@ -814,10 +886,20 @@ export function NewAppWorkspace({
   // What's typed, for the composer's reason it can't send yet.
   const [text, setText] = useState("")
   // "/create-product <description>" goes to Create product, so it isn't held back by Build app's rules.
-  const blocked = productCommandText(text) !== null ? null : sendBlockedReason(picked, text)
+  // A service needs Mynt's vendor role and a service type; an app, its products.
+  const blocked = productCommandText(text) !== null ? null : service ? serviceBlockedReason(vendor !== false, serviceType, text) : sendBlockedReason(picked, text)
 
   // Switching mode carries what's typed to the other composer; `send` is sent there at once.
   const switchMode = (next: NewAppMode, opts: { text?: string; send?: string } = {}) => {
+    // Out of Service first: it shares the app's composer, so going to an app from it changes nothing typed.
+    if (service) {
+      setService(false)
+      setError(null)
+      if (next === "build") {
+        if (opts.text !== undefined) runtime.thread.composer.setText(opts.text)
+        return
+      }
+    }
     if (next === mode && opts.send === undefined) return
     setError(null)
     if (next === "product") {
@@ -833,6 +915,20 @@ export function NewAppWorkspace({
     }
   }
 
+  // The Type dropdown: an app, a financial product or a service. What's typed goes along.
+  const pickType = (next: BuildType) => {
+    if (next === type) return
+    if (next !== "service") return switchMode(next === "product" ? "product" : "build")
+    setError(null)
+    if (mode === "product") {
+      const typed = productText.current
+      setMode("build")
+      runtime.thread.composer.setText(typed)
+    }
+    setService(true)
+    setTab("templates")
+  }
+
   // One request at a time: a second send while one runs is ignored.
   const inFlight = useRef(false)
   const onNew = async (m: AppendMessage) => {
@@ -841,6 +937,31 @@ export function NewAppWorkspace({
     // "/create-product <description>": drafting, never a build.
     const described = productCommandText(prompt)
     if (described !== null) return switchMode("product", described ? { send: described } : { text: "" })
+    if (service) {
+      // A service: its type and region, then the same first build an app gets. Only with Mynt's vendor role.
+      const [region = "", key = ""] = (serviceType ?? "").split("/")
+      const asked = NewServiceRequest.safeParse({ prompt, service_type: key, region })
+      const refusal = vendor === false || !onBuildService ? `${NEEDS_VENDOR_ROLE}.` : asked.success ? null : (asked.error.issues[0]?.message ?? "Check what you entered.")
+      if (refusal || !asked.success || !onBuildService) {
+        setError(refusal)
+        setTimeout(() => runtime.thread.composer.setText(prompt), 0)
+        return
+      }
+      inFlight.current = true
+      setBusy(true)
+      setError(null)
+      setOpened(true)
+      setMessages([{ role: "user", content: prompt }])
+      const failed = await onBuildService(asked.data)
+      if (failed) {
+        setError(failed)
+        setMessages([])
+        setBusy(false)
+        inFlight.current = false
+        runtime.thread.composer.setText(prompt)
+      }
+      return
+    }
     const request = { prompt, product_ids: picked, ...(kind ? { kind } : {}) }
     // The same rules the server applies (lib/new-app.ts); what's typed comes back to fix.
     const parsed = NewAppRequest.safeParse(request)
@@ -890,8 +1011,19 @@ export function NewAppWorkspace({
     setError(null)
   }
   const applyKind = (k: AppKind) => applyIdea(k)
-  const commands = newAppCommands({ tab: open, applyKind, createProduct: () => switchMode("product", { text: "" }) }, kinds ?? [])
-  const productCommands = productModeCommands({ tab: open, buildApp: () => switchMode("build", { text: "" }) })
+  const buildService = () => {
+    runtime.thread.composer.setText("")
+    pickType("service")
+  }
+  const commands = newAppCommands({ tab: open, applyKind, createProduct: () => switchMode("product", { text: "" }), buildService }, kinds ?? [])
+  const productCommands = productModeCommands({ tab: open, buildApp: () => switchMode("build", { text: "" }), buildService: () => pickType("service") })
+  const serviceCommands = serviceModeCommands({ tab: open, buildApp: () => switchMode("build", { text: "" }), createProduct: () => switchMode("product", { text: "" }), requestType: () => setRequesting(true) })
+  // Use on a service type's row, or its chip: the type picked, and a start for the description where nothing is typed.
+  const applyServiceType = (t: ServiceTypeChoice) => {
+    setServiceType(typeChoiceId(t))
+    setError(null)
+    if (!runtime.thread.composer.getState().text.trim()) runtime.thread.composer.setText(`A ${t.name} service that `)
+  }
   const drafting = productChat.status === "submitted" || productChat.status === "streaming"
 
   // ---- threads: saving the product chat, and reopening one from the sidebar or a link ----
@@ -974,6 +1106,7 @@ export function NewAppWorkspace({
     const id = sessionIdFor(link)
     const rec = await loadChat(id, threadFetch)
     if (seq !== openSeq.current) return false
+    setService(false)
     setMode("product")
     if (!rec) {
       setThreadNotice(OPEN_FAILED)
@@ -1019,6 +1152,7 @@ export function NewAppWorkspace({
     productChat.setMessages([])
     setThreadId(newThreadId())
     setCreatedDrafts({})
+    setService(false)
     setMode("product")
     setCarry((c) => ({ text: `Continue with ${name}: `, n: (c?.n ?? 0) + 1 }))
   }
@@ -1037,9 +1171,21 @@ export function NewAppWorkspace({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openRequest?.n, products])
-  const modeToggle = <ModeToggle mode={mode} onMode={(m) => switchMode(m)} />
+  // The composer's Type dropdown (it was a two-way switch before a service became the third thing to build).
+  const modeToggle = <TypeMenu type={type} onType={pickType} />
   // Build app: what's typed clearly asks for a product, so Create product is offered (never switched to unasked).
-  const suggestProduct = mode === "build" && !busy && !error && asksForProduct(text)
+  const suggestProduct = mode === "build" && !service && !busy && !error && asksForProduct(text)
+  // Service's chips: a few of Mynt's service types; one picks the type.
+  const serviceChips = (serviceTypes ?? []).length ? (
+    <div className="mt-6 flex flex-wrap justify-center gap-2 px-4" data-service-chips>
+      {(serviceTypes ?? []).slice(0, CHIPS_MAX).map((t) => (
+        <button key={typeChoiceId(t)} type="button" onClick={() => applyServiceType(t)} className={CHIP_CLASS} data-service-chip={typeChoiceId(t)} title={t.description || t.name}>
+          {chipText(undefined, t.name)}
+        </button>
+      ))}
+    </div>
+  ) : null
+  const askForType = () => setRequesting(true)
   // A few ideas under the welcome, each named by its short chip label (the problem is the tooltip), picked once per page load (a Mynt with no
   // ideas yet shows the kinds). Once the products are known, only ones with a published product to pick.
   const [seed] = useState(() => Math.random())
@@ -1093,7 +1239,13 @@ export function NewAppWorkspace({
   ) : null
 
   const content = (t: NewAppTab) =>
-    t === "templates" ? (
+    service ? (
+      t === "templates" ? (
+        <ServiceTypesTab types={serviceTypes} picked={serviceType} onUse={applyServiceType} onRequest={askForType} />
+      ) : (
+        <TypeRequestsTab requests={typeRequests} onRequest={askForType} />
+      )
+    ) : t === "templates" ? (
       mode === "product" ? (
         <ProductIdeasTab ideas={productIdeas} onUse={openProductIdea} />
       ) : (
@@ -1107,23 +1259,28 @@ export function NewAppWorkspace({
     <AssistantRuntimeProvider runtime={runtime}>
       <ChatWorkspaceShell
         chat={
-          <div className="relative h-full" data-new-app-chat data-mode={mode}>
+          <div className="relative h-full" data-new-app-chat data-mode={service ? "service" : mode} data-type={type}>
             {mode === "build" ? (
               <Thread
                 welcome={
-                  <ChatWelcome title={WELCOME_TITLE}>
-                    
-                    {chips}
+                  <ChatWelcome title={service ? SERVICE_WELCOME_TITLE : WELCOME_TITLE}>
+
+                    {service ? serviceChips : chips}
                   </ChatWelcome>
                 }
-                placeholder="Describe the app: who it's for and what they can do…"
+                placeholder={service ? SERVICE_PLACEHOLDER : "Describe the app: who it's for and what they can do…"}
                 toolbar={
                   <>
                     {modeToggle}
-                    <ProductPicker products={products} picked={picked} onToggle={toggle} onClear={() => setPicked([])} onCreate={openSheet} />
+                    {service ? (
+                      // In place of the products: the service's type and region, from Mynt's admin-defined service types.
+                      <ServiceTypePicker types={serviceTypes} picked={serviceType} onPick={setServiceType} onRequest={askForType} />
+                    ) : (
+                      <ProductPicker products={products} picked={picked} onToggle={toggle} onClear={() => setPicked([])} onCreate={openSheet} />
+                    )}
                   </>
                 }
-                commands={commands}
+                commands={service ? serviceCommands : commands}
                 sendBlocked={busy ? null : blocked}
                 sendBlockedNote={false}
                 note={
@@ -1132,7 +1289,12 @@ export function NewAppWorkspace({
                       {error}
                     </span>
                   ) : busy ? (
-                    <span role="status">Creating the app and starting its first build…</span>
+                    <span role="status">{service ? "Creating the service and starting its first build…" : "Creating the app and starting its first build…"}</span>
+                  ) : service && vendor === false ? (
+                    // Services are for Mynt's vendor role: said plainly, and nothing can be created without it.
+                    <span role="status" data-needs-vendor-role>
+                      {NEEDS_VENDOR_ROLE}
+                    </span>
                   ) : suggestProduct ? (
                     <span className="inline-flex flex-wrap items-center justify-center gap-2" data-suggest-product>
                       {SWITCH_SUGGESTION}
@@ -1175,11 +1337,18 @@ export function NewAppWorkspace({
         }
         onOpenPanel={() => setOpened(true)}
         showPanel={opened || messages.length > 0 || productChat.messages.length > 0}
-        tabs={(["templates", "products"] as const).map((t) => ({ id: t, label: TAB_LABELS[t], badge: t === "products" ? picked.length || undefined : undefined, content: content(t), icon: TAB_ICONS[t] }))}
+        tabs={(["templates", "products"] as const).map((t) => ({
+          id: t,
+          label: (service ? SERVICE_TAB_LABELS : TAB_LABELS)[t],
+          badge: t === "products" && !service ? picked.length || undefined : undefined,
+          content: content(t),
+          icon: service ? SERVICE_TAB_ICONS[t] : TAB_ICONS[t],
+        }))}
         tab={tab}
         onTab={(id) => open(id as NewAppTab)}
         isMobile={isMobile}
       />
+      <RequestServiceTypeSheet open={requesting} onClose={() => setRequesting(false)} onDone={onTypeRequested} fetcher={fetcher} />
       <CreateProductSheet
         open={creating}
         onOpenChange={setCreating}

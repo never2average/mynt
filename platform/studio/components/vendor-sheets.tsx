@@ -315,7 +315,9 @@ export function TermsSheet({ offering, onClose, onDone, fetcher }: { offering: V
 // ---- Run conformance ----
 
 type Failure = { case: string; problems: string[] }
-export function ConformanceSheet({ offering, onClose, onDone, fetcher }: { offering: VendorOffering | null; onClose: () => void; onDone: Done; fetcher?: typeof fetch }) {
+// `hosted`: a service built and hosted on Mynt. Its endpoint is Mynt's (the hosted address, never typed), so the words
+// say so; the test and its route are the same.
+export function ConformanceSheet({ offering, onClose, onDone, fetcher, hosted = false }: { offering: VendorOffering | null; onClose: () => void; onDone: Done; fetcher?: typeof fetch; hosted?: boolean }) {
   const { busy, error, result, run, reset } = useAdminAction(fetcher)
   const [credential, setCredential] = useState("")
   const [outcome, setOutcome] = useState<{ passed: boolean; failures: Failure[] } | null>(null)
@@ -330,7 +332,11 @@ export function ConformanceSheet({ offering, onClose, onDone, fetcher }: { offer
       open={offering !== null}
       onClose={onClose}
       title="Run conformance"
-      description="Mynt calls your test endpoint itself with signed requests, checks every answer against the service's contract, that badly signed and stale requests are refused, and your licences. A pass lets you list the service."
+      description={
+        hosted
+          ? "Mynt calls the service at its hosted address with signed requests, checks every answer against the service's contract, that badly signed and stale requests are refused, and your licences. A pass lets it move to Production, where it is listed."
+          : "Mynt calls your test endpoint itself with signed requests, checks every answer against the service's contract, that badly signed and stale requests are refused, and your licences. A pass lets you list the service."
+      }
       error={error}
       result={result}
     >
@@ -350,13 +356,18 @@ export function ConformanceSheet({ offering, onClose, onDone, fetcher }: { offer
           }}
         >
           <p className="text-sm">
-            {offering.name} · {offering.testBaseUrl ? `test endpoint ${offering.testBaseUrl}` : "no test endpoint yet"}
+            {offering.name} · {offering.testBaseUrl ? `${hosted ? "endpoint" : "test endpoint"} ${offering.testBaseUrl}` : hosted ? "not online yet" : "no test endpoint yet"}
           </p>
-          {!offering.testBaseUrl && (
-            <p className="text-sm text-muted-foreground" data-conformance-no-endpoint>
-              Mynt&apos;s real test calls your own test endpoint. Add it with Edit service first. Until then, Run practice test shows the test against Mynt&apos;s sandbox; a practice pass doesn&apos;t count.
-            </p>
-          )}
+          {!offering.testBaseUrl &&
+            (hosted ? (
+              <p className="text-sm text-muted-foreground" data-conformance-no-endpoint>
+                Mynt tests the service itself, at its hosted address. Put it online first. Until then, Run practice test shows the test against Mynt&apos;s sandbox; a practice pass doesn&apos;t count.
+              </p>
+            ) : (
+              <p className="text-sm text-muted-foreground" data-conformance-no-endpoint>
+                Mynt&apos;s real test calls your own test endpoint. Add it with Edit service first. Until then, Run practice test shows the test against Mynt&apos;s sandbox; a practice pass doesn&apos;t count.
+              </p>
+            ))}
           {offering.requiresCredential && (
             <Field label="Test credential" hint="Sent to your test endpoint for this run only; Mynt doesn't keep it">
               <Input type="password" value={credential} onChange={(e) => setCredential(e.target.value)} maxLength={2000} autoComplete="off" spellCheck={false} required data-conformance-credential />

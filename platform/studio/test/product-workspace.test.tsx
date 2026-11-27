@@ -10,6 +10,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import type { ChatTransport, UIMessage, UIMessageChunk } from "ai";
 import { useState } from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { pickType } from "./build-type-helper";
 
 const nav = { pushed: [] as string[], replaced: [] as string[] };
 vi.mock("next/navigation", () => ({
@@ -305,7 +306,7 @@ describe("the wiring", () => {
     }
     render(<Harness />);
     await settle();
-    await act(async () => void fireEvent.click(document.querySelector('[data-mode-option="product"]') as HTMLElement));
+    await pickType("product");
     await settle();
     fireEvent.change(input(), { target: { value: "A savings account that rounds up card spend" } });
     await act(async () => void fireEvent.keyDown(input(), { key: "Enter" }));

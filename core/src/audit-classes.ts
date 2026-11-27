@@ -392,6 +392,19 @@ const WORKSPACE = [
   // a vendor's standard terms on an offering, a new version each change (vendor-terms.ts)
   "set_vendor_terms",
   "suspend_vendor_offering",
+  // a service built on Mynt (services.ts): created, archived or restored, and what putting a build online, Mynt's
+  // own test of that build, or taking it offline did to its offering
+  "create_service",
+  "archive_service",
+  "service_build_online",
+  "service_conformance_after_deploy",
+  "service_offline",
+  "service_build_beside",
+  "service_build_switched",
+  "service_build_not_switched",
+  // a service type asked of Mynt's admins, and declined (defining it is define_service_type)
+  "request_service_type",
+  "decline_service_type_request",
   "run_conformance",
   "admin_run_conformance",
   // a practice run against Mynt's own sandbox (vendor-sandbox.ts): never conformance

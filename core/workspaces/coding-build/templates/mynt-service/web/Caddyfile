@@ -1,0 +1,26 @@
+{
+	admin off
+	auto_https off
+	storage file_system /tmp/caddy
+}
+
+:8080 {
+	# Mynt's signed requests, passed to the api untouched (the signature is over the raw body).
+	handle /mynt/services/* {
+		reverse_proxy api:3000
+	}
+	handle /api/* {
+		reverse_proxy api:3000
+	}
+	# Nothing is forwarded to Mynt: a service calls nobody on a caller's behalf.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Content-Security-Policy "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'"
+	}
+}

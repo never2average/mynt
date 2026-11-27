@@ -1,3 +1,5 @@
+import { offeringOfService, serviceTypeContract } from "./services.js";
+import { serviceType } from "./vendors.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { operationalSetting } from "./platform-settings.js";
 import type { AgentMeter } from "./agent-meter.js";
@@ -1578,6 +1580,9 @@ export class BuildService {
       if (!["ready", "idle", "running"].includes(s.state)) return;
       const jobFiles: Record<string, string> = { "job/build.json": JSON.stringify(await this.spec(b), null, 2) };
       for (const file of await this.sdkFiles(b)) jobFiles[`job/sdk/${file.path}`] = file.content;
+      // A service's build gets its service type's contract (schemas, signature rule, fixtures) to keep in the repository.
+      const contract = await this.serviceContract(b);
+      if (contract) jobFiles[contract.path] = JSON.stringify(contract.contract, null, 2);
       if (b.solana) await this.installSolana(b.sandbox_id!, b.solana_env?.build);
       const session = b.mode === "session";
       const idleMs = Math.max(60_000, Math.floor(this.config.sessionIdleMs ?? SESSION_IDLE_MS));
@@ -2105,7 +2110,16 @@ export class BuildService {
   }
 
   // What the agent builds against: the app, its products and their terms.
+  // The contract of a service's one service type, and where the job keeps it. Null for an app.
+  private async serviceContract(b: Build) {
+    const app = b.app_id ? await this.store.getApp(b.app_id) : undefined;
+    const o = app?.kind === "service" ? await offeringOfService(this.store, app.id) : undefined;
+    const t = o ? await serviceType(this.store.db, o.region, o.service_type) : undefined;
+    return t ? { path: `job/service-contracts/${t.key}.json`, contract: serviceTypeContract(t) } : null;
+  }
+
   private async spec(b: Build) {
+    const service = await this.serviceContract(b);
     const app = b.app_id ? await this.store.getApp(b.app_id) : undefined;
     const developer = await this.store.getUser(b.developer_id);
     const products = [];
@@ -2134,6 +2148,8 @@ export class BuildService {
       // The app kind to start from: CLAUDE.md has the agent read templates/kinds/<kind>.json and scaffold with --kind.
       kind: b.kind,
       app: app ?? null,
+      // A service (CLAUDE.md, "Services"): scaffold with --service and the contract file, not an app's screens.
+      ...(service ? { service: { service_type: service.contract.service_type.key, region: service.contract.service_type.region, name: service.contract.service_type.name, contract: service.path, endpoint_path: service.contract.endpoint.app_path } } : {}),
       products,
       mynt_api: this.config.publicUrl ? `${this.config.publicUrl}/v1` : null,
       ...(b.solana

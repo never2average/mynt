@@ -42,6 +42,7 @@ import { hasLiquidity } from "@/lib/liquidity"
 import { useStudioAccess } from "@/lib/use-liquidity-access"
 import { myProductsFrom, productIdOfPath, THREADS_UPDATED, type MyProduct, type ThreadsUpdatedDetail } from "@/lib/threads"
 import { productStageOf } from "@/lib/products"
+import { serviceIdOfPath } from "@/lib/services"
 import { groupByStage, STAGES, withWorkspace, type Stage, type StagedApp, type Workspace } from "@/lib/workspaces"
 
 type Account = { name: string | null; email: string | null }
@@ -115,8 +116,10 @@ export function stagedItems(groups: Record<Stage, StagedApp[]> | null, products:
 // What the sidebar shows, from its data; rendered on the server by the tests.
 export function SidebarView({ workspaces, selected, supported, groups, account, pathname, onSelectWorkspace, onCreateWorkspace, invitations, onAnswerInvitation, liquidity, developer = true, licenceProvider = false, workspaceSettings, products = null, admin = false, vendor = false, firm = false, ...props }: SidebarViewProps & React.ComponentProps<typeof Sidebar>) {
   // The app or product on screen, marked in its folder: an app's workspace is /<app id>, a product's /products/<id>.
+  // A service's is /services/<id>.
   const activeProductId = productIdOfPath(pathname)
-  const appId = activeProductId ? undefined : pathname.split("/").filter(Boolean)[0]
+  const activeServiceId = serviceIdOfPath(pathname)
+  const appId = activeProductId || activeServiceId ? undefined : pathname.split("/").filter(Boolean)[0]
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
@@ -146,7 +149,7 @@ export function SidebarView({ workspaces, selected, supported, groups, account, 
             ))}
           </SidebarMenu>
         </SidebarGroup>
-        {developer && <NavFolders groups={stagedItems(groups, products)} activeAppId={appId} activeProductId={activeProductId} />}
+        {developer && <NavFolders groups={stagedItems(groups, products)} activeAppId={appId} activeProductId={activeProductId} activeServiceId={activeServiceId} />}
       </SidebarContent>
       <SidebarFooter>
         {admin && <PlatformAdminLink />}
@@ -171,9 +174,19 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const loadApps = useCallback(async () => {
     if (developer) try {
       const res = await fetch(withWorkspace("/api/projects", selected), { cache: "no-store" })
-      const data = (await res.json().catch(() => null)) as { projects?: (StagedApp & { conversations?: { id: string }[] })[] } | null
-      // Each app with its newest build (conversations come newest first), which the sidebar opens.
-      setGroups(groupByStage(res.ok ? (data?.projects ?? []).map((p) => ({ id: p.id, name: p.name, stage: p.stage, conversationId: p.conversations?.[0]?.id ?? null })) : []))
+      const data = (await res.json().catch(() => null)) as { projects?: (StagedApp & { conversations?: { id: string }[] })[]; services?: StagedApp[] } | null
+      // Each app with its newest build (conversations come newest first), which the sidebar opens; then the
+      // workspace's services (the route lists them apart: a service is never an app), each opening /services/<id>.
+      setGroups(
+        groupByStage(
+          res.ok
+            ? [
+                ...(data?.projects ?? []).map((p) => ({ id: p.id, name: p.name, stage: p.stage, conversationId: p.conversations?.[0]?.id ?? null })),
+                ...(data?.services ?? []).map((s) => ({ id: s.id, name: s.name, stage: s.stage, kind: "service" as const })),
+              ]
+            : [],
+        ),
+      )
     } catch {
       setGroups(groupByStage([]))
     }

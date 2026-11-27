@@ -6,13 +6,14 @@
 // and financial products (lib/threads.ts); ?thread=<id> reopens a product chat; ?product=<id> goes to that
 // product's own workspace (/products/<id>), as does a product created here.
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { NewAppWorkspace, type NewAppProduct } from "@/components/new-app-workspace";
 import { useWorkspace } from "@/components/workspace-context";
 import { kindsFromRoute, submitNewApp, type AppKind } from "@/lib/new-app";
 import { productIdeasFromRoute, type ProductIdea } from "@/lib/product-ideas";
 import type { ProjectItem } from "@/lib/project-types";
+import { buildTypeFromSearch, rememberBuildType, rememberedBuildType, submitNewService, type BuildType, type ServiceTypeChoice, type ServiceTypeRequest } from "@/lib/services";
 import { myProductsFrom, OPEN_THREAD, openFromSearch, productHref, type AppThreadSource, type MyProduct, type OpenThreadDetail } from "@/lib/threads";
 import { withWorkspace } from "@/lib/workspaces";
 
@@ -26,6 +27,33 @@ export default function NewAppPage() {
   const [owner, setOwner] = useState<string | null>(null);
   const [apps, setApps] = useState<AppThreadSource[] | null>(null);
   const [openRequest, setOpenRequest] = useState<(OpenThreadDetail & { n: number }) | null>(null);
+  // What's being built: an app, a financial product or a service. From the address (?type=), else the last one picked
+  // in this browser, else an app; a link to a product chat (?thread=) is a financial product's.
+  const [type, setType] = useState<BuildType>("app");
+  useEffect(() => {
+    const search = window.location.search;
+    const linked = openFromSearch(search);
+    setType(buildTypeFromSearch(search) ?? (linked?.thread ? "product" : null) ?? rememberedBuildType() ?? "app");
+  }, []);
+  const onType = useCallback((next: BuildType) => {
+    setType(next);
+    rememberBuildType(next);
+    // The choice stays in the address, so a reload or a shared link opens on it.
+    const url = new URL(window.location.href);
+    url.searchParams.set("type", next);
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}`);
+  }, []);
+  // Service: Mynt's service types, whether this account may create one (Mynt's vendor role), and its requests. Read
+  // when Service is first picked, and again after a request.
+  const [serviceData, setServiceData] = useState<{ serviceTypes: ServiceTypeChoice[]; requests: ServiceTypeRequest[] | null; vendor: boolean } | null>(null);
+  const loadServiceData = useCallback(async () => {
+    const res = await fetch("/api/services/types", { cache: "no-store" }).catch(() => null);
+    const data = res?.ok ? ((await res.json().catch(() => null)) as { serviceTypes?: ServiceTypeChoice[]; requests?: ServiceTypeRequest[] | null; vendor?: boolean } | null) : null;
+    setServiceData({ serviceTypes: Array.isArray(data?.serviceTypes) ? data.serviceTypes : [], requests: Array.isArray(data?.requests) ? data.requests : null, vendor: data?.vendor === true });
+  }, []);
+  useEffect(() => {
+    if (type === "service" && !serviceData) void loadServiceData();
+  }, [type, serviceData, loadServiceData]);
 
   // The products the user may build on (and their own drafts), and Mynt's templates (none on a Mynt without them).
   useEffect(() => {
@@ -101,6 +129,13 @@ export default function NewAppPage() {
         openRequest={openRequest}
         onOpenApp={(href) => router.push(href)}
         onOpenProduct={(id) => router.push(productHref(id))}
+        initialType={type}
+        onType={onType}
+        serviceTypes={serviceData?.serviceTypes ?? null}
+        typeRequests={serviceData ? serviceData.requests : null}
+        vendor={serviceData ? serviceData.vendor : null}
+        onBuildService={(request) => submitNewService(request, { fetch, navigate: (path) => router.push(path) })}
+        onTypeRequested={() => void loadServiceData()}
       />
     </div>
   );

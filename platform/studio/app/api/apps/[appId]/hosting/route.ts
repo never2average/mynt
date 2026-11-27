@@ -136,12 +136,16 @@ export async function POST(req: Request, { params }: Params) {
     if (hosting.on && hosting.status === "provisioning")
       return json({ error: "not_ready", message: "Your workspace's hosting is still being set up. Put the app online again in a few minutes." }, 409);
 
-    const reply = (await callStudioTool(mynt, "deploy_app", { app_id: appId, build_id: build.id })) as { url?: unknown } | null;
+    const reply = (await callStudioTool(mynt, "deploy_app", { app_id: appId, build_id: build.id })) as { url?: unknown; beside_serving_build?: unknown; service?: { next?: unknown } } | null;
+    // A service with a build serving: the new one goes online beside it, and takes over only once Mynt has passed it.
+    const beside = typeof reply?.beside_serving_build === "string" ? reply.beside_serving_build : null;
     const after = await hostingOf(mynt, appId, app.workspaceId);
     return json({
       ok: true,
       hosting: after["app"].state === "not_online" && !after["app"].error ? { ...after, app: { ...after["app"], state: "deploying", buildId: build.id, commitSha: build.commitSha } } : after,
-      message: `Putting ${app.name} online: Mynt's hosting fetches commit ${shortCommit(build.commitSha)} from ${build.repository}, builds it and starts it. This takes a few minutes; its address shows here once it answers.`,
+      message: beside
+        ? `Build ${build.id.slice(0, 8)} is going online beside build ${beside.slice(0, 8)}, which keeps serving. ${typeof reply?.service?.next === "string" ? reply.service.next : "Mynt tests the new build and switches to it only if it passes"}.`
+        : `Putting ${app.name} online: Mynt's hosting fetches commit ${shortCommit(build.commitSha)} from ${build.repository}, builds it and starts it. This takes a few minutes; its address shows here once it answers.`,
       // Where it will answer, when Mynt already says (it isn't up until the state says Online).
       address: typeof reply?.url === "string" && reply.url.startsWith("https://") ? reply.url : null,
     });

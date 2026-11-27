@@ -2,7 +2,7 @@
 
 This file covers what a builder does to make an app: create it, get access to products, have Mynt's coding agents build it, keep its code in a repository, host it and promote products with campaigns. It is for builders making apps.
 
-See also: [Products](products.md), [Runtime API](runtime-api.md), [Workspaces and sign-in](workspaces-and-sign-in.md), [Solana programs](solana-programs.md), [Mynt Studio](studio.md).
+See also: [Services](services.md), [Products](products.md), [Runtime API](runtime-api.md), [Workspaces and sign-in](workspaces-and-sign-in.md), [Solana programs](solana-programs.md), [Mynt Studio](studio.md).
 
 ## Apps
 
@@ -19,6 +19,8 @@ An app is a builder's experience around one or more financial products: a retire
 | `get_developer_dashboard` | Figures across your workspaces' apps for the last 7, 30 or 90 days. See [Attention](workspaces-and-sign-in.md#attention) |
 
 An app has a stage: idea, staging or production. A new app starts as an idea, and only its workspace's owners and admins move it. See [Stages and promotion](workspaces-and-sign-in.md#stages-and-promotion).
+
+A service is a different kind of thing built with the same machinery: an app record of kind `service`, with its own tools and checks (see [Services](services.md)). `list_my_apps` returns each record's `kind`. `update_app`, `preview_app`, `check_experience` and `publish_app` are for apps and refuse a service.
 
 An app never holds funds or collects financial data itself. Onboarding, identity checks and payments hand off to the product's own flow (see [Hand-offs](runtime-api.md#hand-offs)).
 
@@ -650,6 +652,8 @@ With `FREESTYLE_API_KEY` set, Mynt drives [Freestyle](https://www.freestyle.sh) 
 **Serving.** Each app (each labelled Compose service) gets a public HTTPS route, `https://mynt-<app>.style.dev` or `<app>.<HOSTING_APPS_DOMAIN>`, straight to its port.
 
 **The builder logs in.** `vm_access` returns SSH commands for their own Linux user (in the docker group, no sudo) on each of their apps' VMs, valid for a few hours. They work as VS Code Remote-SSH hosts too, and new logins revoke the last.
+
+**A service's signing secret.** A [service](services.md#the-endpoint-and-the-signing-secret) is handed its vendor signing secret as `MYNT_VENDOR_SIGNING_SECRET` in the deploy job's environment, the only hosted setting besides Mynt's own. A new build of a service goes online on a second VM beside the one serving, with a secret of its own, and takes over only after Mynt's test passes (see [A new build and conformance](services.md#a-new-build-and-conformance)). Calls from Mynt to a service's address never pass the edge rule that adds a key: that rule covers only a project's own calls out to Mynt.
 
 **The kill switch** pauses every app VM. `undeploy_app` deletes the app's VM, which takes its rules and key with it.
 

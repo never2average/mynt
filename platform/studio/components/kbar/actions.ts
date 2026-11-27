@@ -24,7 +24,7 @@ export const BROWSE_IDS: ReadonlySet<string> = new Set(BROWSE.map((b) => b.id));
 
 // The sections, in the order the bar lists them (a higher priority is listed first; Ask AI's is 10).
 const ORDER: Record<AskArea, SearchGroup[]> = {
-  studio: ['Pages', 'Apps', 'Financial products', 'Members', 'Audit actions'],
+  studio: ['Pages', 'Apps', 'Financial products', 'Services', 'Members', 'Audit actions'],
   admin: ['Platform admin', 'Workspaces', 'Regulated firms', 'Studio']
 };
 
@@ -33,6 +33,7 @@ const after = (label: string, mark: string) => (label.includes(mark) ? label.sli
 /** What an item is listed under, when it's found by typing only: an app's tab under its app, a workspace or firm under its section. */
 function parentOf(item: SearchItem): { parent: string; name: string } | null {
   if (item.id.startsWith('apptab:')) return { parent: `app:${item.id.slice(7, item.id.lastIndexOf(':'))}`, name: after(item.label, ': ') };
+  if (item.id.startsWith('servicetab:')) return { parent: `service:${item.id.slice(11, item.id.lastIndexOf(':'))}`, name: after(item.label, ': ') };
   if (item.id === 'page:/platform/firms?tab=licences') return { parent: 'page:/platform/firms', name: after(item.label, ' → ') };
   if (item.id === 'platform:/platform/firms?tab=licences') return { parent: 'platform:/platform/firms', name: after(item.label, ' → ') };
   if (item.group === 'Workspaces') return { parent: 'platform:/platform/workspaces', name: item.label };

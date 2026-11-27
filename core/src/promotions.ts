@@ -1,3 +1,4 @@
+import { getOffering, serviceType, vendorLicenceGap } from "./vendors.js";
 import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -152,12 +153,13 @@ function auditCheck(s: State, o: { production: boolean; strict: boolean }): Prom
   return { ...base, status: "pass", detail: `Mynt's independent audit found no critical or high issues (medium ${c.medium ?? 0}, low ${c.low ?? 0})` };
 }
 
-function hostingCheck(appId: string, s: State, required: boolean): PromotionCheck {
-  const base = required ? { id: "hosting_healthy", label: "Healthy on Mynt's hosting" } : { id: "app_runs", label: "App builds and runs" };
-  const deploy = { label: "Deploy the app", href: `/${appId}`, tool: "deploy_app" };
+function hostingCheck(appId: string, s: State, required: boolean, service = false): PromotionCheck {
+  // A service is put online from its own workspace, and is never called an app.
+  const base = required ? { id: "hosting_healthy", label: "Healthy on Mynt's hosting" } : { id: "app_runs", label: service ? "Service builds and runs" : "App builds and runs" };
+  const deploy = service ? { label: "Put the service online", href: `/services/${appId}`, tool: "deploy_app" } : { label: "Deploy the app", href: `/${appId}`, tool: "deploy_app" };
   const h = s.hosted;
   if (!h) {
-    if (required) return { ...base, status: "fail", detail: "Not deployed on Mynt's hosting; production apps run there", fix: deploy };
+    if (required) return { ...base, status: "fail", detail: service ? "Not online on Mynt's hosting; a service in Production runs there" : "Not deployed on Mynt's hosting; production apps run there", fix: deploy };
     if (!s.verified) return { ...base, status: "pending", detail: "Waits for a build Mynt verified" };
     return { ...base, status: "warn", detail: "Not deployed on Mynt's hosting yet; the verified build ran its tests in Mynt's clean sandbox", fix: deploy };
   }
@@ -168,7 +170,12 @@ function hostingCheck(appId: string, s: State, required: boolean): PromotionChec
   // Production promotes what runs: the hosted build must be the verified build every other check (and the sign-off)
   // is about.
   if (s.verified && h.build_id !== s.verified.id)
-    return { ...base, status: required ? "fail" : "warn", detail: `${ran}, from build ${short(h.build_id)}, not the latest verified build ${short(s.verified.id)}`, fix: { label: "Deploy the latest build", href: `/${appId}`, tool: "deploy_app" } };
+    return {
+      ...base,
+      status: required ? "fail" : "warn",
+      detail: `${ran}, from build ${short(h.build_id)}, not the latest verified build ${short(s.verified.id)}${service ? ". A newer build takes over only after Mynt's conformance test passes on it; until then this one keeps serving" : ""}`,
+      fix: service ? { label: "Put the latest build online", href: `/services/${appId}`, tool: "deploy_app" } : { label: "Deploy the latest build", href: `/${appId}`, tool: "deploy_app" },
+    };
   return { ...base, status: "pass", detail: ran };
 }
 
@@ -380,15 +387,89 @@ async function signoffReasons(q: Q, s: State, programs: Row[], moneyFirms: strin
 
 // ---- the checks for one step ----
 
+// ---- a service (services.ts): what listing it in the Marketplace needs ----
+
+// A service's production checks replace an app's: no target states or licence coverage by product, no sponsor program
+// agreements, no customer personas. Production is listed, so these are what a listing needs.
+async function serviceChecks(q: Q, store: Store, app: App, s: State): Promise<PromotionCheck[]> {
+  const href = `/services/${app.id}`;
+  const row = await one(q, `SELECT * FROM ${T}.vendor_offerings WHERE app_id = $1`, [app.id]);
+  const out: PromotionCheck[] = [];
+  const conformance = { id: "service_conformance", label: "Conformance passed on the build that is online" };
+  const run = row ? await one(q, `SELECT passed, created_at FROM ${T}.vendor_conformance_runs WHERE offering_id = $1 ORDER BY created_at DESC LIMIT 1`, [row.id]) : undefined;
+  const hostedBuild = (s.hosted?.build_id as string | undefined) ?? null;
+  if (!row) out.push({ ...conformance, status: "fail", detail: "This service has no offering" });
+  else if (row.status === "suspended")
+    out.push({
+      ...conformance,
+      status: "fail",
+      detail: row.app_pause === "offline" ? "The service isn't online, so Mynt can't test it" : row.app_pause === "stopped" ? "The service is archived" : `A Mynt admin suspended its offering${row.status_note ? `: ${row.status_note}` : ""}`,
+    });
+  else if ((row.status === "conformance_passed" || row.status === "listed") && run?.passed && hostedBuild && row.app_build_id === hostedBuild)
+    out.push({
+      ...conformance,
+      status: "pass",
+      detail: `Mynt's conformance test passed on ${iso(run.created_at)!.slice(0, 10)} against build ${short(hostedBuild)}, the one online${
+        row.candidate_build_id ? `. Build ${short(row.candidate_build_id)} is online beside it, being tested; it takes over only if it passes` : ""
+      }`,
+    });
+  else if (!s.hosted) out.push({ ...conformance, status: "pending", detail: "Waits for the service to be online: Mynt tests the deployed build itself, from outside it" });
+  else if (run && !run.passed) out.push({ ...conformance, status: "fail", detail: `Mynt's conformance test failed on ${iso(run.created_at)!.slice(0, 10)}: fix the service and run it again`, fix: { label: "Run conformance", href, tool: "run_conformance" } });
+  else out.push({ ...conformance, status: "fail", detail: "Mynt hasn't passed the build that is online yet: each build that goes online is tested before the service is listed", fix: { label: "Run conformance", href, tool: "run_conformance" } });
+
+  const terms = { id: "service_terms", label: "Standard terms set, with their scope" };
+  const scopes = (row?.terms_scopes as string[] | null | undefined) ?? [];
+  if (row?.terms_version == null) out.push({ ...terms, status: "fail", detail: "No standard terms yet: app teams can't subscribe from the Marketplace without them", fix: { label: "Set standard terms", href, tool: "update_vendor_offering" } });
+  else if (!scopes.length) out.push({ ...terms, status: "fail", detail: `Version ${row.terms_version} doesn't say what it covers: set terms with their scope`, fix: { label: "Set standard terms", href, tool: "update_vendor_offering" } });
+  else out.push({ ...terms, status: "pass", detail: `Version ${row.terms_version}, covering ${scopes.join(", ").replace(/_/g, " ")}` });
+
+  const licence = { id: "service_licence", label: "Licence verified by Mynt" };
+  const o = row ? await getOffering(store.db, row.id as string) : undefined;
+  const t = o ? await serviceType(store.db, o.region, o.service_type) : undefined;
+  if (!o || !t) out.push({ ...licence, status: "fail", detail: "The service type is no longer defined" });
+  else if (!t.vendor_licences.length) out.push({ ...licence, status: "pass", detail: `${t.name} in ${t.region} needs no licence from the firm that offers it` });
+  else {
+    const gap = await vendorLicenceGap(store, o, t);
+    out.push(gap ? { ...licence, status: "fail", detail: gap, fix: { label: "Register the licence", href, tool: "register_license" } } : { ...licence, status: "pass", detail: `A verified licence in force is named on the offering (one of: ${t.vendor_licences.join(", ")})` });
+  }
+  return out;
+}
+
+// Production is listed: promoting a service lists its offering, and moving it back unlists it. In the move's transaction.
+async function serviceStageMoved(q: Q, appId: string, to: AppStage) {
+  if (to === "production") await q.query(`UPDATE ${T}.vendor_offerings SET status = 'listed', updated_at = now() WHERE app_id = $1 AND status = 'conformance_passed'`, [appId]);
+  else await q.query(`UPDATE ${T}.vendor_offerings SET status = 'conformance_passed', updated_at = now() WHERE app_id = $1 AND status = 'listed'`, [appId]);
+}
+
+/**
+ * What stops a service that is in Production from serving subscribers on `buildId`, besides conformance: the checks a
+ * promotion to Production runs, read for the build that is going online (not the one that was online when the
+ * service was promoted). A new build takes over, or is listed again, only when this is empty: passing conformance is
+ * not enough by itself. A warning that wouldn't stop a promotion (no independent audit ran) doesn't stop this either.
+ */
+export async function productionBlockers(store: Store, appId: string, buildId: string | null): Promise<string[]> {
+  const app = await store.getApp(appId);
+  if (!app || app.kind !== "service") return [];
+  const q = store.db;
+  const s = await readState(q, app.id);
+  const build = buildId && s.have.has("build_runs") ? await one(q, `SELECT * FROM ${T}.build_runs WHERE id::text = $1 AND app_id = $2`, [buildId, app.id]) : undefined;
+  if (!build || build.status !== "succeeded") return [`Latest build verified by Mynt: build ${buildId ? short(buildId) : "(none)"} didn't pass Mynt's verification`];
+  // The same checks, about this build.
+  const on: State = { ...s, verified: build, newestFinished: build };
+  const checks = [...(await serviceChecks(q, store, app, on)).filter((c) => c.id !== "service_conformance"), auditCheck(on, { production: true, strict: false }), findingsCheck(app.id, on, false)];
+  return checks.filter((c) => c.status === "fail").map((c) => `${c.label}: ${c.detail}`);
+}
+
 export class PromotionError extends Error {}
 
 // The checks for moving `app` one step up to `to`, from Mynt's own records. `q`: a transaction's connection when
 // promoting, so the checks and the change read the same state.
 export async function promotionChecks(q: Q, store: Store, app: App, to: "staging" | "production"): Promise<PromotionChecks> {
   const from = await stageOf(q, app);
+  const it = app.kind === "service" ? "The service" : "The app";
   if (ORDER.indexOf(to) !== ORDER.indexOf(from) + 1)
     throw new PromotionError(
-      from === to ? `The app is already in ${from}` : ORDER.indexOf(to) <= ORDER.indexOf(from) ? `The app is in ${from}; use demote_app to move it down` : `Promote one step at a time: the app is in ${from}, so its next stage is staging`,
+      from === to ? `${it} is already in ${from}` : ORDER.indexOf(to) <= ORDER.indexOf(from) ? `${it} is in ${from}; use demote_app to move it down` : `Promote one step at a time: ${it.toLowerCase()} is in ${from}, so its next stage is staging`,
     );
   return stageChecks(q, store, app, from, to);
 }
@@ -410,8 +491,11 @@ async function evaluate(q: Q, store: Store, app: App, from: AppStage, to: "stagi
   let basis: SignoffBasis = { programs: [], solana_build: false, rails: [] };
   let reasons: string[] = [];
   let checks: PromotionCheck[];
-  if (to === "staging") checks = [buildCheck(app.id, s), auditCheck(s, { production: false, strict: false }), hostingCheck(app.id, s, false)];
-  else {
+  if (to === "staging") checks = [buildCheck(app.id, s), auditCheck(s, { production: false, strict: false }), hostingCheck(app.id, s, false, app.kind === "service")];
+  else if (app.kind === "service") {
+    // A service: conformance on the build online, terms, licence, then the security and hosting checks an app has.
+    checks = [...(await serviceChecks(q, store, app, s)), buildCheck(app.id, s), auditCheck(s, { production: true, strict: false }), findingsCheck(app.id, s, false), hostingCheck(app.id, s, true, true)];
+  } else {
     const { check, moneyFirms } = await licenceCheck(store, app, s);
     const programs = await programsOf(q, app.id, s);
     ({ reasons, basis } = await signoffReasons(q, s, programs, moneyFirms));
@@ -477,7 +561,9 @@ export async function promoteApp(store: Store, user: Pick<User, "id">, app: App,
          checks = EXCLUDED.checks, updated_by = EXCLUDED.updated_by, updated_at = now()`,
       [app.id, to, build, sha, hosted, JSON.stringify(result.checks), user.id],
     );
+    if (app.kind === "service") await serviceStageMoved(tx, app.id, to);
     await auditIn(tx, user.id, "app_promoted", app.id, {
+      ...(app.kind === "service" ? { kind: "service", listed: to === "production" } : {}),
       app_id: app.id,
       workspace_id: app.workspace_id,
       from_stage: result.from_stage,
@@ -515,8 +601,10 @@ export async function demoteApp(store: Store, user: Pick<User, "id">, app: App, 
        ON CONFLICT (app_id) DO UPDATE SET stage = EXCLUDED.stage, build_id = NULL, source_sha256 = NULL, hosted_build_id = NULL, checks = NULL, updated_by = EXCLUDED.updated_by, updated_at = now()`,
       [app.id, to, user.id],
     );
-    await auditIn(tx, user.id, "app_demoted", app.id, { app_id: app.id, workspace_id: app.workspace_id, from_stage: from, to_stage: to, reason, unpublished });
-    return { app_id: app.id, from_stage: from, to_stage: to, reason, ...(unpublished ? { unpublished: true } : {}) };
+    if (app.kind === "service") await serviceStageMoved(tx, app.id, to);
+    const unlisted = app.kind === "service" && from === "production";
+    await auditIn(tx, user.id, "app_demoted", app.id, { ...(app.kind === "service" ? { kind: "service", unlisted } : {}), app_id: app.id, workspace_id: app.workspace_id, from_stage: from, to_stage: to, reason, unpublished });
+    return { app_id: app.id, from_stage: from, to_stage: to, reason, ...(unpublished ? { unpublished: true } : {}), ...(unlisted ? { unlisted: true } : {}) };
   });
 }
 
