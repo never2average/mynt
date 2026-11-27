@@ -294,6 +294,39 @@ test("a sample Mynt can't prepare, or whose build declares another address, is t
   assert.equal(w.sandboxes.launched.length, 0);
 });
 
+// The first real runs in production: the host refused every VM, and each sample's whole budget was counted as spent.
+test("a sandbox host that refuses every VM: a program sample that never got a sandbox charges nothing, and the next run is refused until the host is back", async () => {
+  for (const agent of ["program-audit", "program-red-team"]) {
+    const w = await world({});
+    const create = w.sandboxes.createSandbox;
+    w.sandboxes.createSandbox = async () => {
+      throw new Error("host: 429 LIMIT_EXCEEDED on creating a VM");
+    };
+    const started = await w.benchmarks.start(w.admin, { agent, cap_usd: 25 });
+    const done = await w.drive(started.run.id);
+    assert.deepEqual([done.run.status, done.run.stop_reason], ["stopped", "The sandbox provider has used up this account's allowance; an admin must add billing in its dashboard."], agent);
+    const [first, ...rest] = done.tasks;
+    assert.deepEqual([first.status, first.failure_class, first.sandbox_started], ["failed", "infrastructure", false], agent);
+    assert.ok(first.cap_usd > 0 && rest.every((t) => t.status === "not_run"), agent);
+    // The task had a budget, and none of it is counted: no sandbox started, so nothing was spent or measured.
+    assert.deepEqual([first.cost_usd, first.reserved_usd, first.cost_note], [null, null, "Not measured: no sandbox started for this task, so nothing ran, and nothing is counted against the run's cap"], agent);
+    assert.deepEqual([done.run.charged_usd, done.run.measured_usd, done.run.reserved_usd, done.run.charged_note, done.scoreboard.cost_usd], [0, 0, 0, null, null], agent);
+    assert.equal(w.sandboxes.sandboxes.size, 0, agent);
+
+    // Both gate agents are held back, in the same words as a run refused after a real build; host_restored overrides.
+    for (const other of ["program-audit", "program-red-team"]) await assert.rejects(w.benchmarks.start(w.admin, { agent: other, cap_usd: 25 }), /sandbox host's allowance is used up: the last benchmark run to ask it for a sandbox .* start the run with host_restored: true/, other);
+    const listed = (await w.benchmarks.agents()).filter((a) => a.agent.startsWith("program-"));
+    assert.deepEqual(listed.map((a) => [a.ready, a.can_start, a.host_allowance_used_up]), [[false, false, true], [false, false, true]], agent);
+    w.sandboxes.createSandbox = create;
+    const again = await w.benchmarks.start(w.admin, { agent, cap_usd: 25, host_restored: true, task_ids: ["good-starter-ledger"] });
+    const ran = await w.drive(again.run.id);
+    // This time the sample's sandbox started. The stand-in's review ends unscored, and what ran is counted.
+    assert.equal(ran.tasks[0].sandbox_started, true, agent);
+    assert.ok(ran.run.charged_usd > 0 && ran.run.charged_usd === ran.run.measured_usd + ran.run.reserved_usd, agent);
+    assert.ok((await w.benchmarks.agents()).filter((a) => a.agent.startsWith("program-")).every((a) => a.ready && a.can_start && !a.host_allowance_used_up), agent);
+  }
+});
+
 test("the sample gate can't review, approve or deploy a program, and the real gate takes no samples", async () => {
   const w = await world({});
   const gate = w.benchmarks.gate;

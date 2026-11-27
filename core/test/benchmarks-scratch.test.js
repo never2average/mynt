@@ -727,6 +727,29 @@ test("an explorer task never gets more than the run's cap has left; spending pas
   assert.equal(out.scoreboard.pass_rate, null, "nothing was scored on the agent's account: null, never 0");
 });
 
+// ---- a sandbox host that refuses every VM ----
+
+test("a sandbox host that refuses every VM: a desk job or an exploration that never got a sandbox charges nothing, with no 0 shown as a measured cost, and the next run is refused", async () => {
+  for (const agent of ["product-desk", "algorithm-explorer"]) {
+    const w = await world();
+    w.sandboxes.createSandbox = async () => {
+      throw new Error("host: 429 LIMIT_EXCEEDED on creating a VM");
+    };
+    const runId = await start(w, { agent, cap_usd: 20 });
+    const done = await drive(w, runId, async () => undefined);
+    assert.deepEqual([done.run.status, done.run.stop_reason], ["stopped", "The sandbox provider has used up this account's allowance; an admin must add billing in its dashboard."], agent);
+    const [first, ...rest] = done.tasks;
+    assert.deepEqual([first.status, first.failure_class, first.sandbox_started], ["failed", "infrastructure", false], agent);
+    assert.ok(first.cap_usd > 0 && rest.every((t) => t.status === "not_run"), agent);
+    assert.deepEqual([first.cost_usd, first.reserved_usd, first.cost_note], [null, null, "Not measured: no sandbox started for this task, so nothing ran, and nothing is counted against the run's cap"], agent);
+    assert.deepEqual([done.run.charged_usd, done.run.measured_usd, done.run.reserved_usd, done.run.charged_note, done.scoreboard.cost_usd], [0, 0, 0, null, null], agent);
+    assert.equal(w.sandboxes.sandboxes.size, 0, agent);
+    const again = await w.call("start_benchmark_run", { agent: agent === "product-desk" ? "algorithm-explorer" : "product-desk", cap_usd: 20 });
+    assert.equal(again.isError, true, agent);
+    assert.match(again.data.error, /sandbox host's allowance is used up: the last benchmark run to ask it for a sandbox .* start the run with host_restored: true/, agent);
+  }
+});
+
 // ---- a task's cap is clamped inside the services themselves ----
 
 test("a task's cap is the service's own job cap, the budget the agent is launched with and the cap the agent proxy meters against: builds, the desk and the connector", async () => {

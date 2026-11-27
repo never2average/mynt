@@ -8280,7 +8280,7 @@
     {
       "name": "get_benchmark_run",
       "title": "A benchmark run's scoreboard",
-      "description": "Admin: one benchmark run: the agent, task set, model and the content hash of each agent workspace folder it ran with, its cap and what the cap has counted, why it stopped if it did, its scoreboard, and every task with its outcome, the check that failed, whether the failure was the agent's or the infrastructure's, each of Mynt's checks, cost and duration.",
+      "description": "Admin: one benchmark run: the agent, task set, model and the content hash of each agent workspace folder it ran with, its cap and what the cap has counted (what was measured, and apart from it what was only reserved for a task whose cost couldn't be measured after work ran: never shown as money spent; a task that never got a sandbox counts nothing), why it stopped if it did, its scoreboard, and every task with its outcome, the check that failed, whether the failure was the agent's or the infrastructure's, each of Mynt's checks, cost and duration.",
       "area": "admin",
       "roles": [
         "admin"
@@ -10471,7 +10471,7 @@
     {
       "name": "list_benchmark_runs",
       "title": "Agent benchmark runs",
-      "description": "Admin: the agent benchmark runs, newest first, each with its scoreboard (tasks passed and failed on the agent's own account, the pass rate over those, infrastructure failures and tasks not run listed apart, cost and time), plus every agent that has a task set: how many tasks, each task's id, what a run needs, whether one could start here now (and if not, why), and its budget: what the whole set could cost at most against BENCHMARK_CAP_USD, how many tasks that cap is sure to cover in full, and a plain statement when it can't cover even one. Also the benchmarks' own records (their account, apps, stand-in firm and draft products), which no other list shows. A figure nothing measured is null with a note saying why, never 0.",
+      "description": "Admin: the agent benchmark runs, newest first, each with its scoreboard (tasks passed and failed on the agent's own account, the pass rate over those, infrastructure failures and tasks not run listed apart, cost and time), plus every agent that has a task set: how many tasks, each task's id, what a run needs, whether one could start here now (can_start, and if not, why: that includes the sandbox host's allowance being used up when a real build or a benchmark run of any agent last asked it for a sandbox), and its budget: what the whole set could cost at most against BENCHMARK_CAP_USD, how many tasks that cap is sure to cover in full, and a plain statement when it can't cover even one. Also the benchmarks' own records (their account, apps, stand-in firm and draft products), which no other list shows. A figure nothing measured is null with a note saying why, never 0.",
       "area": "admin",
       "roles": [
         "admin"
@@ -18440,7 +18440,7 @@
             }
           },
           "host_restored": {
-            "description": "Say true once the sandbox host's allowance, used up when a build last ran, has been restored",
+            "description": "Say true once the sandbox host's allowance, used up when a build or a benchmark run last asked it for a sandbox, has been restored",
             "type": "boolean"
           }
         },

@@ -37,6 +37,8 @@ import {
   TASK_STATUS_LABELS,
   usdDeltaWords,
   usdWords,
+  countedWords,
+  taskBudgetWords,
   whenWords,
   type BenchmarkAgentInfo,
   type BenchmarkComparison,
@@ -173,7 +175,7 @@ export function StartRunSheet({ open, agents, maxCapUsd, onClose, onDone, fetche
           </Field>
           <label className="flex items-start gap-2 text-sm">
             <input type="checkbox" checked={restored} onChange={(e) => setRestored(e.target.checked)} className="mt-1" data-start-run-restored />
-            <span>The sandbox host&apos;s allowance has been restored. Tick this only if Mynt refused the run because the allowance was used up, and billing has been added since.</span>
+            <span>The sandbox host&apos;s allowance has been restored. Tick this only if Mynt refused the run because the allowance was used up (when a build or a benchmark run last asked the host for a sandbox), and billing has been added since.</span>
           </label>
           <div>
             <Button type="submit" disabled={action.busy || !ok} data-start-run-submit>
@@ -470,7 +472,7 @@ export function BenchmarkRunView({
           ["Pass rate", rateWords(s.passRate, s.passRateNote)],
           ["Not counted", `${s.infrastructureFailures} infrastructure, ${s.harnessFailures} benchmark, ${s.notRun} not run`],
           ["Cost", usdWords(s.costUsd, s.costNote)],
-          ["Cap", `US$${run.capUsd} (US$${run.chargedUsd.toFixed(2)} counted)`],
+          ["Cap", countedWords(run)],
           ["Median task time", durationWords(s.medianDurationMs, s.durationNote)],
           ["Model", run.model ?? "Not recorded"],
           ["Workspace folders", revisions.length ? <span title={revisions.map(([w, h]) => `${w}: ${h}`).join("\n")}>{revisions.map(([w, h]) => `${w} ${h.slice(0, 10)}`).join(", ")}</span> : "Not recorded"],
@@ -543,7 +545,9 @@ export function BenchmarkRunView({
                 ran ? part(t, "agent_model") : "Not run yet",
                 ran ? part(t, "sandboxes") : "Not run yet",
                 ran ? part(t, "mynt_audit") : "Not run yet",
-                t.capUsd === null ? "Not set: the task never started" : `US$${t.capUsd}`,
+                <span key="b" data-task-budget={t.reservedUsd !== null ? "reserved" : "plain"}>
+                  {taskBudgetWords(t)}
+                </span>,
               ]
             })}
           />

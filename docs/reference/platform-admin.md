@@ -238,7 +238,7 @@ The page has three tabs, each one table, with a search box and **Start run** abo
 
 While an Ask AI run is going, its page must stay open: the page itself asks Studio to answer each question in turn, and shows one line saying which.
 
-A run opens at `/platform/benchmarks/<id>`: a card with the run's facts (agent, task set, model, workspace folders' hashes, cap and what it has counted, why it stopped), then four tabs, each a table.
+A run opens at `/platform/benchmarks/<id>`: a card with the run's facts (agent, task set, model, workspace folders' hashes, cap and what it has counted, why it stopped). Where the cap counted a task's whole budget because its cost couldn't be measured after work ran, the card says how much was measured and how much was reserved, not measured, and the Cost tab marks that task's budget the same way: a reservation is never shown as money spent, then four tabs, each a table.
 
 | Tab | Shows |
 | --- | --- |
