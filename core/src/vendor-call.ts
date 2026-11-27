@@ -16,6 +16,7 @@ export interface VendorCallOptions {
   anyPort?: boolean; // webhooks: https on any port (vendors serve on 443 only)
   anyBody?: boolean; // webhooks: the receiver's answer needn't be JSON
   rawBody?: boolean; // public registers' files: the answer comes back as text, not parsed
+  appAddress?: (appId: string) => string | null; // tests only: where a hosted app answers, instead of its hosted address
   timeoutMs?: number; // default 10 s
   maxResponseBytes?: number; // default 256 KiB
 }
@@ -127,13 +128,16 @@ export interface VendorResult {
 // POST <base>/v1/<service_type_key> with the signed JSON body. The credential, when there is one, goes as
 // Authorization: Bearer and nowhere else.
 export async function callVendor(
-  req: { base_url: string; service_type: string; body: unknown; signing_secret: string; credential?: string | null; signature?: string },
+  req: { base_url: string; service_type: string; body: unknown; signing_secret: string; credential?: string | null; signature?: string; exact_url?: boolean },
   opts: VendorCallOptions = {},
 ): Promise<VendorResult> {
   const payload = JSON.stringify(req.body);
   const headers: Record<string, string> = { "User-Agent": "Mynt-Vendor-Client/1", "Mynt-Signature": req.signature ?? signBody(req.signing_secret, payload) };
-  if (req.credential) headers.Authorization = `Bearer ${req.credential}`;
-  return safePost(`${req.base_url.replace(/\/+$/, "")}/v1/${req.service_type}`, payload, headers, opts);
+  // An offering served by the vendor's own hosted app (exact_url) is authenticated by Mynt-Signature alone: no
+  // credential, and never an app key (Mynt holds none of its own to send; the edge adds one only to the app's calls out).
+  if (req.credential && !req.exact_url) headers.Authorization = `Bearer ${req.credential}`;
+  // exact_url: the offering's endpoint is the whole address (the app's hosted address and Mynt's fixed path).
+  return safePost(req.exact_url ? req.base_url : `${req.base_url.replace(/\/+$/, "")}/v1/${req.service_type}`, payload, headers, opts);
 }
 
 // One JSON POST under the outbound rules above: resolved and checked first, connected to the checked address
