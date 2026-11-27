@@ -129,6 +129,8 @@ Set `MYNT_PSEUDONYM_SECRET` to a long random string (for example the output of `
 
 Set `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY` and `PUBLIC_URL` (the server's public origin, for example `https://mcp.example.com`), and the HTTP server accepts only invited people signed in with [Clerk](https://clerk.com). The rule itself, and what public sign-up changes, is in [Invite-only sign-in](workspaces-and-sign-in.md#invite-only-sign-in).
 
+`CLERK_PUBLISHABLE_KEY` says sign-in is meant to be on. If it is set and no `CLERK_SECRET_KEY` can be read at start-up (the environment doesn't set it, and the [key vault](platform-admin.md#the-key-vault) has none it can open, for example after the vault key changed), the HTTP server refuses to start and says why, rather than start without sign-in. To run without sign-in on purpose (local and development use), set neither.
+
 ### How it works
 
 - The server is an OAuth-protected resource with Clerk as its authorization server. MCP clients (Claude, Claude Code and others) discover this from `/.well-known/oauth-protected-resource/mcp`, register themselves with Clerk and open Clerk's sign-in page.
@@ -452,6 +454,8 @@ Mynt's settings are kept in three places.
 | `CONFIDENTIAL_HOST`, `CONFIDENTIAL_HOST_URL`, `CONFIDENTIAL_HOST_CLIENT_CERT`, `CONFIDENTIAL_HOST_CLIENT_KEY`, `CONFIDENTIAL_HOST_CLIENT_CA`, `CONFIDENTIAL_HOST_KMS_KEY` | They are read before the vault opens; the certificate and key are files on the server's disk |
 | `GOOGLE_APPLICATION_CREDENTIALS` | It names a key file on the server's disk |
 | `FINANCIAL_PRODUCTS_TOKEN` | It says who is running the stdio command |
+
+`TRUSTED_PROXY_HEADER` names the request header your reverse proxy sets with the caller's address (its last value is used, as Mynt Studio does). Limits kept per caller address, such as the public attestation relay's, use it; without it every request behind a proxy counts as one caller, the proxy.
 
 Identifiers that go with a vault key but aren't secret stay in the environment too: `CLERK_PUBLISHABLE_KEY`, `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `TURNKEY_ORGANIZATION_ID` and `TURNKEY_API_PUBLIC_KEY`.
 

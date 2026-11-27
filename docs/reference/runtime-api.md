@@ -170,6 +170,15 @@ An app key belongs on the builder's server. A customer's browser or phone gets a
 
 It returns a `mcs_…` secret to send to the device.
 
+### Program agreements on live keys
+
+A live key is served a product a licence provider sponsors only while the app has a signed program agreement in force with each of its sponsors (see [Production needs program agreements](agreements.md#production-needs-program-agreements)). This is the promotion check, asked again on each live call, so a product added after promotion, or one whose agreement has ended, expired or was signed only in e-signature test mode, isn't served to real customers.
+
+- `GET /v1/products` leaves the product out.
+- `POST /v1/client_sessions`, the product's own routes, `POST /v1/handoffs` and `POST /v1/events` answer `403 program_agreement_required`, naming the product and the sponsor.
+- A client session already open isn't cut off; it expires within the hour, and no new one can be minted.
+- Sandbox keys are never asked.
+
 ### Routes for a device
 
 The device calls `/v1/client/*` with that secret, and only from the origins the app's key allows.

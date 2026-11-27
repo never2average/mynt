@@ -207,3 +207,82 @@ export const go = (s: string) => createMyntBrowserClient({ clientSecret: s }).st
     w.close();
   }
 });
+
+// ---- live keys: a sponsored product only under a signed program agreement in force ----
+
+test("a live key isn't served a sponsored product without a program agreement in force (never signed, ended, or signed only in test mode); sandbox keeps working", async () => {
+  const { randomUUID } = await import("node:crypto");
+  const { inProduction } = await import("./helpers.js");
+  const w = await world();
+  try {
+    const { api, store, app } = w;
+    const T = "financial_products";
+    const dev = (await store.getApp(app.id)).owner_id;
+    // The app is live: in production, published, with a live key. Nobody sponsors its product yet.
+    await inProduction(store, app.id);
+    await store.db.query(`UPDATE ${T}.apps SET status = 'published' WHERE id = $1`, [app.id]);
+    const live = (await store.createApiKey(dev, { app_id: app.id, environment: "live", label: "prod", allowed_origins: [ORIGIN] })).secret;
+    assert.match(live, /^mynt_live_/);
+    const mint = (key) => api("POST", "/v1/client_sessions", key, { product_ids: ["everyday-rd"], scopes: ["view_offers"] });
+    const listed = async (key) => (await api("GET", "/v1/products", key)).body.products.map((p) => p.id);
+    assert.equal((await mint(live)).status, 201, "a product nobody sponsors needs no agreement");
+
+    // A licence provider's sponsorship of the product is approved: from now on real customers need its agreement.
+    const sponsor = await store.createEntity(null, { name: "Sponsor Bank", registration_numbers: {}, regions: ["IN"] });
+    const builder = await store.createEntity(null, { name: "Builder Inc", registration_numbers: {}, regions: ["IN"] });
+    await store.db.query(
+      `INSERT INTO ${T}.sponsorships (id, product_id, component_key, builder_entity_id, provider_entity_id, jurisdictions, status) VALUES ($1, 'everyday-rd', 'main', $2, $3, ARRAY['in'], 'approved')`,
+      [randomUUID(), builder.id, sponsor.id],
+    );
+    const refused = await mint(live);
+    assert.equal(refused.status, 403, JSON.stringify(refused.body));
+    assert.equal(refused.body.error, "program_agreement_required");
+    assert.match(refused.body.message, /No signed program agreement with Sponsor Bank for /);
+    assert.match(refused.body.message, /Sandbox keys still work/);
+    assert.deepEqual(await listed(live), [], "not in the live catalogue either");
+    assert.equal((await api("GET", "/v1/products/everyday-rd/contract", live)).body.error, "program_agreement_required");
+    assert.equal((await api("POST", "/v1/handoffs", live, { product_id: "everyday-rd", action: "deep_link" })).body.error, "program_agreement_required");
+    // Sandbox is untouched.
+    assert.equal((await mint(w.key)).status, 201);
+    assert.deepEqual(await listed(w.key), ["everyday-rd"]);
+
+    // A signed agreement in force with that sponsor, covering the product: served.
+    const agreement = randomUUID();
+    const workspace = (await store.getApp(app.id)).workspace_id;
+    await store.db.query(
+      `INSERT INTO ${T}.app_agreements (id, workspace_id, app_id, counterparty_entity_id, kind, products, terms_summary, status, signed_at, app_signed_at, counterparty_signed_at, proposed_by_side, scopes)
+       VALUES ($1, $2, $3, $4, 'program', '["everyday-rd"]', 'The sponsor''s program', 'signed', now(), now(), now(), 'app', ARRAY['technology'])`,
+      [agreement, workspace, app.id, sponsor.id],
+    );
+    const minted = await mint(live);
+    assert.equal(minted.status, 201, JSON.stringify(minted.body));
+    assert.match(minted.body.client_secret, /^mcs_live_/);
+    assert.deepEqual(await listed(live), ["everyday-rd"]);
+
+    // Signed only in the e-signature service's test mode: not binding, so not served.
+    await store.db.query(`INSERT INTO ${T}.app_agreement_documents (agreement_id, provider, test_mode, status, completed_at) VALUES ($1, 'signwell', true, 'completed', now())`, [agreement]);
+    const test = await mint(live);
+    assert.equal(test.body.error, "program_agreement_required");
+    assert.match(test.body.message, /test mode/);
+    await store.db.query(`UPDATE ${T}.app_agreement_documents SET test_mode = false WHERE agreement_id = $1`, [agreement]);
+    assert.equal((await mint(live)).status, 201);
+
+    // The sponsor ends it after the app went live: no new live sessions on that product, and it leaves the live
+    // catalogue; a customer session already open runs out on its own (within the hour), and sandbox still works.
+    await store.db.query(`UPDATE ${T}.app_agreements SET status = 'terminated', terminated_at = now(), termination_reason = 'Program wound down' WHERE id = $1`, [agreement]);
+    const after = await mint(live);
+    assert.equal(after.status, 403);
+    assert.match(after.body.message, /it was ended on .*Program wound down/);
+    assert.deepEqual(await listed(live), []);
+    assert.equal((await api("GET", "/v1/client/offers", minted.body.client_secret)).status, 200, "an open session isn't cut off mid-flow");
+    assert.equal((await mint(w.key)).status, 201);
+
+    // Expired counts the same.
+    await store.db.query(`UPDATE ${T}.app_agreements SET status = 'signed', terminated_at = NULL, effective_to = current_date - 1 WHERE id = $1`, [agreement]);
+    assert.equal((await mint(live)).body.error, "program_agreement_required");
+    await store.db.query(`UPDATE ${T}.app_agreements SET effective_to = NULL WHERE id = $1`, [agreement]);
+    assert.equal((await mint(live)).status, 201);
+  } finally {
+    w.close();
+  }
+});

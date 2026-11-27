@@ -237,6 +237,7 @@ The agreement and the subscription end together.
 ### What vendors and older subscribers see
 
 - Vendors see their subscribers with the version and scopes each accepted, per app, in `list_my_subscribers`' `terms_accepted`, and the agreements in `list_app_agreements` without `app_id`.
+- `vendor_contracts` lists the subscriptions of the workspace's own firms (its owners'; the app owner's for an app in no workspace) and any subscription whose terms were accepted for the app. A member from another firm doesn't bring that firm's subscriptions into the workspace's view, there or in the app's risk signals.
 - Subscriptions made before an offering had terms stay as they were. `list_app_agreements`' `vendor_contracts` flags them `no_standard_terms: true`, and `terms_accepted` is `null` elsewhere.
 - A negotiated `vendor` agreement (`propose_app_agreement`) is still possible beside a click-through one.
 

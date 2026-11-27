@@ -1,3 +1,20 @@
+import type { IncomingMessage } from "node:http";
+
+// The address a request came from, for limits kept per caller. Behind a proxy every request arrives from the proxy's
+// own address, so the operator names the header their proxy sets in TRUSTED_PROXY_HEADER (the same setting Mynt Studio
+// reads): its last value is used, because a proxy that appends (as with x-forwarded-for) adds the address it saw at
+// the end, after anything the caller sent. Without the setting, a header is never believed: the socket's address.
+export function callerAddress(req: Pick<IncomingMessage, "headers" | "socket">, env: NodeJS.ProcessEnv = process.env): string {
+  const name = env.TRUSTED_PROXY_HEADER?.trim().toLowerCase();
+  const raw = name ? req.headers[name] : undefined;
+  const last = (Array.isArray(raw) ? raw.join(",") : (raw ?? ""))
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean)
+    .at(-1);
+  return (last && last.length <= 64 ? last : (req.socket.remoteAddress ?? "unknown")).toLowerCase();
+}
+
 // Token bucket per key: `capacity` requests at once, refilled at `perMinute`.
 export class RateLimiter {
   private buckets = new Map<string, { tokens: number; at: number }>();

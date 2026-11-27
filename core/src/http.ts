@@ -15,6 +15,7 @@ import { createRuntimeApi, type RuntimeApiOptions } from "./runtime-api.js";
 import { createServer } from "./server.js";
 import { llmsFullCache, llmsTxt } from "./llms-txt.js";
 import { validNonce } from "./confidential/shared/binding.js";
+import { callerAddress, RateLimiter } from "./rate-limit.js";
 import type { Store, User } from "./store.js";
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
@@ -213,16 +214,23 @@ export function createMcpHttpServer(
 
 // GET /confidential/attestation?nonce=<16-64 URL-safe characters>: the confidential host's attestation, as it gave it
 // (Mynt's server only relays it, so it can't change what partners check), with the releases in effect. Public: it names
-// no secret. One a second across all callers, because each one asks the cloud's attestation service for a token.
+// no secret. Each one asks the cloud's attestation service for a token, so it's limited: one a second per caller address
+// (rate-limit.ts callerAddress: the proxy's trusted header where the operator names one, else the connection's), so
+// one caller can't keep everyone else from checking, and ATTESTATIONS_PER_SECOND across all callers as the ceiling.
 export const CONFIDENTIAL_ATTESTATION_PATH = "/confidential/attestation";
-let lastAttestation = 0;
+export const ATTESTATIONS_PER_SECOND = 5;
+// Kept for the whole process, like the one limit they replace: the confidential host is one, however many servers ask.
+const attestationLimits = { caller: new RateLimiter(1, 60), all: new RateLimiter(ATTESTATIONS_PER_SECOND, ATTESTATIONS_PER_SECOND * 60) };
 async function confidentialAttestation(ctx: AdminContext, req: IncomingMessage, res: ServerResponse, url: URL) {
+  const limits = attestationLimits;
   const host = ctx.confidential ?? null;
   if (!host) return sendJson(res, 404, { error: "not_configured", message: "This Mynt has no confidential host" });
   const nonce = url.searchParams.get("nonce");
   if (!validNonce(nonce)) return sendJson(res, 400, { error: "bad_nonce", message: "nonce: 16 to 64 characters of A-Z, a-z, 0-9, - and _" });
-  if (Date.now() - lastAttestation < 1000) return sendJson(res, 429, { error: "rate_limited", message: "One attestation a second: try again shortly" }, { "Retry-After": "1" });
-  lastAttestation = Date.now();
+  const wait = limits.caller.take(callerAddress(req));
+  if (wait) return sendJson(res, 429, { error: "rate_limited", message: "One attestation a second: try again shortly" }, { "Retry-After": String(wait) });
+  const busy = limits.all.take("all");
+  if (busy) return sendJson(res, 429, { error: "rate_limited", message: "Too many attestations are being asked for just now: try again shortly" }, { "Retry-After": String(busy) });
   try {
     const attestation = await host.attest(nonce);
     const releases = ctx.confidentialReleases ? (await ctx.confidentialReleases.list()).filter((r) => r.valid && !r.withdrawn_at).map((r) => ({ image_digest: r.image_digest, pcrs: r.pcrs, release: r.release, effective_at: r.effective_at, in_effect: r.in_effect })) : [];

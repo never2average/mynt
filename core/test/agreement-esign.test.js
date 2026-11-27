@@ -69,10 +69,10 @@ function fakeService() {
   return { docs, calls, fetch, sign };
 }
 
-async function setup({ esign = true } = {}) {
+async function setup({ esign = true, testMode = true } = {}) {
   const service = fakeService();
   const provider = createSignWell({ apiKey: "fake-key", webhookId: HOOK, fetch: service.fetch });
-  const ctxEsign = esign ? { provider, testMode: true } : null;
+  const ctxEsign = esign ? { provider, testMode } : null;
   const pg = new PGlite();
   const store = await Store.open({ query: (s, p) => pg.query(s, p), exec: (s) => pg.exec(s), close: () => pg.close() }, CATALOG);
   const call = async (client, name, args = {}) => {
@@ -397,4 +397,113 @@ test("a licence provider proposes on its own template: the document is made from
   refused(await w.lp.call("get_agreement_signing_link", { agreement_id: a.id }), /Lars signs this for your side/);
   assert.ok(ok(await w.lp2.call("get_agreement_signing_link", { agreement_id: a.id })).signing_url);
   assert.ok(ok(await w.dev.call("get_agreement_signing_link", { agreement_id: a.id })).signing_url);
+});
+
+// ---- a signature made in test mode isn't binding ----
+
+// Propose, accept and complete the e-signature of a program agreement for the app.
+const esigned = async (w, extra = {}) => {
+  const a = ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, scopes: ["technology"], kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product", ...extra }));
+  ok(await w.lp.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }));
+  const docId = [...w.service.docs.keys()].at(-1);
+  w.service.sign(docId, "1");
+  w.service.sign(docId, "2");
+  assert.equal((await w.webhook(event("document_completed", docId))).status, 200);
+  return a;
+};
+
+test("an agreement signed in e-signature test mode is signed but doesn't count for production; one signed with test mode off does", async () => {
+  const productName = CATALOG.find((p) => p.id === "savings-account").name;
+  const coverage = async (w) => ok(await w.dev.call("list_app_agreements", { app_id: w.app.id }));
+  const gate = async (w) => ok(await w.dev.call("get_promotion_checks", { app_id: w.app.id, to_stage: "production" })).checks.find((c) => c.id === "program_agreements");
+
+  // Test mode (the default): the document completes and the agreement reads signed...
+  const t = await setup();
+  await t.store.db.query(`INSERT INTO ${T}.app_promotions (app_id, stage) VALUES ($1, 'staging')`, [t.app.id]);
+  ok(await t.lp.call("upload_agreement_template", upload));
+  const a = await esigned(t);
+  let listed = await coverage(t);
+  assert.equal(listed.agreements[0].status, "signed");
+  assert.equal(listed.agreements[0].signature_document.test_mode, true);
+  // ...but it isn't binding, so production still waits, and says why in plain words.
+  const [row] = listed.program_coverage;
+  assert.deepEqual([row.covered, row.signed_in_test_mode, row.agreement_id], [false, true, a.id]);
+  assert.match(row.note, /test mode.*isn't legally binding/);
+  assert.deepEqual(listed.production_gate.met, false);
+  const check = await gate(t);
+  assert.equal(check.status, "fail");
+  assert.equal(check.detail, `The program agreement with Sponsor Bank for ${productName} doesn't count for production: ${row.note}`);
+  assert.match(check.detail, /end it and sign a new one once a platform admin has turned test mode off/);
+  // A production app that only has such an agreement is flagged to operators like one with none.
+  const { opsStatus } = await import("../dist/ops.js");
+  await t.store.db.query(`UPDATE ${T}.app_promotions SET stage = 'production' WHERE app_id = $1`, [t.app.id]);
+  assert.deepEqual((await opsStatus(t.store.db)).apps.production_without_program_agreements.map((x) => x.app_id), [t.app.id]);
+
+  // Test mode off: the same flow counts.
+  const live = await setup({ testMode: false });
+  await live.store.db.query(`INSERT INTO ${T}.app_promotions (app_id, stage) VALUES ($1, 'staging')`, [live.app.id]);
+  ok(await live.lp.call("upload_agreement_template", upload));
+  await esigned(live);
+  listed = await coverage(live);
+  assert.equal(listed.agreements[0].signature_document.test_mode, false);
+  assert.deepEqual([listed.program_coverage[0].covered, listed.program_coverage[0].signed_in_test_mode], [true, false]);
+  assert.equal((await gate(live)).status, "pass");
+  await live.store.db.query(`UPDATE ${T}.app_promotions SET stage = 'production' WHERE app_id = $1`, [live.app.id]);
+  assert.deepEqual((await opsStatus(live.store.db)).apps.production_without_program_agreements, []);
+});
+
+// ---- nothing the parties wrote becomes a signer's field ----
+
+test("text tags written into the terms summary or a name never reach the signature document as tags", async () => {
+  const { withoutTextTags } = await import("../dist/agreement-esign.js");
+  for (const s of ["{{signature:1:y}}", "{{{t:2:n:label}}}", "a {{ b }} c", "}}{{", "{{{{x}}}}"]) {
+    const out = withoutTextTags(s);
+    assert.ok(!out.includes("{{") && !out.includes("}}"), `${s} → ${out}`);
+    assert.equal(out.replace(/ /g, ""), s.replace(/ /g, ""), "only spaces are added");
+  }
+  assert.equal(withoutTextTags("Rates {as agreed} apply"), "Rates {as agreed} apply");
+
+  const w = await setup();
+  // The firm's template places signatures by text tags, so the service reads tags anywhere in the document's text.
+  ok(await w.lp.call("upload_agreement_template", { ...upload, signature_placement: "text_tags" }));
+  await w.store.db.query(`UPDATE ${T}.apps SET name = 'Pay app {{signature:1:y}}' WHERE id = $1`, [w.app.id]);
+  await w.store.db.query(`UPDATE ${T}.entities SET name = 'Sponsor Bank {{date:2:y}}' WHERE id = $1`, [w.lpFirm.id]);
+  await w.store.db.query(`UPDATE ${T}.users SET name = 'Dana {{initials:1:y}}' WHERE id = $1`, [w.dev.user.id]);
+  const a = ok(await w.dev.call("propose_app_agreement", { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, scopes: ["technology"], kind: "program", products: ["savings-account"], terms_summary: "Standard program. {{signature:1:y}} {{text:1:y:fee waiver}}" }));
+  ok(await w.lp.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }));
+  const [created] = w.service.calls.filter((c) => c.method === "POST");
+  assert.equal(created.body.text_tags, true);
+  const schedule = Buffer.from(created.body.files.find((f) => f.name === "program-schedule.pdf").file_base64, "base64").toString("latin1");
+  assert.ok(!schedule.includes("{{") && !schedule.includes("}}"), "no tag survives into the schedule");
+  for (const kept of ["Standard program.", "Pay app", "Sponsor Bank"]) assert.ok(schedule.includes(kept), kept);
+  // The licence provider's own file is sent as uploaded: its tags are the firm's to place.
+  assert.equal(Buffer.from(created.body.files[0].file_base64, "base64").toString(), PDF.toString());
+});
+
+// ---- a vendor at the sponsor's firm has no part in its program agreements ----
+
+test("signing links and signed copies of a program agreement are the sponsor's licence providers', never a vendor's at that firm", async () => {
+  const w = await setup();
+  ok(await w.lp.call("upload_agreement_template", upload));
+  const { user } = await w.store.createUser("Vic", ["vendor"]);
+  await w.store.setUserEntity(user.id, w.lpFirm.id);
+  const [c, s] = InMemoryTransport.createLinkedPair();
+  await createServer(w.store, await w.store.getUser(user.id), { esign: { provider: createSignWell({ apiKey: "fake-key", webhookId: HOOK, fetch: w.service.fetch }), testMode: true } }).connect(s);
+  const client = new Client({ name: "agreement-esign-vendor", version: "0" });
+  await client.connect(c);
+  const vic = async (name, args = {}) => {
+    const res = await client.callTool({ name, arguments: args });
+    let data;
+    try {
+      data = JSON.parse(res.content[0].text);
+    } catch {
+      data = { error: res.content[0].text };
+    }
+    return { isError: res.isError ?? false, data };
+  };
+  const a = await esigned(w);
+  refused(await vic("get_agreement_signing_link", { agreement_id: a.id }), /No agreement/);
+  refused(await vic("download_agreement_document", { agreement_id: a.id }), /No agreement/);
+  assert.deepEqual(ok(await vic("list_app_agreements")).agreements, []);
+  assert.ok(ok(await w.lp2.call("download_agreement_document", { agreement_id: a.id })).content_base64, "the firm's licence providers still read it");
 });

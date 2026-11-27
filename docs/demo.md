@@ -46,6 +46,8 @@ The licence provider proposes the routes money may take (in and out, New York an
 
 ### Step 4: customers
 
+A developer builds an app on the product. Because the product is sponsored, the app's workspace and the licence provider first sign a program agreement for it: an app serves real customers on a sponsored product only while one is in force.
+
 - Avery passes an identity check that says they live in New York. They deposit $250 and take a $100 payout.
 - Blake's identity check fails, so their deposit is refused.
 - Casey is verified but lives in Texas, where the product isn't sponsored, so their deposit is refused too.

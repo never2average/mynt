@@ -562,3 +562,104 @@ test("update_agreement_scopes: only the proposing side, only while proposed, not
   refused(await w.otherLp.call("update_agreement_scopes", { agreement_id: msa.id, scopes: ["technology"] }), /No agreement/);
   assert.deepEqual(ok(await w.lp.call("update_agreement_scopes", { agreement_id: msa.id, scopes: ["financial_regulatory_operations"] })).scope_labels, ["Financial regulatory operations"]);
 });
+
+// ---- a production app's products stay under the gate after promotion ----
+
+test("production: a sponsored product joins a production app only with its sponsor's signed agreement (update_app, request_product_access)", async () => {
+  const w = await setup();
+  const productName = CATALOG.find((p) => p.id === "savings-account").name;
+  // An app on the unsponsored product only, already in production.
+  const solo = await w.store.createApp(w.dev.user.id, { name: "Deposits", description: "d", audience: "a", product_ids: ["fixed-deposit"] }, w.workspace);
+  await w.store.db.query(`INSERT INTO ${T}.app_promotions (app_id, stage) VALUES ($1, 'production')`, [solo.id]);
+  const products = async () => (await w.store.getApp(solo.id)).product_ids;
+
+  // Adding the sponsored product without an agreement is refused, naming the sponsor and the product; nothing changes.
+  const add = { app_id: solo.id, product_ids: ["fixed-deposit", "savings-account"] };
+  const r = await w.dev.call("update_app", add);
+  refused(r, /in production/);
+  assert.ok(r.data.error.includes(`No signed program agreement with Sponsor Bank for ${productName}`), r.data.error);
+  assert.match(r.data.error, /propose_app_agreement/);
+  assert.deepEqual(await products(), ["fixed-deposit"]);
+  // Asking for access to it (which would put it on the app) is refused the same way, and makes no request. (A product
+  // with an owner whose access is by approval: a catalogue product with none is open to everyone.)
+  await w.store.db.query(`UPDATE ${T}.products SET owner_id = $1, access_mode = 'approval' WHERE id = 'savings-account'`, [w.otherLp.user.id]);
+  refused(await w.dev.call("request_product_access", { app_id: solo.id, product_id: "savings-account", note: "n" }), /No signed program agreement with Sponsor Bank/);
+  assert.deepEqual(await products(), ["fixed-deposit"]);
+  assert.deepEqual(ok(await w.dev.call("list_my_requests")), [], "no request was made");
+  await w.store.db.query(`UPDATE ${T}.products SET owner_id = NULL, access_mode = 'open' WHERE id = 'savings-account'`);
+  // Other changes to a production app still go through, and so does a product no licence provider sponsors.
+  ok(await w.dev.call("update_app", { app_id: solo.id, description: "Deposits, explained" }));
+  ok(await w.dev.call("update_app", { app_id: solo.id, product_ids: ["fixed-deposit"] }));
+
+  // The agreement comes first: a program agreement may name the product the app is about to add (its sponsor's),
+  // never another product, and no other kind of agreement runs ahead of the app's products.
+  const proposal = { app_id: solo.id, counterparty_entity_id: w.lpFirm.id, scopes: ["technology"], kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" };
+  refused(await w.dev.call("propose_app_agreement", { ...proposal, products: ["auto-loan-x"] }), /doesn't use/);
+  refused(await w.dev.call("propose_app_agreement", { ...proposal, kind: "data_sharing" }), /doesn't use/);
+  refused(await w.dev.call("propose_app_agreement", { ...proposal, counterparty_entity_id: w.otherFirm.id }), /doesn't use/);
+  const a = ok(await w.dev.call("propose_app_agreement", proposal));
+  ok(await w.lp.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }));
+  refused(await w.dev.call("update_app", add), /waiting for both signatures/);
+  ok(await w.dev.call("sign_app_agreement", { agreement_id: a.id }));
+  ok(await w.lp.call("sign_app_agreement", { agreement_id: a.id }));
+  ok(await w.dev.call("update_app", add));
+  assert.deepEqual(await products(), ["fixed-deposit", "savings-account"]);
+
+  // An app not in production adds it freely: promotion is where it's checked.
+  const draft = await w.store.createApp(w.dev.user.id, { name: "Draft", description: "d", audience: "a", product_ids: ["fixed-deposit"] }, w.workspace);
+  await w.store.db.query(`INSERT INTO ${T}.app_promotions (app_id, stage) VALUES ($1, 'staging')`, [draft.id]);
+  ok(await w.dev.call("update_app", { app_id: draft.id, product_ids: ["fixed-deposit", "savings-account"] }));
+});
+
+// ---- only the sponsor's licence providers act on a program agreement ----
+
+test("a vendor at the sponsor's firm can't answer, sign, end or read a program agreement; a licence provider without standing can't either", async () => {
+  const w = await setup();
+  const { user: vicUser } = await w.store.createUser("Vic", ["vendor"]);
+  await w.store.setUserEntity(vicUser.id, w.lpFirm.id);
+  // Someone given the licence-provider role at the firm whom its licence providers haven't accepted yet (no standing),
+  // and who is a vendor too. The firm's own licence provider has standing.
+  const { user: penUser } = await w.store.createUser("Pen", ["license_provider", "vendor"]);
+  await w.store.setUserEntity(penUser.id, w.lpFirm.id);
+  await w.store.db.query(`UPDATE ${T}.users SET lp_since = NULL WHERE id = $1`, [penUser.id]);
+  await w.store.db.query(`UPDATE ${T}.users SET lp_since = now() WHERE id = $1`, [w.lp.user.id]);
+  assert.deepEqual((await w.store.getUser(penUser.id)).roles, ["vendor"], "no standing: the licence-provider role doesn't count");
+  const connect = async (id) => {
+    const [c, s] = InMemoryTransport.createLinkedPair();
+    await createServer(w.store, await w.store.getUser(id)).connect(s);
+    const client = new Client({ name: "app-agreements", version: "0" });
+    await client.connect(c);
+    return async (name, args = {}) => {
+      const res = await client.callTool({ name, arguments: args });
+      let data;
+      try {
+        data = JSON.parse(res.content[0].text);
+      } catch {
+        data = { error: res.content[0].text };
+      }
+      return { isError: res.isError ?? false, data };
+    };
+  };
+  const others = [await connect(vicUser.id), await connect(penUser.id)];
+  const proposal = { app_id: w.app.id, counterparty_entity_id: w.lpFirm.id, scopes: ["technology"], kind: "program", products: ["savings-account"], terms_summary: "Sponsor Bank's program for the savings product" };
+  const a = ok(await w.dev.call("propose_app_agreement", proposal));
+  for (const who of others) {
+    refused(await who("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }), /No agreement/);
+    refused(await who("terminate_app_agreement", { agreement_id: a.id, reason: "Not mine to end" }), /No agreement/);
+    assert.deepEqual(ok(await who("list_app_agreements")).agreements, [], "a program agreement isn't listed for them");
+  }
+  assert.equal((await w.store.db.query(`SELECT status FROM ${T}.app_agreements WHERE id = $1`, [a.id])).rows[0].status, "proposed");
+  ok(await w.lp.call("respond_to_app_agreement", { agreement_id: a.id, decision: "accept" }));
+  for (const who of others) {
+    refused(await who("sign_app_agreement", { agreement_id: a.id }), /No agreement/);
+    refused(await who("get_agreement_signing_link", { agreement_id: a.id }));
+    refused(await who("download_agreement_document", { agreement_id: a.id }), /No agreement/);
+    refused(await who("terminate_app_agreement", { agreement_id: a.id, reason: "Not mine to end" }), /No agreement/);
+  }
+  const row = (await w.store.db.query(`SELECT status, counterparty_signed_at FROM ${T}.app_agreements WHERE id = $1`, [a.id])).rows[0];
+  assert.deepEqual([row.status, row.counterparty_signed_at], ["accepted", null]);
+  // The firm's licence provider still does all of it.
+  ok(await w.dev.call("sign_app_agreement", { agreement_id: a.id }));
+  assert.equal(ok(await w.lp.call("sign_app_agreement", { agreement_id: a.id })).status, "signed");
+  assert.equal(ok(await w.lp.call("list_app_agreements")).agreements.length, 1);
+});

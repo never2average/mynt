@@ -306,3 +306,43 @@ test("standard terms name their scopes: required, part of the version, copied on
   assert.equal(next.terms.version, 2);
   assert.deepEqual((await agreementsOf(w.store, legacySub.subscription_id))[0].scopes, []);
 });
+
+// ---- a workspace sees its own firm's vendor services, never another member's firm's ----
+
+test("a member from another firm doesn't bring that firm's subscriptions into the workspace's view (the app's contracts, its risk signals)", async () => {
+  const w = await setup();
+  const workspace = (await w.store.getApp(w.app.id)).workspace_id;
+  // Someone from another firm, invited into the workspace as a member; their firm has a subscription of its own.
+  const guestFirm = await w.store.createEntity(null, { name: "Consultancy LLC", registration_numbers: {}, regions: ["US"] });
+  const { user: guestUser } = await w.store.createUser("Gil", ["developer"]);
+  await w.store.setUserEntity(guestUser.id, guestFirm.id);
+  await w.store.db.query(`INSERT INTO ${T}.workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')`, [workspace, guestUser.id]);
+  const [c, s] = InMemoryTransport.createLinkedPair();
+  await createServer(w.store, await w.store.getUser(guestUser.id)).connect(s);
+  const client = new Client({ name: "vendor-marketplace-guest", version: "0" });
+  await client.connect(c);
+  const guest = async (name, args = {}) => {
+    const res = await client.callTool({ name, arguments: args });
+    let data;
+    try {
+      data = JSON.parse(res.content[0].text);
+    } catch {
+      data = { error: res.content[0].text };
+    }
+    return { isError: res.isError ?? false, data };
+  };
+  const ours = ok(await w.dev.call("subscribe_vendor_service", { offering_id: await w.offering("identity_check", "Verify Co identity") })).subscription_id;
+  const theirs = ok(await guest("subscribe_vendor_service", { offering_id: await w.offering("identity_check", "Verify Co identity for consultancies") })).subscription_id;
+  assert.ok(ours && theirs && ours !== theirs);
+
+  for (const who of [w.dev.call, w.member.call, guest]) {
+    const contracts = ok(await who("list_app_agreements", { app_id: w.app.id })).vendor_contracts;
+    assert.deepEqual(contracts.map((x) => x.subscription_id), [ours], "only the workspace's own firm's subscription");
+    assert.ok(!JSON.stringify(contracts).includes("for consultancies"));
+  }
+  // Ended subscriptions are a risk signal around the app: the workspace's own firm's is one, the other firm's never.
+  await w.store.db.query(`UPDATE ${T}.vendor_subscriptions SET status = 'ended', ended_at = now() WHERE id = ANY($1::uuid[])`, [[ours, theirs]]);
+  const signals = ok(await w.member.call("list_risks", { subject_type: "app", subject_id: w.app.id })).signals.vendors;
+  assert.equal(signals.available, true);
+  assert.deepEqual(signals.rows.map((r) => r.subscription_id), [ours]);
+});

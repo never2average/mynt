@@ -39,6 +39,7 @@ const SECURITY = [
   "set_platform_key",
   "set_platform_key_refused",
   "remove_platform_key",
+  "remove_platform_key_refused",
   // an operational setting changed, old value to new (platform-settings.ts)
   "set_platform_setting",
   "rotate_partner_ledger_secret",

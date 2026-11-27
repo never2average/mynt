@@ -5,7 +5,7 @@
 // states) is a labelled action elsewhere (the top bar's Promote button and its sheet). Pure: the
 // route reads Mynt's replies into these shapes, and the tabs and the tests share them.
 import type { AppSignals, RiskRegister, Unavailable } from "./risk-register";
-import { esignOf, esignStatusLine, type EsignInfo } from "./agreement-esign";
+import { esignOf, esignStatusLine, SIGNED_IN_TEST_MODE, signedInTestMode, type EsignInfo } from "./agreement-esign";
 import type { AgreementAuditSummary } from "./agreement-audits";
 import { CHECK_LABELS, coverageFrom, type AgreementCoverage, type PromotionCheck } from "./promotions";
 
@@ -277,7 +277,7 @@ export function fromAgreements(reply: unknown): AppAgreements | null {
             id,
             counterparty: (isObj(a.counterparty) ? str(a.counterparty.name) : null) ?? "Unnamed firm",
             kind: AGREEMENT_KIND_LABELS[str(a.kind) ?? ""] ?? str(a.kind) ?? "Agreement",
-            status: AGREEMENT_STATUS_LABELS[statusKey] ?? statusKey,
+            status: signedInTestMode(statusKey, esign) ? SIGNED_IN_TEST_MODE : (AGREEMENT_STATUS_LABELS[statusKey] ?? statusKey),
             statusKey,
             products: arr(a.products).map((p) => (isObj(p) ? (str(p.name) ?? str(p.id)) : str(p) ? name(str(p)!) : null)).filter((p): p is string => Boolean(p)),
             from: str(a.effective_from),

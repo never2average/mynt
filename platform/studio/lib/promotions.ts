@@ -22,8 +22,9 @@ export const CHECK_TONE: Record<CheckStatus, "green" | "amber" | "red"> = { pass
 export type CheckFix = { label: string; href: string | null; external: boolean; tool: string | null };
 // The program_agreements check's rows: each product the app uses and the licence provider sponsoring it where the
 // app serves, and whether a signed program agreement in force covers it (production needs every one). `note` says
-// why the nearest agreement doesn't count, in Mynt's words.
-export type AgreementCoverage = { productId: string; productName: string; sponsorId: string; sponsorName: string; covered: boolean; agreementId: string | null; note: string | null };
+// why the nearest agreement doesn't count, in Mynt's words. `testSigned`: it is signed, but by an e-signature document
+// made in test mode, which isn't binding, so it doesn't count.
+export type AgreementCoverage = { productId: string; productName: string; sponsorId: string; sponsorName: string; covered: boolean; agreementId: string | null; note: string | null; testSigned?: boolean };
 export type PromotionCheck = { id: string; label: string; status: CheckStatus; detail: string | null; fix: CheckFix | null; coverage?: AgreementCoverage[] };
 
 export const PROGRAM_AGREEMENTS_CHECK = "program_agreements";
@@ -34,12 +35,13 @@ export function coverageFrom(v: unknown): AgreementCoverage[] {
     const productId = str(c.product_id);
     const sponsorId = str(c.sponsor_entity_id);
     if (!productId || !sponsorId) return [];
-    return [{ productId, productName: str(c.product_name) ?? productId, sponsorId, sponsorName: str(c.sponsor_name) ?? "Unnamed firm", covered: c.covered === true, agreementId: str(c.agreement_id), note: str(c.note) }];
+    return [{ productId, productName: str(c.product_name) ?? productId, sponsorId, sponsorName: str(c.sponsor_name) ?? "Unnamed firm", covered: c.covered === true, agreementId: str(c.agreement_id), note: str(c.note), ...(c.signed_in_test_mode === true ? { testSigned: true } : {}) }];
   });
 }
 
 /** One row's words: "Signed" or why not, as the check says it. */
-export const coverageText = (c: AgreementCoverage) => (c.covered ? "Signed and in force" : `No signed program agreement${c.note ? ` (${c.note})` : ""}`);
+export const coverageText = (c: AgreementCoverage) =>
+  c.covered ? "Signed and in force" : c.testSigned ? `Signed (test, not binding)${c.note ? `: ${c.note}` : ""}` : `No signed program agreement${c.note ? ` (${c.note})` : ""}`;
 export type Signoff = { status: "none" | "requested" | "approved" | "rejected"; by: string | null; at: string | null };
 
 export type PromotionChecks = {

@@ -93,6 +93,26 @@ describe("reading Mynt's replies", () => {
     expect(agreementActions(app.agreements[0], "app")).toEqual(["end"]);
   });
 
+  it("an agreement signed in e-signature test mode reads Signed (test, not binding) on both sides, and the production row says why it doesn't count", async () => {
+    const { coverageFrom, coverageText } = await import("@/lib/promotions");
+    const completed = (test_mode: boolean) => programRow({ status: "signed", signature_document: { status: "completed", test_mode, signers: { counterparty: { signed: true }, app: { signed: true } }, signed_copy: { sha256: "b".repeat(64) } } });
+    const lp = lpAgreementsFrom({ agreements: [completed(true)] })!;
+    expect(lp[0].status).toBe("Signed (test, not binding)");
+    expect(lp[0].statusKey).toBe("signed");
+    expect(lp[0].signatures).toBe("Signed by e-signature (test mode: not legally binding)");
+    const app = fromAgreements({ can_manage: true, agreements: [completed(true)], products: [], vendor_contracts: [], introductions: null })!;
+    expect(app.agreements[0].status).toBe("Signed (test, not binding)");
+    // Signed with test mode off, or by hand, it's simply Signed.
+    expect(lpAgreementsFrom({ agreements: [completed(false)] })![0].status).toBe("Signed");
+    expect(fromAgreements({ can_manage: true, agreements: [completed(false)], products: [], vendor_contracts: [], introductions: null })!.agreements[0].status).toBe("Signed");
+    expect(lpAgreementsFrom({ agreements: [programRow({ status: "signed", signed_by_esignature: false, signature_document: null })] })![0].status).toBe("Signed");
+    // The production check's row: not "no agreement", but one that isn't binding, in Mynt's words.
+    const [row] = coverageFrom([{ product_id: "p1", product_name: "Card", sponsor_entity_id: "f", sponsor_name: "Lead Bank", covered: false, agreement_id: AGREEMENT, signed_in_test_mode: true, note: "it was signed in the e-signature service's test mode" }]);
+    expect(row.covered).toBe(false);
+    expect(coverageText(row)).toBe("Signed (test, not binding): it was signed in the e-signature service's test mode");
+    expect(coverageText(coverageFrom([{ product_id: "p1", sponsor_entity_id: "f", covered: true }])[0])).toBe("Signed and in force");
+  });
+
   it("files by their bytes; signing pages framed only from the allowed origins, which the policy lists", () => {
     expect(agreementFileType("a.pdf", PDF)).toBe("pdf");
     expect(agreementFileType("a.docx", new Uint8Array([0x50, 0x4b, 0x03, 0x04]))).toBe("docx");
