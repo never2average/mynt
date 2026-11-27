@@ -9,7 +9,7 @@ import type { BuildService } from "./builds.js";
 import type { Store, User } from "./store.js";
 import { isProduction } from "./promotion-schema.js";
 import { canSeeBuild, createdWorkspaces, memberApp, personalWorkspace, workspaceRole } from "./workspaces.js";
-import { conformanceAfterDeploy, serviceDeployed, serviceOffline, serviceSettings } from "./services.js";
+import { candidateSettings, conformanceAfterDeploy, serviceBuildBeside, serviceDeployed, serviceHostingRefusal, serviceOffline, serviceOperatorRefusal, serviceSettings, servingOffering, testCandidate } from "./services.js";
 import type { VendorCallOptions } from "./vendor-call.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
@@ -125,7 +125,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       const routes = await hosting.routes();
       const apps = (await hosting.hostedApps(tenant.id)).map((h) => {
         const route = routes.find((r) => r.upstream === `${tenant.tunnel_ip}:${h.port}`);
-        const direct = hosting.provider && "direct" in hosting.provider ? hosting.appDomain(h.app_id) : null;
+        const direct = hosting.provider && "direct" in hosting.provider ? hosting.appDomain(h.app_id, "web", h.address_tag ?? null) : null;
         const services = h.services?.map((x) => ({ ...x, url: x.domain ? `https://${x.domain}` : null }));
         return { ...h, ...(services ? { services } : {}), url: route ? `https://${route.host}` : direct ? `https://${direct}` : null };
       });
@@ -138,13 +138,18 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     {
       title: "Host an app",
       description:
-        "Developer: run one of your apps on its own VM from a build Mynt verified (build_id from your coding-agent builds). The VM fetches exactly that commit, builds it and runs it; each Compose service listens on the port its mynt.port label names and is served publicly over HTTPS. Mynt gives the app a dedicated key (live once the app is in Production and published, else sandbox), added at the edge to its calls to Mynt and never stored on the VM. Deploying again with a newer build replaces it.",
+        "Developer: run one of your apps on its own VM from a build Mynt verified (build_id from your coding-agent builds). The VM fetches exactly that commit, builds it and runs it; each Compose service listens on the port its mynt.port label names and is served publicly over HTTPS. Mynt gives the app a dedicated key (live once the app is in Production and published, else sandbox), added at the edge to its calls to Mynt and never stored on the VM. Deploying again with a newer build replaces it. A service (create_service) differs: only an owner or admin of its workspace, at the firm that offers it, puts a build online; it needs direct hosting; and while a build of it serves subscribers, a newer build goes online beside it, with a signing secret of its own, and takes over only after Mynt's conformance test passes on it (and, in Production, the other production checks). If it fails it is removed and the serving build, its offering and its listing are unchanged.",
       inputSchema: { app_id: z.string(), build_id: z.string() },
     },
     async ({ app_id, build_id }) => {
       if (!hosting.enabled) return fail("Hosting isn't configured on this deployment yet");
       const app = await memberApp(store, user, app_id);
       if (!app) return fail(`No app of yours with id '${app_id}'`);
+      if (app.kind === "service") {
+        // A service's build receives its signing secret and subscribers' requests: its firm's owners and admins only.
+        const refused = (await serviceOperatorRefusal(store, user, app)) ?? serviceHostingRefusal(hosting);
+        if (refused) return fail(refused);
+      }
       // The app's workspace's hosting, whoever deploys it.
       const tenant = app.workspace_id ? await hosting.tenantOfWorkspace(app.workspace_id) : await hosting.tenantOf(user.id);
       if (!tenant) return fail("The workspace has no hosting yet: an owner or admin turns it on (request_hosting)");
@@ -174,6 +179,20 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       const { key: runtimeKey, secret } = await store.createApiKey(user.id, { app_id, environment, label: "hosted runtime", allowed_origins: [] });
       // Sealed for the edge and never shown: the workspace's, not the deployer's (their leaving doesn't stop the app).
       await store.db.query("UPDATE financial_products.api_keys SET created_by = NULL, last_secret_issued_to = NULL WHERE id = $1", [runtimeKey.id]);
+      // A service with a build serving subscribers: this build goes online beside it, on a copy of its own with a
+      // signing secret of its own, and takes over only once Mynt's test of it passes. The serving build, its offering
+      // and its listing are untouched until then (and for good, if it fails).
+      const serving = app.kind === "service" && isDirect(hosting.provider) ? await servingOffering(store, app_id) : null;
+      if (serving) {
+        const own = candidateSettings();
+        const copy = await hosting.deployCandidate(tenant, app, found.build, secret, environment === "sandbox", egress, plan, user.id, own.settings);
+        await store.audit(user.id, "deploy_app", app_id, { build_id, commit_sha: found.build.commit_sha, environment, beside: serving.app_build_id });
+        const service = await serviceBuildBeside(store, app, serving, copy.id, build_id, own.sealed, user.id);
+        const deployed = hosting.pending;
+        hosting.pending = deployed.then(() => testCandidate(store, hosting, app, copy.id, vendors)).catch((e) => console.error(`Testing the new build of ${app_id}: ${(e as Error).name}`));
+        const { id: _id, address_tag: _tag, error: _error, ...shown } = copy;
+        return json({ ...shown, beside_serving_build: serving.app_build_id, environment, egress, url: null, service });
+      }
       // A service is handed its vendor signing secret as a hosted setting (direct hosting only).
       const settings = isDirect(hosting.provider) ? await serviceSettings(store, app_id) : {};
       const hosted = await hosting.deploy(tenant, app, found.build, secret, environment === "sandbox", egress, plan, user.id, settings);
@@ -185,7 +204,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
         const deployed = hosting.pending;
         hosting.pending = deployed.then(() => conformanceAfterDeploy(store, app, build_id, vendors)).catch((e) => console.error(`Conformance after deploying ${app_id}: ${(e as Error).name}`));
       }
-      const domain = hosting.appDomain(app_id);
+      const domain = hosting.appDomain(app_id, "web", hosted.address_tag ?? null);
       return json({
         ...hosted,
         environment,
@@ -201,13 +220,17 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
     "undeploy_app",
     {
       title: "Stop hosting an app",
-      description: "Developer: stop hosting one of your apps; its public addresses go away and, under direct hosting, its VM is deleted.",
+      description:
+        "Developer: stop hosting one of your apps; its public addresses go away and, under direct hosting, its VM is deleted. A service: only an owner or admin of its workspace, at the firm that offers it; its offering is suspended (subscribers' calls stop, and products that hand off through it drift) until it is online again and passes.",
       inputSchema: { app_id: z.string() },
       annotations: { destructiveHint: true },
     },
     async ({ app_id }) => {
       const app = await memberApp(store, user, app_id);
       if (!app) return fail(`No app of yours with id '${app_id}'`);
+      // Taking a service offline stops every subscriber's calls: its firm's owners and admins only.
+      const refused = await serviceOperatorRefusal(store, user, app);
+      if (refused) return fail(refused);
       if (!(await hosting.undeploy(app_id))) return fail(`'${app_id}' isn't hosted`);
       await store.audit(user.id, "undeploy_app", app_id);
       // A service's offering is suspended, with the reason, until it is online again.
@@ -262,6 +285,10 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
   const onVm = async (app_id: string, kind: HostingCommandKind, args: Record<string, unknown>, waitSeconds: number) => {
     const app = await memberApp(store, user, app_id);
     if (!app) return fail(`No app of yours with id '${app_id}'`);
+    // A command inside a service's container can read its settings (the signing secret), and a restart interrupts its
+    // subscribers: the same people who put it online. Reading its status and logs stays every member's.
+    const refused = kind === "exec" || kind === "restart" ? await serviceOperatorRefusal(store, user, app) : null;
+    if (refused) return fail(refused.replace("put a service online or take it offline", "run commands in a service or restart it").replace("put it online or take it offline", "run commands in it or restart it"));
     const tenant = (await hosting.tenantHostingApp(app_id)) ?? (app.workspace_id ? await hosting.tenantOfWorkspace(app.workspace_id) : await hosting.tenantOf(user.id));
     if (!tenant) return fail("You have no hosting yet (request_hosting)");
     try {

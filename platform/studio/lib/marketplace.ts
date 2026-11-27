@@ -53,7 +53,12 @@ export type Offering = {
   canSubscribe: boolean;
   prerequisite: string | null;
   subscriptionId: string | null; // your firm's active subscription
+  // A service still in testing (in Staging, passed Mynt's test), shown because its builder gave its id: subscribed to
+  // and called in the sandbox only until it is in Production. Never in the list otherwise.
+  inTesting: boolean;
 };
+export const IN_TESTING = "In testing";
+export const IN_TESTING_NOTE = "In testing: sandbox only until its builder moves it to Production. Your subscription carries over.";
 
 const money = (p: unknown) => {
   if (!isObj(p) || typeof p.amount !== "number" || !str(p.currency)) return null;
@@ -108,6 +113,7 @@ export function fromOfferings(reply: unknown): Offering[] {
           canSubscribe: o.you_can_subscribe === true,
           prerequisite: str(o.prerequisite),
           subscriptionId: str(o.your_subscription_id),
+          inTesting: o.availability === "in_testing",
         },
       ];
     });
@@ -124,6 +130,7 @@ export const prerequisiteText = (o: Pick<Offering, "canSubscribe" | "prerequisit
 
 /** Why Subscribe can't be used on this offering, or null when it can (subscribed already: for another app). */
 export function subscribeBlocker(o: Offering): string | null {
+  if (!o.terms && o.inTesting) return "This service is in testing and its builder hasn't set standard terms yet, so there's nothing to accept here. Ask them to set terms, or subscribe with Mynt's tools (subscribe_vendor_service).";
   if (!o.terms) return "This provider has no standard terms on file yet, so there's nothing to accept.";
   if (!o.canSubscribe) return o.prerequisite ?? "Your firm doesn't meet the prerequisites.";
   return null;
@@ -175,6 +182,11 @@ export function filtersFromSearch(search: string | URLSearchParams): { filters: 
     offeringId: id("offering"),
   };
 }
+
+/** An offering id as its builder gives it (a UUID), or null. */
+export const offeringIdOf = (text: string) => (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text.trim()) ? text.trim().toLowerCase() : null);
+/** The Marketplace with one service in testing added, by the offering id its builder gave. */
+export const testingHref = (offeringId: string, appId?: string | null) => `/marketplace?${appId ? `app=${encodeURIComponent(appId)}&` : ""}offering=${encodeURIComponent(offeringId)}`;
 
 /** The Marketplace for one app (its Agreements tab's Browse vendors). */
 export const marketplaceHref = (appId?: string) => (appId ? `/marketplace?app=${encodeURIComponent(appId)}` : "/marketplace");

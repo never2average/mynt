@@ -15,7 +15,13 @@ type Loaded = { offerings: Offering[]; apps: MarketplaceApp[]; forApp: ForApp | 
 
 export default function MarketplacePage() {
   const [from] = useState(() => filtersFromSearch(typeof window === "undefined" ? "" : window.location.search));
-  const path = useMemo(() => (from.appId ? `/api/marketplace?app=${encodeURIComponent(from.appId)}` : "/api/marketplace"), [from.appId]);
+  // ?offering=<id> is sent on, so a service in testing (never in the list) is added by the id its builder gave.
+  const path = useMemo(() => {
+    const q = new URLSearchParams();
+    if (from.appId) q.set("app", from.appId);
+    if (from.offeringId) q.set("offering", from.offeringId);
+    return q.size ? `/api/marketplace?${q}` : "/api/marketplace";
+  }, [from.appId, from.offeringId]);
   const pick = useCallback(
     (body: Record<string, unknown>) =>
       Array.isArray(body.offerings)

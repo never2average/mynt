@@ -309,3 +309,46 @@ describe("the app's Agreements tab", () => {
     expect(document.querySelector("[data-end-subscription-result]")?.textContent).toBe("Subscription ended.");
   });
 });
+
+describe("A service in testing, by the id its builder gave", () => {
+  const TESTING_ID = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+  it("reads availability, and says why a service in testing with no terms can't be subscribed to here", async () => {
+    const m = await import("@/lib/marketplace");
+    const [o] = m.fromOfferings([
+      { offering_id: TESTING_ID, name: "Cash-flow score", vendor: "Scoreworks", region: "US", service_type: { key: "cashflow_score", name: "Cash-flow score", category: "analytics" }, standard_terms: null, availability: "in_testing", sandbox_only: true, live_available: false, you_can_subscribe: true },
+    ]);
+    expect([o.inTesting, o.liveAvailable]).toEqual([true, false]);
+    expect(m.subscribeBlocker(o)).toContain("in testing and its builder hasn't set standard terms yet");
+    expect(m.fromOfferings([{ offering_id: TESTING_ID, name: "x", availability: "listed" }])[0].inTesting).toBe(false);
+    expect(m.offeringIdOf(` ${TESTING_ID.toUpperCase()} `)).toBe(TESTING_ID);
+    expect(m.offeringIdOf("not-an-id")).toBeNull();
+    expect(m.testingHref(TESTING_ID)).toBe(`/marketplace?offering=${TESTING_ID}`);
+    expect(m.testingHref(TESTING_ID, "app-1")).toBe(`/marketplace?app=app-1&offering=${TESTING_ID}`);
+  });
+
+  it("Add a service in testing is a labelled button opening a sheet that takes the offering id", async () => {
+    const { AddTestingSheet } = await import("@/components/marketplace-view");
+    const went: string[] = [];
+    render(<AddTestingSheet open onClose={() => undefined} navigate={(h) => void went.push(h)} />);
+    const sheet = document.querySelector('[data-admin-sheet="add-testing"]') as HTMLElement;
+    expect(sheet.textContent).toContain("in the sandbox only");
+    const show = sheet.querySelector("[data-testing-show]") as HTMLButtonElement;
+    expect(show.textContent).toBe("Show this service");
+    expect(show.disabled).toBe(true);
+    fireEvent.change(sheet.querySelector("[data-testing-id]")!, { target: { value: "nope" } });
+    expect(sheet.textContent).toContain("That isn't an offering id");
+    fireEvent.change(sheet.querySelector("[data-testing-id]")!, { target: { value: TESTING_ID } });
+    fireEvent.click(sheet.querySelector("[data-testing-show]")!);
+    expect(went).toEqual([`/marketplace?offering=${TESTING_ID}`]);
+  });
+
+  it("the list marks it In testing: sandbox only, and its details say so", async () => {
+    const { MarketplaceView } = await import("@/components/marketplace-view");
+    const testing = fromOfferings([{ ...REPLY[0], offering_id: TESTING_ID, name: "Cash-flow score", availability: "in_testing", sandbox_only: true, live_available: false, your_subscription_id: null }]);
+    render(<MarketplaceView offerings={[...fromOfferings(REPLY), ...testing]} apps={[]} initialOfferingId={TESTING_ID} />);
+    expect([...document.querySelectorAll("[data-in-testing]")].map((e) => e.textContent)).toEqual(["In testing: sandbox only"]);
+    expect(document.querySelector(`[data-offering="${TESTING_ID}"] [data-in-testing]`)).not.toBeNull();
+    expect(document.querySelector("[data-add-testing]")!.textContent).toBe("Add a service in testing");
+    expect(document.body.textContent).toContain("In testing: sandbox only until its builder moves it to Production. Your subscription carries over.");
+  });
+});

@@ -1295,6 +1295,33 @@ const TABLES = `
   ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS app_build_id uuid;
   ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS app_secret_at timestamptz;
   CREATE UNIQUE INDEX IF NOT EXISTS vendor_offerings_app_idx ON financial_products.vendor_offerings (app_id) WHERE app_id IS NOT NULL;
+  -- A new build of a service goes online beside the one serving (hosting.ts, hosted_candidates) and is tested there.
+  -- While it is, the offering keeps its endpoint, its secret and its status. candidate_secret is the new copy's own
+  -- signing secret, sealed: it becomes conformance_secret in the statement that switches the endpoint, or is dropped.
+  ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS candidate_id uuid;
+  ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS candidate_build_id uuid;
+  ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS candidate_secret text;
+  ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS candidate_at timestamptz;
+  -- Each run keeps what was sent and what came back, for its vendor to read: fixture requests only (never a
+  -- customer's data), with the signature's digest and any credential left out. build_id: the build a service's run
+  -- tested.
+  ALTER TABLE financial_products.vendor_conformance_runs ADD COLUMN IF NOT EXISTS transcript jsonb;
+  ALTER TABLE financial_products.vendor_conformance_runs ADD COLUMN IF NOT EXISTS build_id uuid;
+  -- Mynt's test of a new build that did not become the serving one (it failed, or there was nothing left to switch).
+  -- Kept apart from vendor_conformance_runs on purpose: those are runs against the endpoint that serves, and the
+  -- newest of them is what listing, the marketplace, ops and risk read. A new build that passes is recorded there.
+  CREATE TABLE IF NOT EXISTS financial_products.vendor_candidate_runs (
+    id uuid PRIMARY KEY,
+    offering_id uuid NOT NULL REFERENCES financial_products.vendor_offerings(id),
+    build_id uuid NOT NULL,
+    candidate_id uuid NOT NULL,
+    passed boolean NOT NULL,
+    reason text NOT NULL,
+    cases jsonb NOT NULL,
+    transcript jsonb,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS vendor_candidate_runs_offering_idx ON financial_products.vendor_candidate_runs (offering_id, created_at DESC);
   -- A service type someone asked Mynt's admins to define (service types stay admin-defined).
   CREATE TABLE IF NOT EXISTS financial_products.service_type_requests (
     id uuid PRIMARY KEY,
@@ -1324,6 +1351,7 @@ const TABLES = `
     created_at timestamptz NOT NULL DEFAULT now()
   );
   CREATE INDEX IF NOT EXISTS vendor_practice_offering_idx ON financial_products.vendor_practice_runs (offering_id, created_at DESC);
+  ALTER TABLE financial_products.vendor_practice_runs ADD COLUMN IF NOT EXISTS transcript jsonb;
   ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS adapter_config jsonb;
   ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS adapter_test_key_id uuid REFERENCES financial_products.key_vault(id);
   ALTER TABLE financial_products.vendor_offerings ADD COLUMN IF NOT EXISTS adapter_live_key_id uuid REFERENCES financial_products.key_vault(id);
