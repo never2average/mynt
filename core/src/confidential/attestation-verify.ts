@@ -1,5 +1,5 @@
 import { createPublicKey, verify, type JsonWebKey } from "node:crypto";
-import { keysNonce, type EnclaveKeys } from "./shared/binding.js";
+import { configProblems, keysNonce, signingKeyConfig, type EnclaveKeys } from "./shared/binding.js";
 
 // Checks an attestation token from the confidential VM's attestation service: an OIDC JWT (RS256) signed by the
 // service's published keys. Used by Mynt's own client before it trusts the confidential service at all, and by
@@ -10,7 +10,11 @@ import { keysNonce, type EnclaveKeys } from "./shared/binding.js";
 //   - swname is the confidential OS, dbgstat says debugging has been off since boot, the OS image is a supported
 //     production one (support_attributes has STABLE), and secure boot was on;
 //   - the container's image digest is one Mynt announced for this release (governance.ts) or the one the caller expects;
-//   - eat_nonce has the caller's nonce and the binding of the enclave's keys (shared/binding.ts).
+//   - eat_nonce has the caller's nonce and the binding of the enclave's keys (shared/binding.ts);
+//   - the settings bound with those keys are the ones the caller expects, every one required: the Cloud KMS key that
+//     wraps the service's root, the key version behind each named signing key, and the SHA-256 of the one authority
+//     whose client certificates it accepts. They reach the workload from the VM's metadata, outside the measured image,
+//     so without expected values whoever runs the VM could point an honest image at keys or callers of their own.
 
 export const ATTESTATION_ISSUER = "https://confidentialcomputing.googleapis.com";
 export const ATTESTATION_DISCOVERY = `${ATTESTATION_ISSUER}/.well-known/openid-configuration`;
@@ -43,9 +47,30 @@ export interface TokenCheck {
 
 const part = (s: string) => JSON.parse(Buffer.from(s, "base64url").toString("utf8")) as Record<string, unknown>;
 
+// What the caller expects the service's key custody to be. Each is required; `signingKeys` names every signing key the
+// service may offer (e.g. { "health-attester": "projects/…/cryptoKeyVersions/1" }), and it may offer no other.
+export interface ExpectedCustody {
+  wrapKey: string | null | undefined;
+  signingKeys: Record<string, string> | null | undefined;
+  clientCaSha256: string | null | undefined;
+}
+
+export function custodyProblems(keys: EnclaveKeys, expected: ExpectedCustody | null | undefined): string[] {
+  if (!expected) return ["no expected key custody was given (the wrap key, the signing keys, the client authority): without it, whoever runs the host could have chosen them"];
+  const problems = configProblems(
+    keys.config,
+    { wrap_key: expected.wrapKey, client_ca_sha256: expected.clientCaSha256, ...signingKeyConfig(expected.signingKeys ?? {}) },
+    { wrap_key: "the service's root is wrapped by", client_ca_sha256: "the service accepts client certificates from the authority" },
+  );
+  if (!expected.signingKeys) problems.push("no expected signing keys were given: without them, whoever runs the host could have chosen them");
+  // Every key the service offers must be one whose custody was just checked.
+  for (const name of Object.keys(keys.signing ?? {})) if (!Object.hasOwn(expected.signingKeys ?? {}, name)) problems.push(`the service offers a signing key (${name}) nothing was expected for`);
+  return problems;
+}
+
 export function verifyAttestationToken(
   token: string,
-  x: { jwks: Jwks; audience: string; nonce: string; keys: EnclaveKeys; allowedDigests: string[]; now?: Date; requireStable?: boolean },
+  x: { jwks: Jwks; audience: string; nonce: string; keys: EnclaveKeys; allowedDigests: string[]; expectedCustody: ExpectedCustody | null | undefined; now?: Date; requireStable?: boolean },
 ): TokenCheck {
   const problems: string[] = [];
   const pieces = token.split(".");
@@ -90,6 +115,7 @@ export function verifyAttestationToken(
   const nonces = Array.isArray(claims.eat_nonce) ? claims.eat_nonce : claims.eat_nonce ? [claims.eat_nonce] : [];
   if (!nonces.includes(x.nonce)) problems.push("the token doesn't carry your nonce: it may be a replay");
   if (!nonces.includes(keysNonce(x.keys))) problems.push("the token doesn't bind the keys returned with it: they may have been swapped on the way");
+  problems.push(...custodyProblems(x.keys, x.expectedCustody));
 
   return { ok: problems.length === 0, problems, claims };
 }

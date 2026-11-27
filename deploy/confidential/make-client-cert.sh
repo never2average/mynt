@@ -7,6 +7,11 @@
 # them), and an authority whose certificate the service trusts (ca.crt). The authority's private key is used once and
 # deleted, so no other client certificate can ever be issued from it. Prints only the authority's certificate, base64:
 # public, and what the service's settings need (ClientAuthorityBase64 in the CloudFormation template). Never a key.
+#
+# The service binds the SHA-256 of that authority's certificate into every attestation. Mynt's server computes the
+# value it expects from ca.crt (CONFIDENTIAL_HOST_CLIENT_CA points at it) and refuses a service that trusts any other
+# authority; partners check the same value (verify-mynt-enclave --expected-client-ca-sha256), which this prints for
+# Mynt to publish. So keep ca.crt: without it the server can't say whose callers the service should accept.
 set -euo pipefail
 dir="${1:?usage: make-client-cert.sh <directory>}"
 umask 077
@@ -23,6 +28,8 @@ openssl x509 -req -in "$work/client.csr" -CA "$dir/ca.crt" -CAkey "$work/ca.key"
 chmod 0600 "$dir/client.key"
 chmod 0644 "$dir/client.crt" "$dir/ca.crt"
 echo "Client certificate: $dir/client.crt (key: $dir/client.key, readable only by this user)." >&2
+echo "The authority's certificate: $dir/ca.crt (set CONFIDENTIAL_HOST_CLIENT_CA to this path)." >&2
+echo "Its SHA-256, which the service's attestation must bind (public; publish it for partners): $(openssl x509 -in "$dir/ca.crt" -outform DER | sha256sum | cut -d' ' -f1)" >&2
 echo "The authority's certificate, base64 (public; paste it as ClientAuthorityBase64):" >&2
 base64 -w0 "$dir/ca.crt"
 echo

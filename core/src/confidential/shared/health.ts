@@ -1,5 +1,5 @@
 import { createPublicKey, randomBytes, verify, type KeyObject } from "node:crypto";
-import { buildFigures, canonicalJson, FLOWS_BASIS, fingerprintOf, type AdaptedFlows, type HealthReport, type LedgerReading } from "./figures.js";
+import { buildFigures, canonicalJson, FLOWS_BASIS, fingerprintOf, type AdaptedFlows, type HealthReport, type LedgerReading, type SealedStatementCheck } from "./figures.js";
 import { openSealedStatement, type SealedStatement } from "./envelope.js";
 
 // One product-health snapshot from a partner's sealed statement, computed where the statement can be opened: inside the
@@ -7,6 +7,11 @@ import { openSealedStatement, type SealedStatement } from "./envelope.js";
 // same file in both places. The statement's plaintext never leaves this function: what comes back is the report (the
 // figures for this one product, exactly what product-health.ts would have computed), its fingerprint and a signature
 // over the fingerprint by the host's health-attester key.
+//
+// That key signs here and nowhere else: no host offers it to a caller as a general signing key. And the report it
+// signs says what was checked (sealed_statement: the key that signed the statement, the statement's as_of, and the firm,
+// environment, request, registered key, age limit and clock it was checked against), so the signature vouches for one
+// statement from one signer, not for whatever figures a caller asked it to sign.
 //
 // The statement is checked here as partner-ledger/contract.ts checks a plain one: the firm, the environment, the
 // request it answers, the firm's registered key (and never its key for the other environment), a fresh as_of, a reason
@@ -114,6 +119,13 @@ export async function computeSealedHealth(
       ? { reserves_held_cents: p.reserves_held_cents, customer_obligations_cents: p.customer_obligations_cents, as_of: s.as_of, reason: p.reason }
       : { reserves_held_cents: null, customer_obligations_cents: null, as_of: s.as_of, reason: "The partner's statement didn't cover this product" };
   }
+  const statement = code ? null : (opened as Statement);
+  const check: SealedStatementCheck = {
+    result: code ?? "ok",
+    signer_public_key: statement ? statement.signature.public_key : null,
+    as_of: statement ? statement.as_of : null,
+    checked: { entity_id: input.expect.entity_id, environment: input.expect.environment, request_id: input.expect.request_id, public_key: input.expect.public_key, max_age_ms: input.expect.max_age_ms, now: Number.isNaN(now.getTime()) ? "invalid" : now.toISOString() },
+  };
   opened = null;
   const failed = "error" in reading;
   const source: HealthReport["source"] = failed ? "unavailable" : "partner_ledger";
@@ -128,6 +140,7 @@ export async function computeSealedHealth(
     flows_not_measured: input.flows.not_measured,
     figures,
     notes: [`Computed inside the confidential service (${input.host}) from the partner's sealed statement.`],
+    sealed_statement: check,
   };
   const canonical = canonicalJson(report);
   const fingerprint = fingerprintOf(canonical);

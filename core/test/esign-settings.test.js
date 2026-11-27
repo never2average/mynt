@@ -117,7 +117,7 @@ test("admins only; the key is checked, sealed, never returned; the webhook is re
   const rows = (await w.store.db.query(`SELECT name, sealed FROM ${T}.platform_secrets WHERE status = 'active' ORDER BY name`)).rows;
   assert.deepEqual(rows.map((x) => x.name), ["esign:signwell:api_key", "esign:signwell:webhook_id"]);
   // Sealed by the confidential host (the platform key vault's rows, platform-keys.ts).
-  for (const x of rows) assert.match(x.sealed, /^cs1:local:secret:/);
+  for (const x of rows) assert.match(x.sealed, /^cs2:local:secret:/);
   assert.ok(!JSON.stringify(rows).includes(GOOD) && !JSON.stringify(rows).includes("hook-1"));
   // The live configuration uses them at once.
   assert.equal(w.settings.current.provider.name, "signwell");

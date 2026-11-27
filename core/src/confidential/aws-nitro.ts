@@ -1,8 +1,8 @@
 import { createHash, verify as verifySignature, X509Certificate } from "node:crypto";
-import { keysNonce, type EnclaveKeys } from "./shared/binding.js";
+import { configProblems, keysNonce, type EnclaveKeys } from "./shared/binding.js";
 import { CborMap, CborTag, decodeCbor, encodeCbor, type Cbor } from "./shared/cbor.js";
 import { ConfidentialRefused, type Attestation, type EnclavePcrs, type Measurements } from "./host.js";
-import { RemoteConfidentialHost, remoteOptionsFromEnv, type RemoteHostOptions } from "./remote.js";
+import { expectedClientAuthority, RemoteConfidentialHost, remoteOptionsFromEnv, type RemoteHostOptions } from "./remote.js";
 
 // The confidential service (deploy/confidential) running in an AWS Nitro Enclave: an isolated VM carved out of an EC2
 // instance, with no network, disk or console, whose image file the Nitro hypervisor measures into PCRs, and whose
@@ -18,7 +18,10 @@ import { RemoteConfidentialHost, remoteOptionsFromEnv, type RemoteHostOptions } 
 //     the zeros a debug-mode enclave reports (whose memory its operator could read);
 //   - the document is fresh (made within the last five minutes), carries the caller's nonce, binds the keys returned
 //     beside it in user_data (`mynt-keys-<sha256>`, shared/binding.ts) and the service's TLS key in public_key;
-//   - when the caller names one, the KMS key the service says wraps its root (bound with the keys) is that key.
+//   - the settings the enclave was handed by its parent instance, which it binds with the keys, are the ones the caller
+//     expects: the KMS key that wraps its root (and that key's region), and the SHA-256 of the one authority whose
+//     client certificates it accepts. Both expected values are required: the parent is not trusted, and root on it
+//     could otherwise hand the enclave a key or an authority of its own (and then call it as Mynt's server).
 
 // AWS_NitroEnclaves_Root-G1, from https://aws-nitro-enclaves.amazonaws.com/AWS_NitroEnclaves_Root-G1.zip (the zip's
 // SHA-256 is 8cf60e2b2efca96c6a9e71e851d00c1b6991cc09eadbe64a6a1d1b1eb9faff7c). Valid until 2049. The certificate's
@@ -117,7 +120,7 @@ export const pcrsOfDocument = (doc: NitroDocument): EnclavePcrs | null => {
 
 export function verifyNitroAttestation(
   document: string,
-  x: { nonce: string; keys: EnclaveKeys; allowedPcrs: EnclavePcrs[]; expectedKmsKey?: string | null; roots?: string[]; now?: Date; maxAgeMs?: number },
+  x: { nonce: string; keys: EnclaveKeys; allowedPcrs: EnclavePcrs[]; expectedKmsKey: string | null | undefined; expectedClientCaSha256: string | null | undefined; roots?: string[]; now?: Date; maxAgeMs?: number },
 ): NitroCheck {
   const problems: string[] = [];
   let parsed: ReturnType<typeof parseNitroDocument>;
@@ -177,24 +180,35 @@ export function verifyNitroAttestation(
   if (!doc.nonce || !doc.nonce.equals(Buffer.from(x.nonce, "utf8"))) problems.push("the document doesn't carry your nonce: it may be a replay");
   if (!doc.user_data || !doc.user_data.equals(Buffer.from(keysNonce(x.keys), "utf8"))) problems.push("the document doesn't bind the keys returned with it: they may have been swapped on the way");
   if (!doc.public_key || createHash("sha256").update(doc.public_key).digest("hex") !== x.keys.tls_spki_sha256) problems.push("the document's public key isn't the service's TLS key");
-  if (x.expectedKmsKey && x.keys.config?.kms_key !== x.expectedKmsKey) problems.push(`the service's root is wrapped by ${x.keys.config?.kms_key ?? "no KMS key it names"}, not ${x.expectedKmsKey}`);
+  // Never optional: with no expected value there is a problem, so nothing unattested decides whose keys or callers.
+  problems.push(
+    ...configProblems(
+      x.keys.config,
+      { kms_key: x.expectedKmsKey, region: x.expectedKmsKey ? (kmsKeyRegion(x.expectedKmsKey) ?? null) : null, client_ca_sha256: x.expectedClientCaSha256 },
+      { kms_key: "the service's root is wrapped by", region: "the service uses KMS in", client_ca_sha256: "the service accepts client certificates from the authority" },
+    ),
+  );
 
   return { ok: problems.length === 0, problems, document: doc, pcrs };
 }
 
+export const kmsKeyRegion = (arn: string): string | null => /^arn:[^:]+:kms:([^:]+):/.exec(arn)?.[1] ?? null;
+
 export interface NitroEnclaveOptions extends RemoteHostOptions {
   allowedPcrs: () => Promise<EnclavePcrs[]>; // PCRs in effect (governance.ts)
   expectedKmsKey: string; // the KMS key that must wrap the service's root (its ARN)
+  expectedClientCaSha256: string; // the one authority whose client certificates the service must accept (clientAuthority)
   roots?: string[]; // tests: a test authority instead of the AWS root
 }
 
 // CONFIDENTIAL_HOST=aws-nitro: CONFIDENTIAL_HOST_URL (https:// of the parent instance's port), the two client
-// certificate paths, and CONFIDENTIAL_HOST_KMS_KEY (the wrap key's ARN, a name and not a secret).
+// certificate paths, CONFIDENTIAL_HOST_CLIENT_CA (the path to the authority's certificate) and
+// CONFIDENTIAL_HOST_KMS_KEY (the wrap key's ARN, a name and not a secret).
 export function nitroHostOptionsFromEnv(env: NodeJS.ProcessEnv, allowedPcrs: () => Promise<EnclavePcrs[]>, wrappedRoot?: () => Promise<string | null>): NitroEnclaveOptions {
   const base = remoteOptionsFromEnv("aws-nitro", env);
   const expectedKmsKey = env.CONFIDENTIAL_HOST_KMS_KEY;
-  if (!expectedKmsKey?.startsWith("arn:")) throw new ConfidentialRefused("CONFIDENTIAL_HOST=aws-nitro needs CONFIDENTIAL_HOST_KMS_KEY set on the server: the wrap key's ARN");
-  return { ...base, allowedPcrs, expectedKmsKey, wrappedRoot };
+  if (!expectedKmsKey?.startsWith("arn:") || !kmsKeyRegion(expectedKmsKey)) throw new ConfidentialRefused("CONFIDENTIAL_HOST=aws-nitro needs CONFIDENTIAL_HOST_KMS_KEY set on the server: the wrap key's ARN");
+  return { ...base, allowedPcrs, expectedKmsKey, expectedClientCaSha256: expectedClientAuthority("aws-nitro", env, base.clientCert), wrappedRoot };
 }
 
 export class NitroEnclaveHost extends RemoteConfidentialHost {
@@ -206,7 +220,7 @@ export class NitroEnclaveHost extends RemoteConfidentialHost {
 
   protected async verify(a: Attestation, nonce: string): Promise<Measurements> {
     if (a.format !== "nitro-cose") throw new ConfidentialRefused(`The confidential service gave a ${a.format} attestation, not an enclave's document`);
-    const check = verifyNitroAttestation(a.token!, { nonce, keys: a.keys, allowedPcrs: await this.nitro.allowedPcrs(), expectedKmsKey: this.nitro.expectedKmsKey, roots: this.nitro.roots });
+    const check = verifyNitroAttestation(a.token!, { nonce, keys: a.keys, allowedPcrs: await this.nitro.allowedPcrs(), expectedKmsKey: this.nitro.expectedKmsKey, expectedClientCaSha256: this.nitro.expectedClientCaSha256, roots: this.nitro.roots });
     if (!check.ok) throw new ConfidentialRefused(`The confidential service's attestation didn't pass: ${check.problems.join("; ")}`);
     return { host: this.kind, attested: true, image_digest: null, pcrs: check.pcrs, hardware: check.document!.module_id, software: "nitro-enclave", software_version: null, debug: false, reason: null };
   }

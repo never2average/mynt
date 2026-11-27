@@ -4,7 +4,7 @@ import { connect as netConnect } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import { openEnvelopedData } from "./cms.mjs";
 import { derivedSigner, rawOf } from "./keyhouse.mjs";
-import { keysNonce } from "./shared/binding.js";
+import { clientAuthority, CLIENT_CA_SHA256, keysNonce } from "./shared/binding.js";
 import { CborMap, decodeCbor, CborTag } from "./shared/cbor.js";
 
 // The AWS Nitro Enclaves platform for the keyhouse (keyhouse.mjs). Inside the enclave there is no network: the
@@ -172,13 +172,18 @@ function pcrsOf(document) {
   }
 }
 
-export function nitroPlatform({ kms, nsm, region, keyArn }) {
+// `clientCaSha256`: of the one authority whose client certificates the service accepts (shared/binding.js
+// clientAuthority, from the same PEM the TLS server is given). It reaches the enclave from the parent instance like the
+// key's ARN, so it's bound into every attestation the same way: a parent that hands the enclave an authority of its own
+// (to call it as Mynt's server) changes what every verifier sees.
+export function nitroPlatform({ kms, nsm, region, keyArn, clientCaSha256 }) {
+  if (!CLIENT_CA_SHA256.test(clientCaSha256 ?? "")) throw new Error("the enclave needs the SHA-256 of its client-certificate authority, to bind into its attestation");
   return {
     host: "aws-nitro",
     tag: "ne",
     signingNames: ["health-attester"],
     derivedSigning: true,
-    config: { kms_key: keyArn, region },
+    config: { kms_key: keyArn, region, client_ca_sha256: clientCaSha256 },
     async attest(nonce, keys, tlsSpki) {
       const document = await nsm.attest({ nonce: Buffer.from(nonce, "utf8"), userData: Buffer.from(keysNonce(keys), "utf8"), publicKey: tlsSpki });
       const pcrs = pcrsOf(document);
@@ -206,7 +211,8 @@ export function nitroPlatform({ kms, nsm, region, keyArn }) {
   };
 }
 
-// ---- settings from the parent (none secret; the KMS key and region are bound into every attestation) ----
+// ---- settings from the parent (none secret; each is bound into every attestation: the KMS key, the region, and the
+// hash of the one authority whose client certificates may call) ----
 
 const REGION = /^[a-z]{2}(-[a-z]+)+-\d{1,2}$/;
 export function parseSettings(text) {
@@ -214,8 +220,14 @@ export function parseSettings(text) {
   if (!REGION.test(s.region ?? "")) throw new Error("settings: region isn't an AWS region name");
   const arn = new RegExp(`^arn:aws[a-z-]*:kms:${s.region}:\\d{12}:key/(mrk-[0-9a-f]{32}|[0-9a-f-]{36})$`);
   if (!arn.test(s.kms_key ?? "")) throw new Error("settings: kms_key isn't a KMS key ARN in that region");
-  if (!/-----BEGIN CERTIFICATE-----/.test(s.client_ca ?? "")) throw new Error("settings: client_ca isn't a PEM certificate");
-  return { region: s.region, kms_key: s.kms_key, client_ca: s.client_ca };
+  let authority;
+  try {
+    authority = clientAuthority(s.client_ca ?? "");
+  } catch (e) {
+    throw new Error(`settings: client_ca: ${e.message}`);
+  }
+  // client_ca is the certificate that was hashed, re-encoded: what the TLS server trusts is what the attestation binds.
+  return { region: s.region, kms_key: s.kms_key, client_ca: authority.pem, client_ca_sha256: authority.sha256 };
 }
 
 export async function readSettings({ socketPath = SOCKETS.config, attempts = 60 } = {}) {

@@ -842,6 +842,19 @@ test("a statement sealed to the confidential host is computed there: the figures
   assert.match(latest.report.notes.join(" "), /confidential service \(local\)/);
   const snap = await firstSnapshot(health, provider.user, productId);
   assert.deepEqual(snap.enclave, { public_key: await host.publicKey("health-attester"), signature_ok: true });
+  // The signed report says what the host checked: the key that signed the statement, its as_of, and what it was held to.
+  const checked = latest.report.sealed_statement;
+  assert.deepEqual([checked.result, checked.signer_public_key, checked.as_of, checked.checked.public_key, checked.checked.request_id, checked.checked.max_age_ms], ["ok", partner.address, latest.report.ledger_as_of, partner.address, "req-1", 86_400_000]);
+  // The attester is no signing oracle: nobody outside the host's own check gets its signature over figures of their choosing.
+  await assert.rejects(host.sign({ name: "health-attester" }, Buffer.from("figures of my choosing")), /signs only inside/);
+
+  // A host (or something between Mynt and it) that holds the statement to something other than what Mynt asked: a
+  // looser age limit, say, to pass off an old statement. Its report is genuinely signed, and says what it checked,
+  // so Mynt's server sees the difference and stores no figures.
+  const lax = new Proxy(host, { get: (t, k) => (k === "computeHealth" ? (input) => t.computeHealth({ ...input, expect: { ...input.expect, max_age_ms: 3650 * 86_400_000 } }) : typeof t[k] === "function" ? t[k].bind(t) : t[k]) });
+  const loose = await setup({ ledger: sealedLedger(host, partner), confidential: lax });
+  await loose.tickAt(T0 + 5 * 60_000).catch(() => {});
+  assert.deepEqual((await loose.raw(`SELECT source FROM ${SNAPSHOTS}`)).filter((r) => r.source === "partner_ledger"), []);
 
   // Signed by someone other than the firm's registered key: the host gives no figures, and says why.
   const forged = await setup({ ledger: sealedLedger(host, partner, { signer: edKeyPair() }), confidential: host });

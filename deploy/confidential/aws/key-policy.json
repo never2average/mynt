@@ -1,5 +1,5 @@
 {
-  "$comment": "The wrap key's key policy, for setting the key up by hand (keyhouse.cloudformation.json makes the same one). Replace <ACCOUNT_ID>, <INSTANCE_ROLE_ARN> and <PCR0> (the release's PCR0, 96 hex digits, as CI printed it; list two during an upgrade). Remove this $comment before pasting. The account can manage the key but not use it; the instance's role can use it only from an enclave attesting that PCR0; nobody can use it without an attestation, or re-encrypt under another key, whatever their IAM permissions say.",
+  "$comment": "The wrap key's key policy, for setting the key up by hand (keyhouse.cloudformation.json makes the same one). Replace <ACCOUNT_ID>, <INSTANCE_ROLE_ARN>, <KEY_POLICY_ADMIN_ROLE_ARN> (the one break-glass role allowed to change this policy: used only to change the allowed PCR0 at an upgrade, by nobody day to day) and <PCR0> (the release's PCR0, 96 hex digits, as CI printed it; list two during an upgrade). Remove this $comment before pasting, and set the policy with the lockout safety check bypassed (the account itself can't change it afterwards, on purpose). The account can manage the key but neither use it nor change this policy; only the break-glass role can change the policy, and every change raises the alarm keyhouse.cloudformation.json sets up; the instance's role can use the key only from an enclave attesting that PCR0; nobody can use it without an attestation, or re-encrypt under another key, whatever their IAM permissions say. What this can't do: whoever administers the account's IAM can take over the break-glass role, so the policy can still be rewritten by the account's administrators, loudly. docs/reference/confidential-computing.md (The key policy) says what that leaves.",
   "Version": "2012-10-17",
   "Id": "mynt-keyhouse-wrap-key",
   "Statement": [
@@ -11,7 +11,6 @@
         "kms:Describe*",
         "kms:Get*",
         "kms:List*",
-        "kms:PutKeyPolicy",
         "kms:Enable*",
         "kms:Disable*",
         "kms:Update*",
@@ -21,6 +20,21 @@
         "kms:CancelKeyDeletion"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "BreakGlassChangesThePolicy",
+      "Effect": "Allow",
+      "Principal": { "AWS": "<KEY_POLICY_ADMIN_ROLE_ARN>" },
+      "Action": ["kms:PutKeyPolicy", "kms:GetKeyPolicy", "kms:DescribeKey"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NobodyElseChangesThePolicy",
+      "Effect": "Deny",
+      "Principal": { "AWS": "*" },
+      "Action": ["kms:PutKeyPolicy"],
+      "Resource": "*",
+      "Condition": { "ArnNotEquals": { "aws:PrincipalArn": "<KEY_POLICY_ADMIN_ROLE_ARN>" } }
     },
     {
       "Sid": "EnclaveUsesWithAttestation",
