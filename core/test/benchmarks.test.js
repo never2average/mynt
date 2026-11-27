@@ -501,6 +501,83 @@ test("a run starts only on an admin's explicit, capped call, and is refused in p
   assert.match((await off.call("list_benchmark_runs", {})).data.error, /aren't running on this Mynt/);
 });
 
+// The first real runs in production: the sandbox host refused every VM (its account's allowance was used up).
+const REFUSED_VM = "host: 429 LIMIT_EXCEEDED on creating a VM";
+
+test("a sandbox host that refuses every VM: no task is charged, whatever the agent, and no further run starts until an admin says the host is back or a sandbox starts", async () => {
+  const w = await world();
+  const refused = async (agent) => {
+    const r = await w.as.call("start_benchmark_run", { agent, cap_usd: 10 });
+    assert.equal(r.isError, true, agent);
+    return r.data.error;
+  };
+  const listed = async () => Object.fromEntries((await w.as.call("list_benchmark_runs", {})).data.agents.map((a) => [a.agent, a]));
+  const HOSTED = ["coding", "product-desk", "algorithm-explorer", "governance-review", "connector"];
+  // Before anything has been refused, every agent that is set up here can start.
+  for (const a of Object.values(await listed())) if (a.agent !== "program-audit" && a.agent !== "program-red-team") assert.deepEqual([a.agent, a.ready, a.can_start, a.host_allowance_used_up], [a.agent, true, true, false]);
+
+  w.sandboxes.createError = REFUSED_VM;
+  for (const [n, agent] of ["coding", "governance-review", "connector"].entries()) {
+    // The first start has nothing to go by; the next ones are an admin insisting the host is back when it isn't.
+    const runId = await start(w, { agent, cap_usd: 10, ...(n ? { host_restored: true } : {}) });
+    const done = await drive(w, runId, async () => undefined);
+    assert.deepEqual([done.run.status, done.run.stop_reason], ["stopped", "The sandbox provider has used up this account's allowance; an admin must add billing in its dashboard."], agent);
+    const [first, ...rest] = done.tasks;
+    assert.deepEqual([first.status, first.failure_class], ["failed", "infrastructure"], agent);
+    assert.ok(rest.every((t) => t.status === "not_run"), agent);
+    // Nothing ran, so nothing is counted: not the task's budget, and not a 0 dressed as a measured cost.
+    assert.deepEqual([first.cost_usd, first.reserved_usd, first.reserved_note], [null, null, null], agent);
+    assert.match(first.cost_note, /^Not measured: .*nothing is counted against the run's cap$/, agent);
+    assert.deepEqual([done.run.charged_usd, done.run.measured_usd, done.run.reserved_usd, done.run.reserved_tasks, done.run.charged_note], [0, 0, 0, 0, null], agent);
+    assert.equal(done.scoreboard.cost_usd, null, agent);
+    assert.equal((await w.pg.query(`SELECT charged_usd FROM ${T}.benchmark_runs WHERE id = $1`, [runId])).rows[0].charged_usd, "0", agent);
+  }
+  assert.equal(w.sandboxes.created, 0, "no sandbox ever started");
+
+  // The last run stopped on the host's allowance: no run of any agent that needs the host starts, and the list says so.
+  for (const agent of HOSTED) assert.match(await refused(agent), /^This run can't start: the sandbox host's allowance is used up: the last benchmark run to ask it for a sandbox \(connector, .*\) stopped with ".*" and no sandbox has started since\. Once billing is added there, start the run with host_restored: true\.$/, agent);
+  let agents = await listed();
+  for (const agent of HOSTED) {
+    assert.deepEqual([agents[agent].ready, agents[agent].can_start, agents[agent].host_allowance_used_up], [false, false, true], agent);
+    assert.match(agents[agent].why_not, /^The sandbox host's allowance is used up: .* start the run with host_restored: true$/, agent);
+  }
+  // Ask AI runs in Studio and needs no sandbox host: it is unaffected.
+  assert.deepEqual([agents["ask-ai"].ready, agents["ask-ai"].can_start, agents["ask-ai"].host_allowance_used_up, agents["ask-ai"].why_not], [true, true, false, null]);
+  const ask = await start(w, { agent: "ask-ai", cap_usd: 5 });
+  await w.as.call("stop_benchmark_run", { run_id: ask, reason: "only to show it starts" });
+  // A run that ended some other way without a sandbox changes nothing.
+  assert.match(await refused("coding"), /sandbox host's allowance is used up/);
+  assert.equal(await w.count("benchmark_runs"), 4);
+
+  // Billing is added. The admin says so, the run gets its sandboxes, and that clears it for every agent.
+  w.sandboxes.createError = null;
+  const back = await start(w, { agent: "coding", cap_usd: 5, host_restored: true, task_ids: ["two-key-household-fund"] });
+  const ran = await drive(w, back, codingPlay({}));
+  assert.deepEqual([ran.run.status, ran.tasks[0].status, ran.tasks[0].sandbox_started, ran.tasks[0].cost_usd, ran.run.charged_usd, ran.run.measured_usd, ran.run.reserved_usd], ["finished", "passed", true, 0.6, 0.6, 0.6, 0]);
+  agents = await listed();
+  for (const agent of HOSTED) assert.deepEqual([agents[agent].ready, agents[agent].can_start, agents[agent].host_allowance_used_up, agents[agent].why_not], [true, true, false, null], agent);
+  const next = await start(w, { agent: "governance-review", cap_usd: 5 });
+  await w.as.call("stop_benchmark_run", { run_id: next, reason: "only to show it starts" });
+});
+
+test("a task whose sandbox started but whose cost was never measured: the cap counts its whole budget as reserved, and nothing shows it as money spent", async () => {
+  const w = await world();
+  // The host hands a sandbox over and it never comes up: the build ends before Mynt first measures its cost.
+  w.sandboxes.nextState = "error";
+  const runId = await start(w, { agent: "coding", cap_usd: 5, task_ids: ["two-key-household-fund"] });
+  const done = await drive(w, runId, codingPlay({}));
+  const [t] = done.tasks;
+  assert.deepEqual([done.run.status, t.status, t.failure_class, t.sandbox_started], ["finished", "failed", "infrastructure", true]);
+  assert.deepEqual([t.cost_usd, t.cap_usd, t.reserved_usd], [null, 5, 5]);
+  assert.match(t.cost_note, /^Not measured: the build ended before Mynt first measured its cost$/);
+  assert.match(t.reserved_note, /^Reserved, not measured: .* It is not money known to be spent$/);
+  assert.deepEqual([done.run.charged_usd, done.run.measured_usd, done.run.reserved_usd, done.run.reserved_tasks], [5, 0, 5, 1]);
+  assert.match(done.run.charged_note, /^The cap counts US\$5: US\$0 measured, and US\$5 reserved, not measured \(the whole budget of 1 task\(s\) whose cost couldn't be measured after work ran\)\. The reserved part is not money known to be spent\.$/);
+  assert.deepEqual([done.scoreboard.cost_usd, done.scoreboard.cost_measured_tasks], [null, 0], "the scoreboard's cost is what was measured: nothing");
+  const row = (await w.as.call("list_benchmark_runs", {})).data.runs[0];
+  assert.deepEqual([row.charged_usd, row.measured_usd, row.reserved_usd], [5, 0, 5]);
+});
+
 test("the cap is an operational setting with a safe default", () => {
   const s = PLATFORM_SETTINGS.find((x) => x.key === "BENCHMARK_CAP_USD");
   assert.deepEqual([s.default, s.kind, s.used_by], ["25", "usd", "Agent benchmarks"]);

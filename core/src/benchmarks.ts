@@ -94,7 +94,8 @@ const TABLES = `
     status text NOT NULL,
     stop_reason text,
     cap_usd numeric NOT NULL,
-    -- what the cap has counted so far: each task's measured cost, or its whole budget where nothing was measured
+    -- what the cap has counted so far: each task's measured cost; its whole budget, reserved, where work ran and
+    -- nothing was measured (benchmark_results.reserved_usd); nothing for a task that never got a sandbox
     charged_usd numeric NOT NULL DEFAULT 0,
     model text,
     -- a content hash of each agent workspace folder the set exercises, and the commit the server ran from
@@ -132,7 +133,21 @@ const TABLES = `
     finished_at timestamptz,
     UNIQUE (run_id, task_id)
   );
+  -- Whether the task ever got a sandbox (false: none started, so nothing ran and nothing is counted; null: not known,
+  -- or the agent needs none), and what the cap counted for it where its cost couldn't be measured: its whole budget,
+  -- reserved. That figure is never a cost.
+  ALTER TABLE ${T}.benchmark_results ADD COLUMN IF NOT EXISTS sandbox_started boolean;
+  ALTER TABLE ${T}.benchmark_results ADD COLUMN IF NOT EXISTS reserved_usd numeric;
+  -- Tasks scored before those columns: the cap counted their whole budget when nothing was measured.
+  UPDATE ${T}.benchmark_results SET reserved_usd = cap_usd
+   WHERE reserved_usd IS NULL AND sandbox_started IS NULL AND cost_usd IS NULL AND cap_usd IS NOT NULL
+     AND status IN ('passed', 'failed') AND failed_check IS DISTINCT FROM 'run_stopped';
 `;
+
+// What a task's cost says when it never got a sandbox, when it couldn't be started at all, and what its reservation is.
+const NO_SANDBOX_NOTE = "Not measured: no sandbox started for this task, so nothing ran, and nothing is counted against the run's cap";
+const NOT_STARTED_NOTE = "Not measured: the task couldn't be started, so nothing is counted against the run's cap";
+const RESERVED_NOTE = "Reserved, not measured: the task's cost couldn't be measured after work ran, so the run's cap counts its whole budget. It is not money known to be spent";
 
 const ACTIVE = ["queued", "running"];
 const MIN_TASK_USD = 0.5;
@@ -193,6 +208,9 @@ export interface Adapter {
   tick(): Promise<void>;
   poll(run: Row, jobId: string, task: BenchmarkTask): Promise<Outcome | null>;
   stop(jobId: string, reason: string): Promise<void>;
+  // Whether the task's job ever got a sandbox from the host (null: its record is gone, so nobody can say). An agent
+  // that runs outside this server has none to get, and leaves this out.
+  sandboxStarted?(jobId: string): Promise<boolean | null>;
 }
 
 const iso = (v: unknown) => (v ? new Date(v as string).toISOString() : null);
@@ -394,6 +412,10 @@ export class BenchmarkService {
         return build.id;
       },
       tick: () => builds().tick(),
+      sandboxStarted: async (jobId) => {
+        const b = await builds().get(jobId);
+        return b ? !!(b.sandbox_id || b.verify_sandbox_id) : null;
+      },
       stop: async (jobId, reason) => {
         const b = await builds().get(jobId);
         if (b && !ENDED.includes(b.status)) await builds().stop(b, reason);
@@ -476,6 +498,10 @@ export class BenchmarkService {
         return job.id as string;
       },
       tick: () => this.desk.tick(),
+      sandboxStarted: async (jobId) => {
+        const j = await this.desk.job(jobId);
+        return j ? !!(j.sandbox_id || j.verify_sandbox_id) : null;
+      },
       stop: (jobId, reason) => this.desk.stop(jobId, reason),
       poll: async (_run, jobId, t) => {
         const task = t as DeskTask;
@@ -560,6 +586,11 @@ export class BenchmarkService {
         return job.id as string;
       },
       tick: () => this.explore.tick(),
+      sandboxStarted: async (jobId) => {
+        if (!(await this.explore.get(jobId))) return null;
+        const got = await this.bench.query(`SELECT 1 FROM ${T}.explore_variants WHERE job_id::text = $1 AND (sandbox_id IS NOT NULL OR score_sandbox_id IS NOT NULL) LIMIT 1`, [jobId]);
+        return got.rows.length > 0;
+      },
       stop: async (jobId, reason) => void (await this.explore.stop(jobId, reason)),
       poll: async (_run, jobId) => {
         const j = await this.explore.get(jobId);
@@ -657,6 +688,10 @@ export class BenchmarkService {
         return opened.id as string;
       },
       tick: () => this.review.tick(),
+      sandboxStarted: async (jobId) => {
+        const c = await this.review.get(jobId);
+        return c ? !!c.sandbox_id : null;
+      },
       stop: async (jobId, reason) => void (await this.review.stop(jobId, reason)),
       poll: async (_run, jobId, t) => {
         const task = t as ReviewTask;
@@ -759,6 +794,10 @@ export class BenchmarkService {
         if (!run) throw new Error("The connector didn't start a run");
         return run.id as string;
       },
+      sandboxStarted: async (jobId) => {
+        const r = (await q(`SELECT sandbox_id FROM ${T}.bd_runs WHERE id::text = $1`, [jobId]))[0];
+        return r ? !!r.sandbox_id : null;
+      },
       tick: () => bd().tick(),
       stop: (_jobId, reason) => bd().stopRuns(reason),
       poll: async (_run, jobId, t) => {
@@ -857,6 +896,10 @@ export class BenchmarkService {
         return row.id as string;
       },
       tick: async () => void (await gate()?.tick()),
+      sandboxStarted: async (jobId) => {
+        const r = await gate()?.row(jobId);
+        return r ? !!(r.analysis_sandbox_id || r.red_sandbox_id || r.confirm_sandbox_id) : null;
+      },
       stop: async (jobId, reason) => void (await gate()?.stopSample(jobId, reason)),
       poll: async (_run, jobId, t) => {
         const task = t as ProgramTask;
@@ -937,18 +980,26 @@ export class BenchmarkService {
   /** Every agent with a task set: what it holds, and whether a run could start here now (and if not, why). */
   async agents() {
     const host = this.hostMissing();
+    const allowance = host ? null : await this.hostOutOfAllowance();
     const out = [];
     for (const agent of BENCHMARK_AGENTS) {
       const set = taskSetFor(agent);
       if (!set) continue;
       const a = this.adapters[agent];
       const own = await a.unavailable().catch((e) => (e as Error).message);
-      const whyNot = a.external ? own : (host ?? own);
+      // The host's allowance last: it is the one reason an admin can set aside (host_restored), once billing is back.
+      const usedUp = !a.external && !host && !own ? allowance : null;
+      const whyNot = a.external ? own : (host ?? own ?? usedUp);
       const cap = this.capCeilingUsd();
+      const budget = budgetFor(set.tasks.length, a.maxTaskUsd(), a.reserveUsd(), cap);
       out.push({
         agent,
+        // Whether start_benchmark_run would take a run of this agent now: what it needs is here, the sandbox host
+        // has allowance left as far as Mynt knows, and the cap covers at least one task.
+        can_start: !whyNot && budget.can_start,
+        host_allowance_used_up: !!usedUp,
         // What a run of this set could cost against what one run may spend, and what a chosen part of it would.
-        budget: budgetFor(set.tasks.length, a.maxTaskUsd(), a.reserveUsd(), cap),
+        budget,
         task_list: set.tasks.map((t) => ({ id: t.id, label: taskLabel(t) })),
         task_set: set.file,
         version: set.version,
@@ -1021,16 +1072,31 @@ export class BenchmarkService {
     return { ...(await this.run(id))!, budget: budgetFor(tasks.length, adapter.maxTaskUsd(), adapter.reserveUsd(), o.cap_usd) };
   }
 
-  // The sandbox host's allowance was used up the last time anything real tried to run, and nothing has run since.
+  // The sandbox host's allowance was used up the last time anything tried to run, and nothing has got a sandbox
+  // since: the last real build to end, or the last benchmark run of any agent to stop on it. A benchmark task that
+  // gets a sandbox afterwards clears either; so does a real build's sandbox after a benchmark's stop.
   private async hostOutOfAllowance(): Promise<string | null> {
+    const since = (at: string) => `EXISTS (SELECT 1 FROM ${T}.benchmark_results x WHERE x.sandbox_started AND x.started_at > ${at})`;
     try {
-      const last = await this.one(`SELECT error, finished_at FROM ${T}.build_runs WHERE finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1`);
-      if (last && isQuotaExhausted(last.error as string))
+      const last = await this.one(`SELECT b.error, b.finished_at, ${since("b.finished_at")} AS cleared FROM ${T}.build_runs b WHERE b.finished_at IS NOT NULL ORDER BY b.finished_at DESC LIMIT 1`);
+      if (last && !last.cleared && isQuotaExhausted(last.error as string))
         return `the sandbox host's allowance is used up: the last build to end (${iso(last.finished_at)}) failed with "${QUOTA_MESSAGE}" and none has run since. Once billing is added there, start the run with host_restored: true`;
     } catch {
       // no builds table on this Mynt: nothing to go by
     }
-    return null;
+    const stop = await this.one(
+      `SELECT r.id, r.agent, r.finished_at FROM ${T}.benchmark_runs r
+        WHERE r.status = 'stopped' AND r.stop_reason = $1 AND r.finished_at IS NOT NULL AND NOT ${since("r.finished_at")}
+        ORDER BY r.finished_at DESC LIMIT 1`,
+      [QUOTA_MESSAGE],
+    );
+    if (!stop) return null;
+    try {
+      if (await this.one(`SELECT 1 AS got FROM ${T}.build_runs b, ${T}.benchmark_runs r WHERE r.id = $1 AND b.sandbox_started_at > r.finished_at LIMIT 1`, [stop.id])) return null;
+    } catch {
+      // no builds table on this Mynt
+    }
+    return `the sandbox host's allowance is used up: the last benchmark run to ask it for a sandbox (${stop.agent}, ${iso(stop.finished_at)}) stopped with "${QUOTA_MESSAGE}" and no sandbox has started since. Once billing is added there, start the run with host_restored: true`;
   }
 
   async stop(runId: string, reason: string) {
@@ -1046,7 +1112,8 @@ export class BenchmarkService {
     const adapter = this.adapters[run.agent as BenchmarkAgent];
     for (const r of await this.all(`SELECT * FROM ${T}.benchmark_results WHERE run_id = $1 AND status = 'running'`, [run.id])) {
       if (r.job_id) await adapter.stop(r.job_id as string, `Benchmark run stopped: ${reason}`).catch(() => undefined);
-      await this.db.query(`UPDATE ${T}.benchmark_results SET status = 'failed', failure_class = 'harness', failed_check = 'run_stopped', detail = $2, finished_at = now() WHERE id = $1`, [r.id, `Stopped with the run: ${reason}`]);
+      const started = r.job_id && adapter.sandboxStarted ? await adapter.sandboxStarted(r.job_id as string).catch(() => null) : null;
+      await this.db.query(`UPDATE ${T}.benchmark_results SET status = 'failed', failure_class = 'harness', failed_check = 'run_stopped', detail = $2, sandbox_started = $3, finished_at = now() WHERE id = $1`, [r.id, `Stopped with the run: ${reason}`, started]);
     }
     await this.db.query(`UPDATE ${T}.benchmark_results SET status = 'not_run', detail = $2 WHERE run_id = $1 AND status = 'pending'`, [run.id, reason]);
     await this.db.query(`UPDATE ${T}.benchmark_runs SET status = $2, stop_reason = $3, finished_at = now() WHERE id = $1`, [run.id, status, reason]);
@@ -1096,7 +1163,7 @@ export class BenchmarkService {
       await adapter.tick();
       const outcome = await adapter.poll(run, current.job_id as string, task);
       if (!outcome) return;
-      await this.record(run, current, outcome);
+      await this.record(run, current, outcome, adapter);
       if (outcome.stop_run) await this.endRun(run, "stopped", outcome.stop_run);
       return;
     }
@@ -1124,21 +1191,29 @@ export class BenchmarkService {
       else {
         // The task never reached the agent: the host's fault when it looks like it, else the harness's. Never the agent's.
         const failureClass = failureClassOf(message) === "infrastructure" ? "infrastructure" : "harness";
-        await this.db.query(`UPDATE ${T}.benchmark_results SET status = 'failed', failure_class = $2, failed_check = $2, detail = $3, started_at = now(), finished_at = now() WHERE id = $1`, [next.id, failureClass, `The task couldn't be started: ${message}`.slice(0, 1000)]);
+        await this.db.query(`UPDATE ${T}.benchmark_results SET status = 'failed', failure_class = $2, failed_check = $2, detail = $3, cost_note = $4, started_at = now(), finished_at = now() WHERE id = $1`, [next.id, failureClass, `The task couldn't be started: ${message}`.slice(0, 1000), NOT_STARTED_NOTE]);
         if (isQuotaExhausted(message)) await this.endRun(run, "stopped", QUOTA_MESSAGE);
       }
     }
   }
 
-  private async record(run: Row, result: Row, o: Outcome) {
+  private async record(run: Row, result: Row, o: Outcome, adapter: Adapter) {
     const duration = o.started_at && o.finished_at ? Math.max(0, Date.parse(o.finished_at) - Date.parse(o.started_at)) : null;
+    // Did the task ever get a sandbox? Read from the job's own record, the same way for every agent that needs one.
+    const started = adapter.sandboxStarted ? await adapter.sandboxStarted(result.job_id as string).catch(() => null) : null;
+    // No sandbox, nothing ran: there is no cost to measure and nothing to count. Whatever the job's record holds
+    // (a column's default 0) was never a measurement.
+    const nothingRan = started === false;
+    const cost = nothingRan ? null : o.cost_usd;
+    // Work ran (or may have) and its cost couldn't be measured: the cap counts the task's whole budget, so it never
+    // under-counts. Kept apart from cost: it is a reservation, not money known to be spent.
+    const reserved = nothingRan || cost !== null ? null : Number(result.cap_usd ?? 0);
     await this.db.query(
       `UPDATE ${T}.benchmark_results SET status = $2, failure_class = $3, failed_check = $4, detail = $5, checks = $6, observed = $7, cost_usd = $8, cost_parts = $9, cost_note = $10,
-         duration_ms = $11, finished_at = COALESCE($12::timestamptz, now()) WHERE id = $1`,
-      [result.id, o.passed ? "passed" : "failed", o.failure_class, o.failed_check, o.detail, JSON.stringify(o.checks), JSON.stringify(o.observed ?? null), o.cost_usd, o.cost_parts ? JSON.stringify(o.cost_parts) : null, o.cost_note, duration, o.finished_at],
+         duration_ms = $11, finished_at = COALESCE($12::timestamptz, now()), sandbox_started = $13, reserved_usd = $14 WHERE id = $1`,
+      [result.id, o.passed ? "passed" : "failed", o.failure_class, o.failed_check, o.detail, JSON.stringify(o.checks), JSON.stringify(o.observed ?? null), cost, !nothingRan && o.cost_parts ? JSON.stringify(o.cost_parts) : null, nothingRan ? NO_SANDBOX_NOTE : o.cost_note, duration, o.finished_at, started, reserved],
     );
-    // Where nothing was measured, the cap counts the task's whole budget: it never under-counts.
-    await this.db.query(`UPDATE ${T}.benchmark_runs SET charged_usd = charged_usd + $2 WHERE id = $1`, [run.id, o.cost_usd ?? Number(result.cap_usd ?? 0)]);
+    await this.db.query(`UPDATE ${T}.benchmark_runs SET charged_usd = charged_usd + $2 WHERE id = $1`, [run.id, cost ?? reserved ?? 0]);
   }
 
   // ---- reading runs ----
@@ -1154,6 +1229,7 @@ export class BenchmarkService {
       status: r.status as string,
       stop_reason: (r.stop_reason as string | null) ?? null,
       cap_usd: Number(r.cap_usd),
+      // What the cap has counted. Not the run's cost: see measured_usd and reserved_usd, added where a run is read.
       charged_usd: cents(Number(r.charged_usd)),
       model: (r.model as string | null) ?? null,
       workspace_revisions: (r.workspace_revisions as Record<string, string>) ?? {},
@@ -1181,6 +1257,10 @@ export class BenchmarkService {
       cost_usd: usd(r.cost_usd),
       cost_parts: (r.cost_parts as Record<string, number | null> | null) ?? null,
       cost_note: r.cost_usd === null && ["passed", "failed"].includes(r.status as string) ? ((r.cost_note as string | null) ?? "Not measured") : ((r.cost_note as string | null) ?? null),
+      // What the cap counted for this task where its cost couldn't be measured after work ran: never a cost.
+      reserved_usd: usd(r.reserved_usd),
+      reserved_note: r.reserved_usd === null || r.reserved_usd === undefined ? null : RESERVED_NOTE,
+      sandbox_started: (r.sandbox_started as boolean | null) ?? null,
       duration_ms: num(r.duration_ms),
       started_at: iso(r.started_at),
       finished_at: iso(r.finished_at),
@@ -1194,9 +1274,8 @@ export class BenchmarkService {
   async run(id: string) {
     const r = await this.one(`SELECT r.*, u.name AS started_by_name FROM ${T}.benchmark_runs r LEFT JOIN ${T}.users u ON u.id = r.started_by WHERE r.id::text = $1`, [id]);
     if (!r) return null;
-    const run = this.runView(r);
     const tasks = await this.results(id);
-    return { run, scoreboard: scoreboard(tasks), tasks };
+    return { run: { ...this.runView(r), ...counted(Number(r.charged_usd), tasks) }, scoreboard: scoreboard(tasks), tasks };
   }
 
   async list(o: { agent?: string; limit?: number } = {}) {
@@ -1205,7 +1284,10 @@ export class BenchmarkService {
       [o.agent ?? null, Math.min(o.limit ?? 50, 200)],
     );
     const out = [];
-    for (const r of rows) out.push({ ...this.runView(r), scoreboard: scoreboard(await this.results(r.id as string)) });
+    for (const r of rows) {
+      const tasks = await this.results(r.id as string);
+      out.push({ ...this.runView(r), ...counted(Number(r.charged_usd), tasks), scoreboard: scoreboard(tasks) });
+    }
     return out;
   }
 
@@ -1219,6 +1301,23 @@ export class BenchmarkService {
 }
 
 const money = (n: number) => `US$${cents(n)}`;
+
+/**
+ * What a run's cap has counted, in its two parts: what was measured, and what was only reserved (the whole budget of
+ * each task whose cost couldn't be measured after work ran). The reserved part is never shown as money spent.
+ */
+export function counted(chargedUsd: number, tasks: { reserved_usd: number | null }[]) {
+  const held = tasks.filter((t) => t.reserved_usd !== null);
+  const reserved = cents(held.reduce((s, t) => s + (t.reserved_usd as number), 0));
+  return {
+    measured_usd: cents(Math.max(0, chargedUsd - reserved)),
+    reserved_usd: reserved,
+    reserved_tasks: held.length,
+    charged_note: held.length
+      ? `The cap counts ${money(cents(chargedUsd))}: ${money(cents(Math.max(0, chargedUsd - reserved)))} measured, and ${money(reserved)} reserved, not measured (the whole budget of ${held.length} task(s) whose cost couldn't be measured after work ran). The reserved part is not money known to be spent.`
+      : null,
+  };
+}
 
 /**
  * What a run of `tasks` tasks could cost at most, against `capUsd` (the most one run may spend, or a run's own cap):
@@ -1283,7 +1382,7 @@ export function registerBenchmarkTools(server: McpServer, store: Store, admin: U
     {
       title: "Agent benchmark runs",
       description:
-        "Admin: the agent benchmark runs, newest first, each with its scoreboard (tasks passed and failed on the agent's own account, the pass rate over those, infrastructure failures and tasks not run listed apart, cost and time), plus every agent that has a task set: how many tasks, each task's id, what a run needs, whether one could start here now (and if not, why), and its budget: what the whole set could cost at most against BENCHMARK_CAP_USD, how many tasks that cap is sure to cover in full, and a plain statement when it can't cover even one. Also the benchmarks' own records (their account, apps, stand-in firm and draft products), which no other list shows. A figure nothing measured is null with a note saying why, never 0.",
+        "Admin: the agent benchmark runs, newest first, each with its scoreboard (tasks passed and failed on the agent's own account, the pass rate over those, infrastructure failures and tasks not run listed apart, cost and time), plus every agent that has a task set: how many tasks, each task's id, what a run needs, whether one could start here now (can_start, and if not, why: that includes the sandbox host's allowance being used up when a real build or a benchmark run of any agent last asked it for a sandbox), and its budget: what the whole set could cost at most against BENCHMARK_CAP_USD, how many tasks that cap is sure to cover in full, and a plain statement when it can't cover even one. Also the benchmarks' own records (their account, apps, stand-in firm and draft products), which no other list shows. A figure nothing measured is null with a note saying why, never 0.",
       inputSchema: { agent: agent.optional().describe("Only this agent's runs"), limit: z.number().int().min(1).max(200).optional() },
       annotations: { readOnlyHint: true },
     },
@@ -1302,7 +1401,7 @@ export function registerBenchmarkTools(server: McpServer, store: Store, admin: U
     {
       title: "A benchmark run's scoreboard",
       description:
-        "Admin: one benchmark run: the agent, task set, model and the content hash of each agent workspace folder it ran with, its cap and what the cap has counted, why it stopped if it did, its scoreboard, and every task with its outcome, the check that failed, whether the failure was the agent's or the infrastructure's, each of Mynt's checks, cost and duration.",
+        "Admin: one benchmark run: the agent, task set, model and the content hash of each agent workspace folder it ran with, its cap and what the cap has counted (what was measured, and apart from it what was only reserved for a task whose cost couldn't be measured after work ran: never shown as money spent; a task that never got a sandbox counts nothing), why it stopped if it did, its scoreboard, and every task with its outcome, the check that failed, whether the failure was the agent's or the infrastructure's, each of Mynt's checks, cost and duration.",
       inputSchema: { run_id: z.string().min(1) },
       annotations: { readOnlyHint: true },
     },
@@ -1344,7 +1443,7 @@ export function registerBenchmarkTools(server: McpServer, store: Store, admin: U
           cap_usd: z.number().positive().describe("The most this run may spend, in US dollars. Required: there is no default."),
           label: z.string().trim().max(120).optional().describe("What this run is for, e.g. 'baseline before changing the secure skill'"),
           task_ids: z.array(z.string()).max(100).optional().describe("Only these tasks, by id (default: the whole set). list_benchmark_runs gives each agent's tasks and how many the cap is sure to cover in full"),
-          host_restored: z.boolean().optional().describe("Say true once the sandbox host's allowance, used up when a build last ran, has been restored"),
+          host_restored: z.boolean().optional().describe("Say true once the sandbox host's allowance, used up when a build or a benchmark run last asked it for a sandbox, has been restored"),
         })
         .strict(),
     },

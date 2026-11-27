@@ -255,6 +255,40 @@ describe("a run's page", () => {
     expect(cost).not.toMatch(/US\$0\.00/);
   });
 
+  it("a reservation for a task whose cost couldn't be measured is shown as reserved, never as money spent", () => {
+    // The third task's sandbox started and its cost was never measured: the cap counted its whole budget of US$10.
+    const reserved = lib.benchmarkDetailFrom({ run: runRow({ charged_usd: 11.3, measured_usd: 1.3, reserved_usd: 10 }), scoreboard: board(), tasks: TASKS.map((t) => (t.task_id === "closing-date-cd" ? { ...t, reserved_usd: 10 } : t)) })!;
+    expect([reserved.run.chargedUsd, reserved.run.measuredUsd, reserved.run.reservedUsd, reserved.tasks[2].reservedUsd, reserved.tasks[0].reservedUsd]).toEqual([11.3, 1.3, 10, 10, null]);
+    const card = renderToStaticMarkup(page({ detail: reserved }));
+    expect(card).toMatch(/<dt[^>]*>Cap<\/dt><dd[^>]*>US\$20 \(US\$11\.30 counted: US\$1\.30 measured, US\$10\.00 reserved, not measured\)/);
+    // The run's cost is what was measured, and so is the task's: empty with its reason.
+    expect(card).toMatch(/<dt[^>]*>Cost<\/dt><dd[^>]*>US\$1\.30/);
+    const cost = renderToStaticMarkup(page({ detail: reserved, initialTab: "cost" }));
+    expect(cost).toMatch(/data-task-budget="reserved"[^>]*>US\$10 \(counted against the cap as reserved, not measured\)/);
+    expect((cost.match(/data-task-budget="reserved"/g) ?? []).length).toBe(1);
+    expect(cost).toContain("Not measured: the build ended before Mynt first measured its cost");
+    expect(cost).not.toMatch(/data-task-cost="true">US\$1[01]/); // no task's cost is its budget
+    // A task that never got a sandbox counts nothing: the cap line stays as it was, with no reservation named.
+    const none = lib.benchmarkDetailFrom({ run: runRow({ charged_usd: 0, measured_usd: 0, reserved_usd: 0 }), scoreboard: board({ cost_usd: null, cost_note: "Not measured: no task has a recorded cost" }), tasks: TASKS })!;
+    expect(lib.countedWords(none.run)).toBe("US$20 (US$0.00 counted)");
+    expect(lib.taskBudgetWords(none.tasks[2])).toBe("US$10");
+    // An older Mynt that doesn't send the parts: nothing is invented.
+    expect(lib.countedWords(detailOf().run)).toBe("US$20 (US$1.30 counted)");
+  });
+
+  it("Task sets and Start run say when the sandbox host's allowance is used up, and the run can still be started once it's restored", () => {
+    const why = "The sandbox host's allowance is used up: the last benchmark run to ask it for a sandbox (coding, 2026-11-27T10:00:00.000Z) stopped and no sandbox has started since. Once billing is added there, start the run with host_restored: true";
+    const list = lib.benchmarkListFrom({ runs: [], agents: AGENTS.map((a) => (a.agent === "coding" ? { ...a, ready: false, can_start: false, host_allowance_used_up: true, why_not: why } : a)) })!;
+    const coding = list.agents.find((a) => a.agent === "coding")!;
+    expect([coding.ready, coding.hostAllowanceUsedUp, coding.whyNot]).toEqual([false, true, why]);
+    expect(list.agents.filter((a) => a.agent !== "coding").every((a) => a.hostAllowanceUsedUp === false)).toBe(true);
+    render(<StartRunSheet open agents={[coding]} maxCapUsd={25} onClose={() => undefined} onDone={() => undefined} />);
+    expect(document.querySelector("[data-start-run-not-ready]")!.textContent).toContain("A run can't start now: The sandbox host's allowance is used up");
+    expect(document.querySelector("[data-start-run-restored]")).not.toBeNull();
+    expect((document.querySelector("[data-start-run-submit]") as HTMLButtonElement).textContent).toBe("Start run");
+    expect(document.body.textContent).toContain("when a build or a benchmark run last asked the host for a sandbox");
+  });
+
   it("Compare: pick a baseline, then each task's change, the deltas and the regression gate's verdict", () => {
     const none = renderToStaticMarkup(page({ initialTab: "compare" }));
     expect(none).toContain("There is no other Coding agents run to compare against yet. Two runs are needed: one before a change, one after.");

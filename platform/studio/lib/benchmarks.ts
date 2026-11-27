@@ -51,7 +51,11 @@ export type BenchmarkRun = {
   status: string
   stopReason: string | null
   capUsd: number
+  // What the cap has counted, and its two parts: what Mynt measured, and what was only reserved (the whole budget of
+  // each task whose cost couldn't be measured after work ran). The reserved part is never money known to be spent.
   chargedUsd: number
+  measuredUsd: number | null
+  reservedUsd: number
   model: string | null
   workspaceRevisions: Record<string, string>
   sourceCommit: string | null
@@ -87,6 +91,8 @@ export type BenchmarkAgentInfo = {
   maxTaskUsd: number | null
   ready: boolean
   whyNot: string | null
+  // The sandbox host refused the last run for want of allowance: a run starts only once an admin says it's restored.
+  hostAllowanceUsedUp: boolean
   needs: string[]
 }
 export type BenchmarkCheck = { name: string; status: string; detail: string | null }
@@ -101,6 +107,8 @@ export type BenchmarkTask = {
   costUsd: number | null
   costParts: Record<string, number | null> | null
   costNote: string | null
+  // The task's whole budget, counted by the cap because its cost couldn't be measured after work ran. Never a cost.
+  reservedUsd: number | null
   durationMs: number | null
 }
 export type BenchmarkList = { runs: BenchmarkRun[]; agents: BenchmarkAgentInfo[]; maxCapUsd: number | null; records: BenchmarkRecord[]; recordsNote: string | null }
@@ -162,6 +170,8 @@ function runFrom(v: unknown, scoreboard: unknown): BenchmarkRun | null {
     stopReason: text(r.stop_reason),
     capUsd: count(r.cap_usd),
     chargedUsd: count(r.charged_usd),
+    measuredUsd: figure(r.measured_usd),
+    reservedUsd: count(r.reserved_usd),
     model: text(r.model),
     workspaceRevisions: Object.fromEntries(Object.entries(revisions).filter((e): e is [string, string] => typeof e[1] === "string")),
     sourceCommit: text(r.source_commit),
@@ -221,6 +231,7 @@ export function benchmarkListFrom(v: unknown): BenchmarkList | null {
       maxTaskUsd: figure(a.max_task_usd),
       ready: a.ready === true,
       whyNot: text(a.why_not),
+      hostAllowanceUsedUp: a.host_allowance_used_up === true,
       needs: words(a.needs),
     })),
     maxCapUsd: figure(row(body.cap)?.max_usd_per_run),
@@ -247,6 +258,7 @@ export function benchmarkDetailFrom(v: unknown): BenchmarkDetail | null {
       costUsd: figure(t.cost_usd),
       costParts: row(t.cost_parts) ? Object.fromEntries(Object.entries(row(t.cost_parts)!).map(([k, x]) => [k, figure(x)])) : null,
       costNote: text(t.cost_note),
+      reservedUsd: figure(t.reserved_usd),
       durationMs: figure(t.duration_ms),
     })),
   }
@@ -288,6 +300,14 @@ export const NOT_MEASURED = "Not measured"
 /** A figure, or "Not measured" with why. Never 0 for something nothing measured. */
 export const notMeasured = (why: string | null) => (why ? (why.startsWith(NOT_MEASURED) ? why : `${NOT_MEASURED}: ${why}`) : NOT_MEASURED)
 export const usdWords = (v: number | null, why: string | null = null) => (v === null ? notMeasured(why) : `US$${v.toFixed(2)}`)
+/** What a run's cap has counted. A reservation for an unmeasured task is named as one, never as money spent. */
+export const countedWords = (run: Pick<BenchmarkRun, "capUsd" | "chargedUsd" | "measuredUsd" | "reservedUsd">) =>
+  run.reservedUsd > 0
+    ? `US$${run.capUsd} (US$${run.chargedUsd.toFixed(2)} counted: US$${(run.measuredUsd ?? Math.max(0, run.chargedUsd - run.reservedUsd)).toFixed(2)} measured, US$${run.reservedUsd.toFixed(2)} reserved, not measured)`
+    : `US$${run.capUsd} (US$${run.chargedUsd.toFixed(2)} counted)`
+/** A task's budget on the Cost tab: marked when the cap counted all of it because nothing could be measured. */
+export const taskBudgetWords = (t: Pick<BenchmarkTask, "capUsd" | "reservedUsd">) =>
+  t.capUsd === null ? "Not set: the task never started" : t.reservedUsd !== null ? `US$${t.capUsd} (counted against the cap as reserved, not measured)` : `US$${t.capUsd}`
 export const rateWords = (v: number | null, why: string | null = null) => (v === null ? notMeasured(why) : `${Math.round(v * 1000) / 10}%`)
 export function durationWords(ms: number | null, why: string | null = null) {
   if (ms === null) return notMeasured(why)

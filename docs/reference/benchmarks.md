@@ -59,7 +59,7 @@ The benchmark calls the answer-writing code directly, so the per-person hourly q
 
 ### What a run records
 
-For the run: the agent, the task set with its version and hash, the model, a content hash of each agent workspace folder the set exercises (every file's path and text; for Ask AI, a hash of its instructions), the commit the server ran from when it runs from a git checkout, the cap, what the cap has counted, who started it, which tasks were chosen, and why it stopped if it did.
+For the run: the agent, the task set with its version and hash, the model, a content hash of each agent workspace folder the set exercises (every file's path and text; for Ask AI, a hash of its instructions), the commit the server ran from when it runs from a git checkout, the cap, what the cap has counted (`charged_usd`, with its two parts: `measured_usd` and `reserved_usd`, see [The cap](#the-cap)), who started it, which tasks were chosen, and why it stopped if it did.
 
 For each task:
 
@@ -156,9 +156,15 @@ A run stops spending in two ways.
 - **`cap_usd`, required when a run starts.** There is no default. Each task may spend at most what is left of the cap, and never more than the agent's own per-task cap. That clamp is inside each service, not only in the harness: the job's own record, the budget handed to the agent, and the agent proxy's limit for its token all hold the smaller figure. Room is kept for what Mynt may spend on top of a task. When what is left isn't enough for another task, the run ends as `stopped_at_cap`, the reason is recorded on the run, and the tasks left are recorded as not run.
 - **`BENCHMARK_CAP_USD`, an operational setting.** The most any one run's cap may be. Default 25, a number from 1 to 2000. A Mynt admin changes it in the platform admin's [Platform settings](platform-admin.md#platform-settings).
 
-Within a task, spend is held the way it is for any job: the agent proxy meters every model call against the task's budget and refuses calls once it is spent, and the service stops a job whose cost passes its cap. That stop is recorded as the agent's failure, with the check `budget`. Where a task's cost wasn't measured, the cap counts the task's whole budget, so the cap never under-counts.
+Within a task, spend is held the way it is for any job: the agent proxy meters every model call against the task's budget and refuses calls once it is spent, and the service stops a job whose cost passes its cap. That stop is recorded as the agent's failure, with the check `budget`. What the cap counts for a task is one of three things, the same for every agent:
 
-If the sandbox host runs out of allowance during a run, the run stops there with the reason, and no further task is tried.
+- **Its measured cost**, when Mynt measured one.
+- **Nothing**, when the task never got a sandbox (the host refused the VM, or the task couldn't be started). Nothing ran, so there is nothing to spend. The task's cost is empty, with a note saying no sandbox started; it is never shown as 0 and never as the task's budget.
+- **Its whole budget, reserved**, when work did run (a sandbox started, or Ask AI's runner took the task) and its cost couldn't be measured. This keeps the cap from under-counting. It is a reservation, not money known to be spent: the task's cost stays empty with its note, and the reservation is recorded apart as `reserved_usd`, with `reserved_note`.
+
+A run reports `charged_usd` (what the cap has counted), `measured_usd` and `reserved_usd` (its two parts) and, when anything was reserved, `charged_note`, which says so in words. The scoreboard's cost is only ever what was measured. The run's page shows the cap the same way: what was counted, and how much of that was measured and how much reserved, not measured.
+
+If the sandbox host runs out of allowance during a run, the run stops there with the reason, and no further task is tried. No run of any agent that needs the sandbox host starts after that, until a Mynt admin says the allowance is back or something gets a sandbox again (see [How to run](#how-to-run)).
 
 ### What a set could cost, against the cap
 
@@ -187,7 +193,7 @@ A run is started by a Mynt admin, from the platform admin's **Agent benchmarks**
 
 | Tool | What it does |
 | --- | --- |
-| `list_benchmark_runs` | The runs, newest first, each with its scoreboard. Also every agent with a task set (its tasks, what a run needs, whether one could start here now, and its budget against the cap), and the benchmarks' own records |
+| `list_benchmark_runs` | The runs, newest first, each with its scoreboard. Also every agent with a task set (its tasks, what a run needs, whether one could start here now (`can_start`, with `why_not` when it couldn't), and its budget against the cap), and the benchmarks' own records |
 | `get_benchmark_run` | One run: its scoreboard and every task with its outcome, failed check, failure class, checks, cost and duration |
 | `compare_benchmark_runs` | A candidate run against a baseline: pass rate, cost and time deltas, per-task changes, regressions listed, and the gate's verdict |
 | `start_benchmark_run` | Starts a run. Takes `agent` and `cap_usd`, and optionally `label`, `task_ids` and `host_restored`. Audited |
@@ -198,7 +204,7 @@ A run is started by a Mynt admin, from the platform admin's **Agent benchmarks**
 
 - no cap is given, or the cap is over `BENCHMARK_CAP_USD` or too small to start one task;
 - no sandbox host, no model backend or no `PUBLIC_URL` is configured (an Ask AI run needs none of them here);
-- the last real build to end failed because the sandbox host's allowance was used up, and none has run since. Once billing is added at the host, start the run with `host_restored: true`;
+- the sandbox host's allowance is used up, as far as Mynt knows: the last real build to end failed on it and none has run since, or the last benchmark run of any agent to ask the host for a sandbox stopped on it and no sandbox has started since. Once billing is added at the host, start the run with `host_restored: true`. A run that then gets a sandbox clears it for every agent. Until then `list_benchmark_runs` shows `can_start: false`, `host_allowance_used_up: true` and this reason for every agent that needs the sandbox host. Ask AI needs none, so it is never held back by this;
 - another run is still going;
 - something the agent's run needs is missing (below);
 - a `repository`, or any other argument it doesn't have, is passed.
@@ -261,7 +267,7 @@ Every test uses stand-in agents: no real agent, model or sandbox is started, and
 
 | Test file (`core/test/`) | What it proves |
 | --- | --- |
-| `benchmarks.test.js` | The task sets, the runner, scoring per agent, the cap, comparison and the gate script |
+| `benchmarks.test.js` | The task sets, the runner, scoring per agent, the cap, comparison and the gate script. With a host that refuses every VM: no task is charged on any agent's path (the program and scratch files cover their agents), the next start is refused until `host_restored` or a sandbox, and Ask AI is unaffected |
 | `benchmarks-programs.test.js` | Program audit and red team through the gate's own code; no program, review or artifact row is ever made; the sample gate can approve nothing |
 | `benchmarks-scratch.test.js` | The desk and the explorer with no GitHub App: zero calls to a repository host, the bundle transport against real `git`, and the per-task cap clamped inside the build, desk, connector and explorer services |
 | `benchmarks-records.test.js` | A run's records change no list, count or search; the mark is inherited where a row is made |
