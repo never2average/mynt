@@ -16,6 +16,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { workspaceFiles } from "../dist/agent-host.js";
 import { programSample, taskSetFor } from "../dist/benchmark-tasks.js";
+import { verifiableHash } from "../dist/solana/built-programs.js";
 import { GATE_SAMPLE_SCRIPT } from "../dist/solana/gate-scripts.js";
 import { SOLANA_VERIFY_SCRIPT } from "../dist/solana/toolchain.js";
 import { loadCrateAllowlist } from "../dist/solana/vuln-db.js";
@@ -51,7 +52,7 @@ for (const task of set.tasks) {
       const listed = JSON.parse(readFileSync(join(dir, "build/out/programs.json"), "utf8")).find((p) => p.name === sample.name);
       if (!listed) why = `Mynt's build listed no program '${sample.name}'`;
       else if (listed.declared_id !== sample.program_id) why = `the built program declares ${listed.declared_id}, not ${sample.program_id}`;
-      else if (createHash("sha256").update(readFileSync(join(dir, `build/out/${sample.name}.so`))).digest("hex") !== listed.sha256) why = "the program's bytes don't hash as the build recorded";
+      else if (verifiableHash(readFileSync(join(dir, `build/out/${sample.name}.so`))) !== listed.sha256) why = "the program's bytes don't hash as the build recorded";
       else console.log(`${task.id}: built ${sample.name} (${listed.size} bytes, sha256 ${listed.sha256})`);
     } else {
       const raw = readFileSync(join(dir, "build/out/sample.sources.json"));

@@ -25,7 +25,9 @@ const CONFIRM = "/home/user/mynt-confirm";
 const AUDIT_JOB = "/home/user/workspaces/program-audit/job";
 const RED_JOB = "/home/user/workspaces/program-red-team/job";
 const sha = (b) => createHash("sha256").update(b).digest("hex");
-const ELF = Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.from("a stand-in program, never run")]);
+const ELF = Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46]), Buffer.from("a stand-in program, never run"), Buffer.alloc(64)]);
+// Mynt's build records a program's hash without its zero padding (solana-verify.sh).
+const padless = (b) => sha(b.subarray(0, b.length - 64));
 const STATIC_OK = { tools: [{ name: "cargo-audit", version: "0", status: "ran", detail: "", findings: [] }, { name: "radar", version: "0", status: "ran", detail: "", findings: [] }] };
 
 // `play` says what each stand-in writes: { prep, static, findings, report, pocs, results } per sample name.
@@ -94,7 +96,7 @@ function standInHost(play) {
             put(s, `${SAMPLE}/build/out/${name}.so`, ELF);
             put(s, `${SAMPLE}/build/out/solana.sources.json`, raw);
             put(s, `${SAMPLE}/build/out/${name}.build-idl.json`, idl);
-            put(s, `${SAMPLE}/build/out/programs.json`, [{ name, size: ELF.length, sha256: sha(ELF), declared_id: p.declared_id ?? programId, sources: "solana.sources.json", sources_size: raw.length, sources_sha256: sha(raw), idl: `${name}.build-idl.json`, idl_size: idl.length, idl_sha256: sha(idl) }]);
+            put(s, `${SAMPLE}/build/out/programs.json`, [{ name, size: ELF.length, sha256: padless(ELF), declared_id: p.declared_id ?? programId, sources: "solana.sources.json", sources_size: raw.length, sources_sha256: sha(raw), idl: `${name}.build-idl.json`, idl_size: idl.length, idl_sha256: sha(idl) }]);
             put(s, `${SAMPLE}/build/out/checks.jsonl`, JSON.stringify({ name: "solana_build", status: "pass", detail: "" }));
             put(s, `${SAMPLE}/prep.json`, { built: true });
           }

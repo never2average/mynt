@@ -63,6 +63,13 @@ export async function buildCheck(sandboxes: SandboxHost, sandbox: string, outDir
   return row ? { status: String(row.status), detail: String(row.detail ?? "").slice(0, 1500) } : { status: "fail", detail: "Mynt's Solana build didn't finish" };
 }
 
+/** A program's hash as Mynt's build records it: of its bytes without the zero padding at the end (solana-verify.sh). */
+export function verifiableHash(program: Uint8Array): string {
+  let end = program.length;
+  while (end > 0 && program[end - 1] === 0) end--;
+  return createHash("sha256").update(program.subarray(0, end)).digest("hex");
+}
+
 /** Every program the build listed (programs.json) whose bytes Mynt read back and that hash as the build said. */
 export async function readBuiltPrograms(sandboxes: SandboxHost, sandbox: string, outDir: string): Promise<BuiltProgram[]> {
   const listed = parse<Listed[]>(await sandboxes.readFile(sandbox, `${outDir}/programs.json`));
@@ -70,7 +77,7 @@ export async function readBuiltPrograms(sandboxes: SandboxHost, sandbox: string,
   for (const p of Array.isArray(listed) ? listed : []) {
     if (!/^[a-z0-9_]+$/.test(String(p.name)) || !(p.size > 0 && p.size <= MAX_SAMPLE_PROGRAM_BYTES)) continue;
     const program = await readBack(sandboxes, sandbox, `${outDir}/${p.name}.so`, p.size);
-    if (!program || !program.subarray(0, 4).equals(ELF_MAGIC) || createHash("sha256").update(program).digest("hex") !== p.sha256) continue;
+    if (!program || !program.subarray(0, 4).equals(ELF_MAGIC) || verifiableHash(program) !== p.sha256) continue;
     const kept = async <X>(key: Kind) => {
       const file = p[key];
       return file && /^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.json$/.test(file) ? readBackJson<X>(sandboxes, sandbox, `${outDir}/${file}`, p[`${key}_size`], p[`${key}_sha256`]) : null;
