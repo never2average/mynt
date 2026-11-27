@@ -6,7 +6,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { AgentMeter } from "./agent-meter.js";
 import type { AgentRun } from "./agent-proxy.js";
-import { agentState, launchAgent, WORKSPACES_ROOT } from "./agent-host.js";
+import { AGENT_DIR, agentState, launchAgent, WORKSPACES_ROOT } from "./agent-host.js";
 import type { SandboxHost } from "./sandbox-host.js";
 import type { Db } from "./db.js";
 import type { DeskConfig, DeskService } from "./desk.js";
@@ -16,6 +16,7 @@ import type { RepoAccess } from "./github.js";
 import { requireApproved } from "./repo-approvals.js";
 import { REPO_DIR, startRepoRun } from "./repo-run.js";
 import type { ReviewService } from "./review.js";
+import { packScratchCommit, prepareScratchRepo, SCRATCH_REPOSITORY, SCRATCH_TOKEN, scratchHead, startScratchRun } from "./scratch-repo.js";
 import type { Store, User } from "./store.js";
 import { failureMessage, GraceTracker } from "./transient.js";
 import { serialLoop } from "./worker.js";
@@ -62,6 +63,7 @@ export function exploreConfigFromEnv(desk: DeskConfig, env = process.env): Explo
 }
 
 export const MAX_EXPLORERS = 5;
+export const DEFAULT_EXPLORERS = 3;
 export const DECISION_PURPOSES = ["eligibility", "underwriting", "limit_assignment", "pricing", "fraud_screening"];
 
 const TABLES = `
@@ -226,6 +228,15 @@ export class ExploreService {
     return this.desk.agentsEnabled;
   }
 
+  // Agent benchmarks only: the desk this belongs to works in scratch repositories (DeskConfig.scratchWorkspace, set
+  // by benchmarks.ts on its own instance). There is no firm repository, GitHub App, token or pull request: Mynt puts
+  // the pinned algorithm into a scratch repository in each explorer's sandbox, and moves what was pushed to its
+  // scoring sandboxes itself (scratch-repo.ts). `scratchSeed` gives the pinned algorithm's files for a job.
+  private get scratch() {
+    return this.desk.config.scratchWorkspace === true;
+  }
+  scratchSeed: ((job: Row) => Promise<Record<string, string>> | Record<string, string>) | null = null;
+
   private async all(sql: string, params: unknown[] = []) {
     return (await this.db.query(sql, params)).rows as Row[];
   }
@@ -254,11 +265,13 @@ export class ExploreService {
       constraints?: { max_loss_rate_pct?: number; apr_cap_pct?: number; min_adverse_impact_ratio?: number };
       explorers?: number;
       cap_usd?: number;
+      angles?: string[]; // the angles to hand out, in order, instead of the workspace's own order (agent benchmarks)
     },
   ) {
     if (!this.enabled) throw new Error("Algorithm explorations aren't enabled on this Mynt yet");
     if (!user.entity_id) throw new Error("Join or create your firm first (create_entity)");
-    const ws = await this.desk.approvedWorkspace(user.entity_id);
+    if (this.scratch && !this.scratchSeed) throw new Error("A scratch exploration needs the pinned algorithm's files to start from");
+    const ws = this.scratch ? null : await this.desk.approvedWorkspace(user.entity_id);
     const p = await this.store.getProduct(o.product_id);
     // The firm's product (or, for a product with no firm, the caller's own): the workspace and budget are the firm's.
     if (!p || (p.entity_id ? p.entity_id !== user.entity_id : p.owner_id !== user.id)) throw new Error(`No product of your firm's with id '${o.product_id}'`);
@@ -268,7 +281,10 @@ export class ExploreService {
     if (!DECISION_PURPOSES.includes(algorithm.purpose)) throw new Error(`Explorations cover decision algorithms (${DECISION_PURPOSES.join(", ")}); '${algorithm._id}' is for ${algorithm.purpose}`);
     const running = await this.one("SELECT id FROM financial_products.explore_jobs WHERE product_id = $1 AND algorithm_id = $2 AND status <> ALL($3)", [p.product.id, algorithm._id, DONE]);
     if (running) throw new Error(`An exploration of this algorithm is already running (${running.id})`);
-    const explorers = Math.min(Math.max(o.explorers ?? 3, 1), MAX_EXPLORERS);
+    const explorers = Math.min(Math.max(o.explorers ?? DEFAULT_EXPLORERS, 1), MAX_EXPLORERS);
+    const every = explorationAngles();
+    const unknown = (o.angles ?? []).filter((a) => !every.some((x) => x.id === a));
+    if (unknown.length) throw new Error(`No exploration angle '${unknown[0]}' (there are: ${every.map((a) => a.id).join(", ")})`);
     const cap = Math.min(o.cap_usd ?? this.config.capUsd, this.config.capUsd);
     const monthly = this.desk.config.monthlyCapUsd;
     if ((await this.desk.monthCommitted(user.entity_id)) + cap > monthly) throw new Error(`Your firm's monthly desk budget of US$${monthly} is used up`);
@@ -280,8 +296,9 @@ export class ExploreService {
     if (constraints.apr_cap_pct === null) throw new Error("Set an APR cap first: apr_cap_pct here or on the term sheet, or a cap on the product's lending rate");
     // The baseline is the pinned version as it is now, as a commit: a tag or branch moved later doesn't change it.
     const baseRef = algorithm.version ?? "HEAD";
-    const baseSha = await this.repos!.resolveRef(ws.repository, ws.installation_id, baseRef);
-    if (!baseSha) throw new Error(`The pinned version '${baseRef}' isn't in ${ws.repository}`);
+    // A scratch repository doesn't exist yet: its first commit becomes the baseline when Mynt makes it (see advance).
+    const baseSha = ws ? await this.repos!.resolveRef(ws.repository, ws.installation_id, baseRef) : null;
+    if (ws && !baseSha) throw new Error(`The pinned version '${baseRef}' isn't in ${ws.repository}`);
     const id = randomUUID();
     // The dataset secret seeds both splits; it stays in this record and is never shown or sent to a sandbox.
     const dataset = { params, economics, assumptions, secret: newDatasetSecret(), sizes: { dev: DATASET_SIZE, holdout: DATASET_SIZE } };
@@ -295,7 +312,7 @@ export class ExploreService {
       if (/explore_jobs_active_idx|duplicate key/.test((e as Error).message)) throw new Error("An exploration of this algorithm is already running");
       throw e;
     }
-    const angles = explorationAngles();
+    const angles = o.angles?.length ? o.angles.map((a) => every.find((x) => x.id === a)!) : every;
     await this.db.query("INSERT INTO financial_products.explore_variants (job_id, k, angle, branch, commit_sha, status) VALUES ($1, 0, NULL, $2, $3, 'waiting')", [id, baseRef, baseSha]);
     // Branch names with a random part: explorers can't aim at each other's branches by guessing them.
     for (let k = 1; k <= explorers; k++) {
@@ -469,6 +486,12 @@ export class ExploreService {
 
   // A fresh push token into an explorer's sandbox, for its credential helper to read.
   private async writeToken(j: Row, v: Row) {
+    if (this.scratch) {
+      // Nothing to mint: the explorer's git never leaves its sandbox. The file its credential helper reads still exists.
+      await this.sandboxes!.writeFile(v.sandbox_id as string, TOKEN_FILE, SCRATCH_TOKEN);
+      await this.updateVariant(j.id as string, Number(v.k), { token_minted_at: new Date().toISOString() });
+      return;
+    }
     const ws = await this.workspaceOf(j);
     const { token } = await this.repos!.tokenFor(ws.repository, ws.installation_id);
     await this.sandboxes!.writeFile(v.sandbox_id as string, TOKEN_FILE, token);
@@ -482,7 +505,7 @@ export class ExploreService {
     const explorers = vs.filter((v) => Number(v.k) > 0);
 
     if (j.status === "queued") {
-      const ws = await this.workspaceOf(j);
+      const ws = this.scratch ? { repository: SCRATCH_REPOSITORY } : await this.workspaceOf(j);
       // Idempotent: a tick that failed halfway doesn't create a second sandbox for an explorer that has one. The
       // push token comes later, just before launch, as a file (see TOKEN_FILE).
       for (const v of explorers) {
@@ -513,6 +536,17 @@ export class ExploreService {
         const k = Number(v.k);
         if (v.status === "provisioning") {
           if (!(await this.ready(v.sandbox_id as string))) continue;
+          if (this.scratch) {
+            // The pinned algorithm, as the scratch repository's first commit: the same files make the same commit in
+            // every explorer's sandbox, and that commit is the baseline Mynt scores.
+            const base = await prepareScratchRepo(sandboxes, v.sandbox_id as string, await this.scratchSeed!(j), "The algorithm as pinned");
+            if (j.base_sha && j.base_sha !== base) throw new Error("The explorers' scratch repositories don't start from the same commit");
+            if (!j.base_sha) {
+              await this.update(id, { base_sha: base });
+              await this.updateVariant(id, 0, { commit_sha: base });
+              j.base_sha = base;
+            }
+          }
           await this.writeToken(j, v);
           const token = `mynt_explore_${randomBytes(24).toString("base64url")}`;
           await this.updateVariant(id, k, { token_hash: hash(token) });
@@ -542,13 +576,16 @@ export class ExploreService {
             summary: agent.state?.summary?.slice(0, 4000) ?? null,
             error: agent.ok ? null : overtime && agent.running ? "Over the time limit" : `Explorer ${agent.state?.error ?? agent.state?.last_subtype ?? "exited"}`,
           });
-          await sandboxes.stop(v.sandbox_id as string).catch(() => {});
+          // A scratch repository lives in the explorer's sandbox, so the sandbox stays until Mynt has taken the pushed
+          // commit out of it (every sandbox is stopped when the job ends); only the explorer itself is stopped now.
+          if (this.scratch) await sandboxes.exec(v.sandbox_id as string, `pkill -KILL -f '${AGENT_DIR}/[r]unner.mjs'; pkill -KILL -f '[.]mynt-claude/node_modules'; true`, { timeoutSeconds: 60 }).catch(() => {});
+          else await sandboxes.stop(v.sandbox_id as string).catch(() => {});
           v.status = "finishing";
         }
         if (v.status === "finishing") {
           // Pin what the explorer pushed now: whatever lands on its branch later isn't what gets scored or adopted.
-          const ws = await this.workspaceOf(j);
-          const head = await this.repos!.resolveRef(ws.repository, ws.installation_id, v.branch as string);
+          const ws = this.scratch ? null : await this.workspaceOf(j);
+          const head = ws ? await this.repos!.resolveRef(ws.repository, ws.installation_id, v.branch as string) : await scratchHead(sandboxes, v.sandbox_id as string, v.branch as string);
           await this.updateVariant(id, k, { status: (await this.variant(id, k)).agent_ok ? "explored" : "failed", commit_sha: head });
         }
       }
@@ -573,18 +610,25 @@ export class ExploreService {
         if (!v.score_process_id) {
           if (!(await this.ready(sandbox))) continue;
           holdout ??= this.split(j, "holdout");
-          const ws = await this.workspaceOf(j);
+          const ws = this.scratch ? null : await this.workspaceOf(j);
           // Exactly the pinned commit, and only the holdout's features; the truth stays in Mynt.
-          const pid = await startRepoRun(sandboxes, this.repos!, sandbox, {
-            repository: ws.repository,
-            installationId: ws.installation_id,
-            ref: v.commit_sha as string,
+          const run = {
             dir: DIR,
             outcome: `${JOB}/outcome.json`,
             cloneFailure: { outcome: "error", error: `Couldn't check out commit ${String(v.commit_sha).slice(0, 7)}`, log: "" },
             files: { [`${DIR}/run-decide.mjs`]: DECIDE_RUNNER, [`${JOB}/applicants.jsonl`]: jsonl(holdout.applicants) },
             command: `node ${DIR}/run-decide.mjs ${REPO_DIR} ${JOB} '${String(j.model_dir).replace(/[^\w./-]/g, "")}'`,
-          });
+          };
+          let pid: string;
+          if (ws) pid = await startRepoRun(sandboxes, this.repos!, sandbox, { repository: ws.repository, installationId: ws.installation_id, ref: v.commit_sha as string, ...run });
+          else {
+            // Mynt packs the pinned commit out of the scratch repository it was pushed to (the baseline: out of the
+            // first explorer's, where Mynt committed it). A commit's name is the hash of its content, so what the
+            // scoring sandbox checks out is what was pinned, or nothing.
+            const from = (k === 0 ? vs.find((x) => Number(x.k) > 0 && x.sandbox_id) : v)?.sandbox_id as string | undefined;
+            if (!from) throw new Error("No explorer sandbox holds the scratch repository");
+            pid = await startScratchRun(sandboxes, sandbox, { ...run, bundle: await packScratchCommit(sandboxes, from, v.commit_sha as string, `score-${k}`) });
+          }
           await this.updateVariant(id, k, { score_process_id: pid });
           continue;
         }
@@ -679,6 +723,7 @@ export class ExploreService {
     const j = await this.one("SELECT * FROM financial_products.explore_jobs WHERE id::text = $1", [jobId]);
     if (!j || j.entity_id !== user.entity_id) throw new Error(`No exploration of your firm's with id '${jobId}'`);
     if (j.status !== "finished") throw new Error("The exploration hasn't finished yet");
+    if (this.scratch) throw new Error("A benchmark's exploration has no repository to open a pull request in: nothing is adopted");
     if (k === 0) throw new Error("The baseline is the version already pinned");
     const v = (await this.variants(jobId)).find((x) => Number(x.k) === k);
     if (!v) throw new Error(`No explorer ${k} in this exploration`);

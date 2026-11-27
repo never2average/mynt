@@ -8,7 +8,7 @@
   "required": ["agent", "version", "title", "description", "workspaces", "tasks"],
   "properties": {
     "$schema": { "type": "string" },
-    "agent": { "enum": ["coding", "product-desk", "governance-review", "program-audit", "program-red-team", "connector"] },
+    "agent": { "enum": ["coding", "product-desk", "algorithm-explorer", "governance-review", "program-audit", "program-red-team", "connector"] },
     "version": { "type": "integer", "minimum": 1 },
     "title": { "type": "string", "minLength": 3, "maxLength": 120 },
     "description": { "type": "string", "minLength": 20, "maxLength": 2000 },
@@ -24,6 +24,7 @@
   "allOf": [
     { "if": { "properties": { "agent": { "const": "coding" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/codingTask" } } } } },
     { "if": { "properties": { "agent": { "const": "product-desk" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/deskTask" } } } } },
+    { "if": { "properties": { "agent": { "const": "algorithm-explorer" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/explorerTask" } } } } },
     { "if": { "properties": { "agent": { "const": "governance-review" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/reviewTask" } } } } },
     { "if": { "properties": { "agent": { "const": "program-audit" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/programAuditTask" } } } } },
     { "if": { "properties": { "agent": { "const": "program-red-team" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/programRedTeamTask" } } } } },
@@ -59,6 +60,57 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": { "enum": ["source", "tests", "lint_typecheck", "secrets_scan", "secrets_history", "static_scan", "dependency_audit", "sbom", "disclosures", "solana_build"] }
+        }
+      }
+    },
+    "explorerTask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "product", "terms", "algorithm", "baseline_dir", "angle", "objective", "constraints"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "idea": { "description": "The starter product idea the product record is taken from (workspaces/coding-build/templates/product-ideas.seed.json).", "type": "string" },
+        "product": { "description": "The product record whose algorithm is explored. It must pass Mynt's product checks.", "$ref": "#/$defs/deskTask/properties/product" },
+        "terms": {
+          "description": "The term sheet Mynt builds the synthetic applicants and the loan economics from (apr_pct, expected_pd_pct, lgd_pct, cost_of_funds_pct, opex_pct, tenor_months, min_amount, max_amount).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["inputs"],
+          "properties": {
+            "inputs": { "type": "object", "minProperties": 1, "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" }, "additionalProperties": { "type": ["number", "string", "boolean"] } },
+            "assumptions": { "type": "object" }
+          }
+        },
+        "algorithm": {
+          "description": "The decision algorithm to improve, as an entry of the product definition's core_algorithms.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["_id", "algorithm_name", "description", "purpose", "repository"],
+          "properties": {
+            "_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+            "algorithm_name": { "type": "string", "minLength": 3 },
+            "description": { "type": "string", "minLength": 10 },
+            "purpose": { "enum": ["eligibility", "underwriting", "limit_assignment", "pricing", "fraud_screening"] },
+            "repository": { "description": "The algorithm's folder in the workspace repository.", "type": "string", "pattern": "^models/[a-z0-9][a-z0-9_-]*$" }
+          }
+        },
+        "baseline_dir": {
+          "description": "The algorithm as pinned when the exploration starts: a folder of this repository, relative to core/, holding the workspace repository's files. Mynt commits it as the scratch repository's first commit and scores it as the baseline.",
+          "type": "string",
+          "pattern": "^benchmarks/fixtures/algorithms/[a-z0-9-]+$"
+        },
+        "angle": { "description": "The one explorer's angle (workspaces/algorithm-explorer/angles.json).", "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "objective": { "description": "The one metric to maximise, as Mynt's scorer computes it on the holdout.", "enum": ["net_margin", "net_margin_pct", "approved_volume", "approval_rate", "interest_revenue"] },
+        "constraints": {
+          "description": "What must hold on the holdout for a variant to be eligible. Stated in full, so a task never depends on a default.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_loss_rate_pct", "apr_cap_pct", "min_adverse_impact_ratio"],
+          "properties": {
+            "max_loss_rate_pct": { "type": "number", "exclusiveMinimum": 0 },
+            "apr_cap_pct": { "type": "number", "exclusiveMinimum": 0, "maximum": 100 },
+            "min_adverse_impact_ratio": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
         }
       }
     },
