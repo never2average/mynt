@@ -11,7 +11,10 @@
 #   2. sets the enclave allocator to 2 vCPUs and 3 GiB, the enclave's whole share of the instance;
 #   3. builds the enclave image file from this checkout (build-eif.sh) and refuses to go on unless its PCR0 is one the
 #      key policy allows: the same commit gives the same PCRs CI printed;
-#   4. writes the service's settings (region, wrap key ARN, the authority for Mynt's client certificate; none secret);
+#   4. writes the service's settings (region, wrap key ARN, the one authority for Mynt's client certificate; none
+#      secret) and prints the authority's SHA-256. The enclave binds all three into every attestation, and Mynt's
+#      server and partners refuse an enclave whose settings aren't the ones they expect, so changing this file on
+#      the instance (to another key, or to an authority of one's own) doesn't go unnoticed: it stops the service;
 #   5. installs systemd units for the enclave and the five relays it needs, and starts them:
 #        TCP 8443 (from Mynt's server only: the security group) -> enclave vsock 8443   inbound mutual TLS, end to end
 #        vsock 8000 -> kms.<region>.amazonaws.com:443 (AWS's vsock-proxy)              KMS, TLS end to end
@@ -62,11 +65,14 @@ python3 -I - "$REGION" "$KMS_KEY" "$CLIENT_CA_B64" >/etc/mynt-keyhouse/settings.
 import base64, json, sys
 region, kms_key, ca_b64 = sys.argv[1:4]
 ca = base64.b64decode(ca_b64).decode()
-if "-----BEGIN CERTIFICATE-----" not in ca:
-    sys.exit("the client authority isn't a base64 PEM certificate")
+# Exactly one certificate: the enclave refuses a bundle, since a second authority could call it as Mynt's server.
+if ca.count("-----BEGIN CERTIFICATE-----") != 1 or ca.count("-----BEGIN ") != 1:
+    sys.exit("the client authority must be exactly one base64 PEM certificate")
 print(json.dumps({"region": region, "kms_key": kms_key, "client_ca": ca}))
 PY
 chmod 0644 /etc/mynt-keyhouse/settings.json
+CLIENT_CA_SHA256="$(python3 -I -c 'import base64,hashlib,json,re,sys; pem=json.load(open(sys.argv[1]))["client_ca"]; print(hashlib.sha256(base64.b64decode(re.sub(r"-----[A-Z ]+-----|\s", "", pem))).hexdigest())' /etc/mynt-keyhouse/settings.json)"
+echo "The enclave will accept client certificates from one authority, SHA-256 $CLIENT_CA_SHA256 (make-client-cert.sh printed the same on Mynt's server)."
 
 unit() { cat >"/etc/systemd/system/$1.service"; }
 unit mynt-keyhouse-enclave <<EOF

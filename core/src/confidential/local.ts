@@ -4,7 +4,7 @@ import { KEYS_SCHEMA, type EnclaveKeys } from "./shared/binding.js";
 import { x25519FromSeed, x25519PublicRaw } from "./shared/envelope.js";
 import { computeSealedHealth, HEALTH_ATTESTER_KEY, type SealedHealthInput } from "./shared/health.js";
 import { childKey, newVaultBundle, releaseFromBundle, sealUnder, unsealUnder } from "./shared/sealing.js";
-import { ConfidentialRefused, isPurpose, PURPOSES, type Attestation, type ConfidentialHost, type Measurements, type Purpose, type SigningKeyRef } from "./host.js";
+import { ConfidentialRefused, isPurpose, PURPOSES, RESERVED_SIGNING_KEYS, type Attestation, type ConfidentialHost, type Measurements, type Purpose, type SigningKeyRef } from "./host.js";
 
 // The local host: everything in Mynt's own process, keyed by a key derived from MYNT_VAULT_KEY. Today's behaviour, so
 // development and tests run without a confidential VM, and so every server keeps working until the operator deploys
@@ -45,20 +45,24 @@ export class LocalConfidentialHost implements ConfidentialHost {
     return { host: "local", format: "none", token: null, nonce, keys: await this.keys(), measurements: await this.measurements() };
   }
 
-  async seal(purpose: Purpose, plaintext: Uint8Array) {
+  async seal(purpose: Purpose, plaintext: Uint8Array, context?: string) {
     if (!isPurpose(purpose)) throw new ConfidentialRefused(`Unknown purpose ${purpose}`);
-    return sealUnder(this.root(), TAG, purpose, plaintext);
+    return sealUnder(this.root(), TAG, purpose, plaintext, context);
   }
 
-  async unseal(purpose: Purpose, sealed: string) {
+  async unseal(purpose: Purpose, sealed: string, context?: string) {
     if (!isPurpose(purpose)) throw new ConfidentialRefused(`Unknown purpose ${purpose}`);
     if (!PURPOSES[purpose].unseal) throw new ConfidentialRefused(`What's sealed for ${purpose} never leaves the confidential host`);
-    return unsealUnder(this.root(), TAG, purpose, sealed);
+    return unsealUnder(this.root(), TAG, purpose, sealed, context);
+  }
+
+  private signWith(priv: KeyObject, message: Uint8Array) {
+    return { public_key: ed25519PublicRaw(priv), signature: edSign(null, Buffer.from(message), priv).toString("hex") };
   }
 
   async sign(key: SigningKeyRef, message: Uint8Array) {
-    const priv = "name" in key ? this.signer(key.name) : ed25519FromSeed(unsealUnder(this.root(), TAG, "signing-key", key.sealed));
-    return { public_key: ed25519PublicRaw(priv), signature: edSign(null, Buffer.from(message), priv).toString("hex") };
+    if ("name" in key && RESERVED_SIGNING_KEYS.includes(key.name)) throw new ConfidentialRefused(`The ${key.name} key signs only inside the confidential host's own check, never a message handed to it`);
+    return this.signWith("name" in key ? this.signer(key.name) : ed25519FromSeed(unsealUnder(this.root(), TAG, "signing-key", key.sealed)), message);
   }
 
   async publicKey(name: string) {
@@ -70,7 +74,7 @@ export class LocalConfidentialHost implements ConfidentialHost {
   }
 
   async computeHealth(input: SealedHealthInput) {
-    return computeSealedHealth({ ...input, host: "local" }, { ingest: this.ingest(), sign: (m) => this.sign({ name: HEALTH_ATTESTER_KEY }, m) });
+    return computeSealedHealth({ ...input, host: "local" }, { ingest: this.ingest(), sign: async (m) => this.signWith(this.signer(HEALTH_ATTESTER_KEY), m) });
   }
 
   async adoptVaultRoot(legacyRoot: Uint8Array) {

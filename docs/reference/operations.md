@@ -451,7 +451,7 @@ Mynt's settings are kept in three places.
 |---|---|
 | `DATABASE_URL` | Mynt needs it to open the database the vault is kept in |
 | `MYNT_VAULT_KEY` | It is the key the vault is sealed with |
-| `CONFIDENTIAL_HOST`, `CONFIDENTIAL_HOST_URL`, `CONFIDENTIAL_HOST_CLIENT_CERT`, `CONFIDENTIAL_HOST_CLIENT_KEY`, `CONFIDENTIAL_HOST_KMS_KEY` | They are read before the vault opens; the certificate and key are files on the server's disk |
+| `CONFIDENTIAL_HOST`, `CONFIDENTIAL_HOST_URL`, `CONFIDENTIAL_HOST_CLIENT_CERT`, `CONFIDENTIAL_HOST_CLIENT_KEY`, `CONFIDENTIAL_HOST_CLIENT_CA`, `CONFIDENTIAL_HOST_KMS_KEY` | They are read before the vault opens; the certificate and key are files on the server's disk |
 | `GOOGLE_APPLICATION_CREDENTIALS` | It names a key file on the server's disk |
 | `FINANCIAL_PRODUCTS_TOKEN` | It says who is running the stdio command |
 
@@ -521,7 +521,7 @@ Identifiers that go with a vault key but aren't secret stay in the environment t
 | `SOLANA_MAINNET_VAULT_SIGNER`, `TURNKEY_ORGANIZATION_ID`, `TURNKEY_API_PUBLIC_KEY`, `TURNKEY_API_PRIVATE_KEY`, `TURNKEY_APPROVAL_TIMEOUT_SECONDS` | The mainnet signer and Turnkey custody | [Turnkey custody](solana-programs.md#turnkey-custody) |
 | `PROGRAM_GATE_MODEL`, `PROGRAM_GATE_MONTHLY_CAP_USD`, `PROGRAM_AUDIT_CAP_USD`, `PROGRAM_AUDIT_MINUTES`, `PROGRAM_RED_TEAM_CAP_USD`, `PROGRAM_RED_TEAM_MINUTES`, `PROGRAM_ANALYSIS_MINUTES`, `PROGRAM_GATE_CARGO_AUDIT_IGNORE` | The mainnet program gate's reviews | [Budget](solana-programs.md#budget) |
 | `MAINNET_UPGRADE_TIMELOCK_HOURS`, `MAINNET_APPROVAL_TTL_DAYS`, `PROGRAM_SOURCE_RETENTION_DAYS` | The gate's timelock, approval lifetime and source retention | [Sign-off and timelock](solana-programs.md#sign-off-and-timelock) |
-| `CONFIDENTIAL_HOST`, `CONFIDENTIAL_HOST_URL`, `CONFIDENTIAL_HOST_CLIENT_CERT`, `CONFIDENTIAL_HOST_CLIENT_KEY`, `CONFIDENTIAL_HOST_KMS_KEY` | The confidential host this server uses | [Confidential computing settings](confidential-computing.md#confidential-computing-settings) |
+| `CONFIDENTIAL_HOST`, `CONFIDENTIAL_HOST_URL`, `CONFIDENTIAL_HOST_CLIENT_CERT`, `CONFIDENTIAL_HOST_CLIENT_KEY`, `CONFIDENTIAL_HOST_CLIENT_CA`, `CONFIDENTIAL_HOST_KMS_KEY` | The confidential host this server uses | [Confidential computing settings](confidential-computing.md#confidential-computing-settings) |
 | `ESIGN_PROVIDER`, `SIGNWELL_API_KEY`, `SIGNWELL_WEBHOOK_ID`, `ESIGN_TEST_MODE` | Overrides for the e-signature set-up admins make in Studio | [Environment overrides](agreements.md#environment-overrides) |
 | `MYNT_BACKUP_STATUS_FILE` | Where `ops_status` reads the backup's status from | [Checking backups](#checking-backups) |
 | `BUILD_POLL_MS`, `DESK_POLL_MS`, `REVIEW_POLL_MS`, `BD_POLL_MS`, `PROGRAM_GATE_POLL_MS`, `PRODUCT_HEALTH_POLL_MS`, `FIRM_CHECKS_POLL_MS` | How often each background worker looks for work | [Background work](../architecture.md#background-work) |

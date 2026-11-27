@@ -275,9 +275,10 @@ export class PlatformKeyVault {
     this.listeners.push(f);
   }
 
-  private async unseal(sealed: string): Promise<string> {
-    // Rows from before this table was general were sealed by the vault itself (vault.ts); new ones by the host.
-    return sealed.startsWith("cs1:") ? (await this.host.unseal("secret", sealed)).toString("utf8") : openLegacy(sealed, false);
+  private async unseal(sealed: string, type: string): Promise<string> {
+    // Rows from before this table was general were sealed by the vault itself (vault.ts); new ones by the host, bound
+    // to their key type (cs2), so a row moved to another type in the database doesn't open there.
+    return /^cs[12]:/.test(sealed) ? (await this.host.unseal("secret", sealed, type)).toString("utf8") : openLegacy(sealed, false);
   }
 
   /** Reads every active key into this process. A row that can't be opened stays listed, without a value. */
@@ -293,9 +294,14 @@ export class PlatformKeyVault {
       }
       let value: string | null = null;
       try {
-        value = r.sealed ? await this.unseal(r.sealed as string) : null;
+        value = r.sealed ? await this.unseal(r.sealed as string, type) : null;
       } catch {
         console.error(`platform key vault: ${type} couldn't be opened (is the vault key set?)`);
+      }
+      // A row the host sealed before values were bound to their type (cs1) is sealed again, bound, once it has opened.
+      if (value !== null && (r.sealed as string).startsWith("cs1:")) {
+        const bound = await this.host.seal("secret", Buffer.from(value, "utf8"), type).catch(() => null);
+        if (bound) await this.db.query(`UPDATE ${T}.platform_secrets SET sealed = $2 WHERE id = $1 AND sealed = $3`, [r.id, bound, r.sealed]);
       }
       // A row from before fingerprints were kept gets its own the first time it's opened.
       if (value !== null && !r.fingerprint) await this.db.query(`UPDATE ${T}.platform_secrets SET fingerprint = $2 WHERE id = $1 AND fingerprint IS NULL`, [r.id, fingerprintOf(value)]);
@@ -489,7 +495,7 @@ export class PlatformKeyVault {
     }
     let sealed: string;
     try {
-      sealed = await this.host.seal("secret", Buffer.from(value, "utf8"));
+      sealed = await this.host.seal("secret", Buffer.from(value, "utf8"), type);
     } catch {
       await this.audit(user.id, "set_platform_key_refused", type, { type, reason: "vault_unavailable" });
       return { ok: false, error: "This server can't seal keys yet: its vault key (MYNT_VAULT_KEY) or confidential host isn't available. Nothing was kept" };
