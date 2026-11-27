@@ -8,16 +8,22 @@
   "required": ["agent", "version", "title", "description", "workspaces", "tasks"],
   "properties": {
     "$schema": { "type": "string" },
-    "agent": { "enum": ["coding", "product-desk", "governance-review", "program-audit", "program-red-team", "connector"] },
+    "agent": { "enum": ["coding", "product-desk", "governance-review", "program-audit", "program-red-team", "connector", "ask-ai"] },
     "version": { "type": "integer", "minimum": 1 },
     "title": { "type": "string", "minLength": 3, "maxLength": 120 },
     "description": { "type": "string", "minLength": 20, "maxLength": 2000 },
     "workspaces": {
-      "description": "The agent workspace folders (core/workspaces/<name>) this set exercises; a run records a content hash of each.",
+      "description": "The agent workspace folders (core/workspaces/<name>) this set exercises; a run records a content hash of each. Empty only for an agent whose instructions aren't a workspace folder (ask-ai: its instructions are Studio's code, and its runner reports their hash).",
       "type": "array",
-      "minItems": 1,
       "uniqueItems": true,
       "items": { "type": "string", "pattern": "^[a-z0-9-]+$" }
+    },
+    "fixture": {
+      "description": "ask-ai only: the dataset the questions are asked over (a file under core/benchmarks/) and its SHA-256, so the task set's own hash changes whenever the dataset does.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "sha256"],
+      "properties": { "file": { "type": "string", "pattern": "^fixtures/[a-z0-9./-]+\\.json$" }, "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }
     },
     "tasks": { "type": "array", "minItems": 1, "maxItems": 100 }
   },
@@ -27,10 +33,44 @@
     { "if": { "properties": { "agent": { "const": "governance-review" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/reviewTask" } } } } },
     { "if": { "properties": { "agent": { "const": "program-audit" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/programAuditTask" } } } } },
     { "if": { "properties": { "agent": { "const": "program-red-team" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/programRedTeamTask" } } } } },
-    { "if": { "properties": { "agent": { "const": "connector" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/connectorTask" } } } } }
+    { "if": { "properties": { "agent": { "const": "connector" } } }, "then": { "properties": { "tasks": { "items": { "$ref": "#/$defs/connectorTask" } } } } },
+    {
+      "if": { "properties": { "agent": { "const": "ask-ai" } } },
+      "then": { "required": ["fixture"], "properties": { "tasks": { "items": { "$ref": "#/$defs/askTask" } } } },
+      "else": { "properties": { "workspaces": { "minItems": 1 }, "fixture": false } }
+    }
   ],
   "$defs": {
     "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}$" },
+    "askAnyOf": { "description": "One requirement, met by any of these.", "type": "array", "minItems": 1, "maxItems": 12, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
+    "askTask": {
+      "description": "One question to Ask AI over the fixture dataset, and what Mynt must find in the record of the answer. Every check is a fixed comparison: no model reads the answer.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "scope", "question", "about", "expect"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "scope": { "description": "Whose question it is: a scope of the fixture. Only that scope's reads exist for the question.", "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "question": { "description": "The question, as a person would type it (Ask AI takes 3 to 400 characters).", "type": "string", "minLength": 3, "maxLength": 400 },
+        "about": { "description": "What the task checks, in words.", "type": "string", "minLength": 20, "maxLength": 600 },
+        "expect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["outcome"],
+          "properties": {
+            "outcome": {
+              "description": "answer: an answer the data covers. not_covered: it must say Mynt's data doesn't cover this. declined: it must decline or say the data doesn't cover this. read_only: asked to change something, it must attempt no tool it wasn't given. any: none of these is checked.",
+              "enum": ["answer", "not_covered", "declined", "read_only", "any"]
+            },
+            "cite": { "description": "Sources the answer must cite, by title as Studio names them: each entry is met by a citation of any of its titles.", "type": "array", "minItems": 1, "maxItems": 12, "items": { "$ref": "#/$defs/askAnyOf" } },
+            "every_statement_cited": { "description": "No statement may go without a citation, as Ask AI's own check of its answer flags it.", "const": true },
+            "must_state": { "description": "Facts the answer must state: each entry is met by any of its wordings (compared without case, markdown emphasis or citations).", "type": "array", "minItems": 1, "maxItems": 24, "items": { "$ref": "#/$defs/askAnyOf" } },
+            "must_not_state": { "description": "Wordings the answer must not contain.", "type": "array", "minItems": 1, "maxItems": 24, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
+            "out_of_scope": { "description": "Text of records that are in the fixture but outside this task's scope: it must be in neither the answer nor anything a read returned.", "type": "array", "minItems": 1, "maxItems": 24, "uniqueItems": true, "items": { "type": "string", "minLength": 3, "maxLength": 200 } }
+          }
+        }
+      }
+    },
     "sample": { "description": "good: nothing should be flagged. bad: the planted problem must be caught.", "enum": ["good", "bad"] },
     "codingTask": {
       "type": "object",

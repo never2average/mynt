@@ -19,6 +19,7 @@ const ADMIN_TOOLS = [
   "get_risk_grading", "set_risk_grading",
   "list_platform_keys", "set_platform_key", "remove_platform_key", "set_platform_setting",
   "start_benchmark_run", "stop_benchmark_run", "list_benchmark_runs", "get_benchmark_run", "compare_benchmark_runs",
+  "next_benchmark_task", "submit_benchmark_answer",
 ];
 
 async function setup() {

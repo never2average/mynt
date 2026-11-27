@@ -1,15 +1,13 @@
 import { NextResponse } from "next/server";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { ADMIN_ASK_CONTEXT, ADMIN_ASK_SYSTEM_PROMPT, isAdminAskTool } from "@/lib/admin-ask";
-import { askToolDefs } from "@/lib/ask";
+import { adminAskRun } from "@/lib/ask-runs";
 import { answerQuestion, askJson as json, readAsk } from "@/lib/ask-server";
 import { askConfigured } from "@/lib/llm";
 import { NotAllowedError } from "@/lib/mynt-client";
 import { currentSession, fromOwnOrigin } from "@/lib/session";
 import { finishSession } from "@/lib/session-response";
 import { asAdmin, NOT_FOUND } from "@/lib/studio-route";
-import { callAdminTool, ensureRoles, isAuthError, listMyntTools, logLine, MyntRefusedError, rolesFresh, sessionIsAdmin, ToolRefusedError } from "@/lib/studio-server";
-import { isAdminTool, parseAdminCall } from "@/lib/studio-tools";
+import { callAdminTool, ensureRoles, isAuthError, listMyntTools, logLine, rolesFresh, sessionIsAdmin } from "@/lib/studio-server";
 import { connectStudio } from "@/lib/tokens";
 
 export const dynamic = "force-dynamic";
@@ -62,24 +60,7 @@ export async function POST(req: Request) {
     asked,
     session,
     mynt,
-    prepare: async () => ({
-      tools: askToolDefs(await listMyntTools(mynt), isAdminAskTool),
-      workspaceId: null,
-      system: ADMIN_ASK_SYSTEM_PROMPT,
-      context: ADMIN_ASK_CONTEXT,
-      allowTool: isAdminAskTool,
-      knownTool: isAdminTool,
-      callTool: async (name, args) => {
-        // The Admin area's strict arguments first: what they refuse never reaches Mynt, and the model is told why.
-        const call = parseAdminCall(name, args);
-        if ("error" in call || !isAdminAskTool(call.tool)) return { text: `Not sent to Mynt: ${"error" in call ? call.error : "it can only read"}`, isError: true };
-        try {
-          return { text: JSON.stringify(await callAdminTool(mynt, session, call.tool, call.args)), isError: false };
-        } catch (err) {
-          if (err instanceof MyntRefusedError || err instanceof ToolRefusedError) return { text: err.message, isError: true };
-          throw err;
-        }
-      },
-    }),
+    // The reads in lib/admin-ask.ts, each through the Admin area's strict arguments first (lib/ask-runs.ts).
+    prepare: async () => adminAskRun(await listMyntTools(mynt), (tool, args) => callAdminTool(mynt, session, tool, args)),
   });
 }

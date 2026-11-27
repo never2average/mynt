@@ -227,7 +227,7 @@ test("every agent has a task set, in JSON, that passes its schema and Mynt's own
   const sets = taskSets();
   assert.deepEqual(sets.map((s) => s.agent).sort(), [...BENCHMARK_AGENTS].sort());
   const size = Object.fromEntries(sets.map((s) => [s.agent, s.tasks.length]));
-  assert.deepEqual(size, { coding: 8, connector: 5, "governance-review": 6, "product-desk": 6, "program-audit": 4, "program-red-team": 4 });
+  assert.deepEqual(size, { "ask-ai": 13, coding: 8, connector: 5, "governance-review": 6, "product-desk": 6, "program-audit": 4, "program-red-team": 4 });
   for (const s of sets) {
     assert.match(s.sha256, /^[0-9a-f]{64}$/);
     assert.deepEqual(taskSetErrors(s.file, JSON.parse(readFileSync(join(BENCHMARKS_DIR, s.file), "utf8"))), []);
@@ -433,7 +433,7 @@ test("a run stops at its cap and says so; a task never gets more than what's lef
 
 test("a run starts only on an admin's explicit, capped call, and is refused in plain words when it can't run", async () => {
   const w = await world();
-  const tools = ["compare_benchmark_runs", "get_benchmark_run", "list_benchmark_runs", "start_benchmark_run", "stop_benchmark_run"];
+  const tools = ["compare_benchmark_runs", "get_benchmark_run", "list_benchmark_runs", "next_benchmark_task", "start_benchmark_run", "stop_benchmark_run", "submit_benchmark_answer"];
   assert.deepEqual((await w.as.tools()).filter((t) => t.includes("benchmark")).sort(), tools);
   for (const roles of [["developer"], ["innovator"], ["vendor"], ["license_provider"], ["consumer"]]) {
     const who = await w.client((await w.store.createUser(`A ${roles[0]}`, roles)).user);
@@ -495,8 +495,9 @@ test("a run starts only on an admin's explicit, capped call, and is refused in p
   const r = await bare.as.call("start_benchmark_run", { agent: "coding", cap_usd: 5 });
   assert.match(r.data.error, /no sandbox host is configured on this Mynt/);
   const agents = (await bare.as.call("list_benchmark_runs", {})).data.agents;
-  assert.equal(agents.length, 6);
-  assert.ok(agents.every((a) => a.ready === false && a.why_not && a.needs.length));
+  assert.equal(agents.length, 7);
+  // Every agent that runs on this server. Ask AI runs in Studio, so it needs no sandbox host here (benchmarks-ask.test.js).
+  assert.ok(agents.filter((a) => a.agent !== "ask-ai").every((a) => a.ready === false && a.why_not && a.needs.length));
   const off = await bare.client(bare.admin, {});
   assert.match((await off.call("list_benchmark_runs", {})).data.error, /aren't running on this Mynt/);
 });
@@ -763,7 +764,7 @@ test("the gate script exits non-zero on a regression, and the tools compare the 
   // Validating the task sets needs no run at all (what CI does).
   const valid = gate("--validate");
   assert.equal(valid.status, 0, valid.stderr + valid.stdout);
-  assert.match(valid.stdout, /6 task sets/);
+  assert.match(valid.stdout, /7 task sets/);
 
   // compare_benchmark_runs over two recorded runs.
   const w = await world();

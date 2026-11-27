@@ -723,7 +723,7 @@ export const riskModelDefinition = {
   thresholds: z.array(z.object({ name: modelField, value: z.union([z.number(), z.string().trim().min(1).max(200)]), meaning: modelText.optional() }).strict()).max(50),
 };
 
-const benchmarkAgent = z.enum(["coding", "product-desk", "governance-review", "connector", "program-audit", "program-red-team"]);
+const benchmarkAgent = z.enum(["coding", "product-desk", "governance-review", "connector", "program-audit", "program-red-team", "ask-ai"]);
 // A platform key's type or an operational setting's name: the name Mynt's server reads it by.
 const platformKeyType = z.string().regex(/^[A-Z][A-Z0-9_]{2,60}$/);
 export const ADMIN_TOOLS = {
@@ -903,6 +903,10 @@ export const ADMIN_TOOLS = {
     })
     .strict(),
   stop_benchmark_run: z.object({ run_id: uuid, reason: z.string().trim().min(3).max(300) }).strict(),
+  // Ask AI's benchmark, which Studio runs (lib/ask-benchmark.ts; POST /api/admin/benchmarks/ask): take the task
+  // waiting in the run an admin started, and hand Mynt the record of what Ask AI did. Neither starts a run or spends.
+  next_benchmark_task: z.object({ models: z.array(z.string().trim().min(1).max(120)).min(1).max(4), instructions_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional() }).strict(),
+  submit_benchmark_answer: z.object({ run_id: uuid, task_id: z.string().regex(/^[a-z0-9][a-z0-9-]{1,62}$/), claim: uuid, record: z.record(z.string(), z.unknown()) }).strict(),
 } as const;
 
 export type AdminTool = keyof typeof ADMIN_TOOLS;

@@ -2,7 +2,7 @@
 // the page shows (list_benchmark_runs, get_benchmark_run, compare_benchmark_runs). Pure, for the routes, the views
 // and the tests. A figure Mynt didn't measure is null here and "Not measured" with the reason on screen, never 0.
 
-export const BENCHMARK_AGENTS = ["coding", "product-desk", "governance-review", "connector", "program-audit", "program-red-team"] as const
+export const BENCHMARK_AGENTS = ["coding", "product-desk", "governance-review", "connector", "program-audit", "program-red-team", "ask-ai"] as const
 export type BenchmarkAgent = (typeof BENCHMARK_AGENTS)[number]
 export const BENCHMARK_AGENT_LABELS: Record<BenchmarkAgent, string> = {
   coding: "Coding agents",
@@ -11,6 +11,7 @@ export const BENCHMARK_AGENT_LABELS: Record<BenchmarkAgent, string> = {
   connector: "Connector (dry run)",
   "program-audit": "Program audit",
   "program-red-team": "Program red team",
+  "ask-ai": "Ask AI",
 }
 export const agentLabel = (agent: string) => BENCHMARK_AGENT_LABELS[agent as BenchmarkAgent] ?? agent
 
