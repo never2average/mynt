@@ -269,6 +269,20 @@ export class ReviewService {
   }
 
   async openCase(kind: Subject, subjectId: string, openedBy: string | null) {
+    await this.mayOpen(kind, subjectId);
+    const { snapshot, entityId } = await this.snapshot(kind, subjectId);
+    return this.insertCase(kind, subjectId, entityId, snapshot, openedBy);
+  }
+
+  // A case over a snapshot given whole instead of read from Mynt's records: a benchmark sample with a known answer
+  // (benchmarks.ts). Everything after the snapshot is the same: the agent, Mynt's own pass over its answers, the
+  // recommendation. Its `items` and `decided_by_mynt` must follow the subject's checklist.
+  async openCaseOn(snapshot: { subject_kind: Subject } & Row, subjectId: string, openedBy: string | null, capUsd?: number) {
+    await this.mayOpen(snapshot.subject_kind, subjectId);
+    return this.insertCase(snapshot.subject_kind, subjectId, null, snapshot, openedBy, capUsd);
+  }
+
+  private async mayOpen(kind: Subject, subjectId: string) {
     if (!this.enabled) throw new Error("Governance reviews aren't enabled on this Mynt yet");
     const running = await this.one("SELECT id FROM financial_products.review_cases WHERE subject_kind = $1 AND subject_id = $2 AND status = ANY($3)", [kind, subjectId, RUNNING]);
     if (running) throw new Error(`A review of this ${kind} is already running (${running.id})`);
@@ -277,13 +291,15 @@ export class ReviewService {
       [RUNNING],
     ))?.s ?? 0);
     if (committed + this.config.caseCapUsd > this.config.monthlyCapUsd) throw new Error(`This month's review budget of US$${this.config.monthlyCapUsd} is used up`);
-    const { snapshot, entityId } = await this.snapshot(kind, subjectId);
+  }
+
+  private async insertCase(kind: Subject, subjectId: string, entityId: string | null, snapshot: unknown, openedBy: string | null, capUsd?: number) {
     const text = JSON.stringify(snapshot);
     const id = randomUUID();
     await this.db.query(
       `INSERT INTO financial_products.review_cases (id, subject_kind, subject_id, entity_id, status, snapshot, snapshot_hash, cap_usd, opened_by)
        VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8)`,
-      [id, kind, subjectId, entityId, text, hash(text), this.config.caseCapUsd, openedBy],
+      [id, kind, subjectId, entityId, text, hash(text), Math.min(capUsd ?? this.config.caseCapUsd, this.config.caseCapUsd), openedBy],
     );
     return (await this.get(id))!;
   }

@@ -59,6 +59,7 @@ export const PLATFORM_SETTINGS: readonly PlatformSettingSpec[] = [
   { key: "DESK_MONTHLY_CAP_USD", default: "50", kind: "usd", description: "Each firm's product-desk budget per calendar month", used_by: "The product desk", check: usd(1, 50_000) },
   { key: "REVIEW_CASE_CAP_USD", default: "3", kind: "usd", description: "Spend cap for one governance review case", used_by: "The governance desk", check: usd(0.5, 200) },
   { key: "REVIEW_MONTHLY_CAP_USD", default: "60", kind: "usd", description: "The governance desk's budget per calendar month", used_by: "The governance desk", check: usd(1, 50_000) },
+  { key: "BENCHMARK_CAP_USD", default: "25", kind: "usd", description: "The most one agent benchmark run may spend; each run is started with its own cap, never above this", used_by: "Agent benchmarks", check: usd(1, 2_000) },
 ];
 const SPEC = new Map(PLATFORM_SETTINGS.map((s) => [s.key, s]));
 export const PLATFORM_SETTING_KEYS = PLATFORM_SETTINGS.map((s) => s.key) as [string, ...string[]];
@@ -214,7 +215,7 @@ export function registerPlatformSettingTools(server: McpServer, store: Store, us
     {
       title: "Operational settings",
       description:
-        "Admin: the operational settings this server runs with that aren't secrets (build, audit, desk, review and exploration budgets and limits, the build audit, the hosted VM hour's price): each one's value in effect, its default, where the value comes from (the server's environment, which wins; what an admin set in Mynt; or Mynt's default), how a new value is checked, and what it's for. Change one with set_platform_setting.",
+        "Admin: the operational settings this server runs with that aren't secrets (build, audit, desk, review, exploration and benchmark budgets and limits, the build audit, the hosted VM hour's price): each one's value in effect, its default, where the value comes from (the server's environment, which wins; what an admin set in Mynt; or Mynt's default), how a new value is checked, and what it's for. Change one with set_platform_setting.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },

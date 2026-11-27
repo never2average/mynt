@@ -18,6 +18,8 @@ const ADMIN_TOOLS = [
   "add_risk_model", "update_risk_model", "validate_risk_model", "retire_risk_model", "list_risk_models", "admin_list_product_risk_models",
   "get_risk_grading", "set_risk_grading",
   "list_platform_keys", "set_platform_key", "remove_platform_key", "set_platform_setting",
+  "start_benchmark_run", "stop_benchmark_run", "list_benchmark_runs", "get_benchmark_run", "compare_benchmark_runs",
+  "next_benchmark_task", "submit_benchmark_answer",
   "decline_service_type_request",
 ];
 

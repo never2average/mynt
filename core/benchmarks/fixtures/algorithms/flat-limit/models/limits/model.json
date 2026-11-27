@@ -1,0 +1,12 @@
+{
+  "name": "limits",
+  "description": "Limit assignment as it stands: applicants with a bureau score of 650 or more are approved, each for the same small limit whatever they earn.",
+  "applies_to": {
+    "product_lines": [
+      "account_operations",
+      "wealth",
+      "credit"
+    ]
+  },
+  "decide": "python3 decide.py"
+}

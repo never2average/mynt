@@ -57,7 +57,7 @@ const by = (data) => Object.fromEntries(data.settings.map((s) => [s.key, s]));
 test("the list: the nine settings first, then the other agents' budgets; never a secret; each with how it's checked", async () => {
   const keys = PLATFORM_SETTINGS.map((s) => s.key);
   assert.deepEqual(keys.slice(0, 9), NINE);
-  assert.deepEqual(keys.slice(9), ["EXPLORE_MAX_ITERATIONS", "EXPLORE_MAX_MINUTES", "DESK_JOB_CAP_USD", "DESK_MONTHLY_CAP_USD", "REVIEW_CASE_CAP_USD", "REVIEW_MONTHLY_CAP_USD"]);
+  assert.deepEqual(keys.slice(9), ["EXPLORE_MAX_ITERATIONS", "EXPLORE_MAX_MINUTES", "DESK_JOB_CAP_USD", "DESK_MONTHLY_CAP_USD", "REVIEW_CASE_CAP_USD", "REVIEW_MONTHLY_CAP_USD", "BENCHMARK_CAP_USD"]);
   assert.ok(keys.every((k) => !/KEY|SECRET|TOKEN|PASSWORD|URL/.test(k)), "no secret is an operational setting");
   // Each default passes its own check.
   for (const s of PLATFORM_SETTINGS) assert.deepEqual(checkSetting(s.key, s.default), { ok: true, value: s.default }, s.key);

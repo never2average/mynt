@@ -1,3 +1,4 @@
+import { notBenchmark } from "./benchmark-marker.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { auditForAdmin } from "./covenants.js";
@@ -94,7 +95,7 @@ export function registerPlatformAdminTools(server: McpServer, db: Db) {
       annotations: { readOnlyHint: true },
     },
     async ({ query, status, limit, offset }) => {
-      const where = `WHERE ($1::text IS NULL OR w.name ILIKE $1 OR u.email ILIKE $1 OR w.id::text = $2) AND ($3::text IS NULL OR ${WORKSPACE_STATUS} = $3)`;
+      const where = `WHERE ${notBenchmark("w")} AND ($1::text IS NULL OR w.name ILIKE $1 OR u.email ILIKE $1 OR w.id::text = $2) AND ($3::text IS NULL OR ${WORKSPACE_STATUS} = $3)`;
       const args = [like(query), query?.trim() ?? null, status ?? null];
       const total = Number((await db.query(`SELECT count(*)::int AS n FROM (${WORKSPACE_SELECT} ${where}) x`, args)).rows[0]?.n ?? 0);
       const { rows } = await db.query(`${WORKSPACE_SELECT} ${where} ORDER BY w.created_at DESC, w.id LIMIT $4 OFFSET $5`, [...args, limit, offset]);
@@ -167,7 +168,7 @@ export function registerPlatformAdminTools(server: McpServer, db: Db) {
     },
     async ({ query, workspace_id, stage, limit, offset }) => {
       const parts = await appParts(db);
-      const where = `WHERE ($1::text IS NULL OR a.name ILIKE $1 OR w.name ILIKE $1 OR u.email ILIKE $1 OR a.id::text = $2) AND ($3::uuid IS NULL OR a.workspace_id = $3) AND ($4::text IS NULL OR ${parts.stage} = $4)`;
+      const where = `WHERE ${notBenchmark("a")} AND ($1::text IS NULL OR a.name ILIKE $1 OR w.name ILIKE $1 OR u.email ILIKE $1 OR a.id::text = $2) AND ($3::uuid IS NULL OR a.workspace_id = $3) AND ($4::text IS NULL OR ${parts.stage} = $4)`;
       const args = [like(query), query?.trim() ?? null, workspace_id ?? null, stage ?? null];
       const total = Number((await db.query(`SELECT count(*)::int AS n FROM ${T}.apps a LEFT JOIN ${T}.workspaces w ON w.id = a.workspace_id LEFT JOIN ${T}.users u ON u.id = a.owner_id ${where}`, args)).rows[0]?.n ?? 0);
       const { rows } = await db.query(`${appSelect(parts)} ${where} ORDER BY a.created_at DESC, a.id LIMIT $5 OFFSET $6`, [...args, limit, offset]);
@@ -229,7 +230,7 @@ export function registerPlatformAdminTools(server: McpServer, db: Db) {
              FROM (SELECT DISTINCT provider_entity_id, status FROM ${T}.sponsorships WHERE product_id = p.id AND status IN ('approved', 'pending')) s
              JOIN ${T}.entities se ON se.id = s.provider_entity_id)`
         : `'[]'::json`;
-      const where = `WHERE ($1::text IS NULL OR p.data->>'name' ILIKE $1 OR e.name ILIKE $1 OR p.id = $2) AND ($3::text IS NULL OR p.status = $3) AND ($4::boolean OR p.archived_at IS NULL)`;
+      const where = `WHERE ${notBenchmark("p")} AND ($1::text IS NULL OR p.data->>'name' ILIKE $1 OR e.name ILIKE $1 OR p.id = $2) AND ($3::text IS NULL OR p.status = $3) AND ($4::boolean OR p.archived_at IS NULL)`;
       const args = [like(query), query?.trim() ?? null, status ?? null, include_archived];
       const from = `FROM ${T}.products p LEFT JOIN ${T}.users u ON u.id = p.owner_id LEFT JOIN ${T}.entities e ON e.id = p.entity_id`;
       const total = Number((await db.query(`SELECT count(*)::int AS n ${from} ${where}`, args)).rows[0]?.n ?? 0);

@@ -13,6 +13,7 @@ COPY --from=build /app/dist ./dist
 # Agent workspaces (instructions, skills, scripts) are copied into sandboxes from here.
 COPY workspaces ./workspaces
 COPY schemas ./schemas
+COPY benchmarks ./benchmarks
 COPY sdk-templates ./sdk-templates
 USER node
 EXPOSE 3000

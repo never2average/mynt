@@ -761,6 +761,7 @@ export const riskModelDefinition = {
   thresholds: z.array(z.object({ name: modelField, value: z.union([z.number(), z.string().trim().min(1).max(200)]), meaning: modelText.optional() }).strict()).max(50),
 };
 
+const benchmarkAgent = z.enum(["coding", "product-desk", "algorithm-explorer", "governance-review", "connector", "program-audit", "program-red-team", "ask-ai"]);
 // A platform key's type or an operational setting's name: the name Mynt's server reads it by.
 const platformKeyType = z.string().regex(/^[A-Z][A-Z0-9_]{2,60}$/);
 export const ADMIN_TOOLS = {
@@ -930,6 +931,25 @@ export const ADMIN_TOOLS = {
   run_firm_checks: z.object({ entity_id: uuid }).strict(),
   // The confidential service's announced builds (measurements and when each takes effect): a read, for Ask AI.
   list_enclave_releases: z.object({}).strict(),
+  // Agent benchmarks (/platform/benchmarks): the runs and what a run needs, one run's scoreboard, two runs compared,
+  // and Start run and Stop run. A run spends money: its cap is required, and Mynt holds it under BENCHMARK_CAP_USD.
+  list_benchmark_runs: z.object({ agent: benchmarkAgent.optional(), limit: z.number().int().min(1).max(200).optional() }).strict(),
+  get_benchmark_run: z.object({ run_id: uuid }).strict(),
+  compare_benchmark_runs: z.object({ baseline: uuid, candidate: uuid }).strict(),
+  start_benchmark_run: z
+    .object({
+      agent: benchmarkAgent,
+      cap_usd: z.number().positive().max(2000),
+      label: z.string().trim().min(1).max(120).optional(),
+      task_ids: z.array(z.string().trim().min(1).max(120)).min(1).max(100).optional(),
+      host_restored: z.literal(true).optional(),
+    })
+    .strict(),
+  stop_benchmark_run: z.object({ run_id: uuid, reason: z.string().trim().min(3).max(300) }).strict(),
+  // Ask AI's benchmark, which Studio runs (lib/ask-benchmark.ts; POST /api/admin/benchmarks/ask): take the task
+  // waiting in the run an admin started, and hand Mynt the record of what Ask AI did. Neither starts a run or spends.
+  next_benchmark_task: z.object({ models: z.array(z.string().trim().min(1).max(120)).min(1).max(4), instructions_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional() }).strict(),
+  submit_benchmark_answer: z.object({ run_id: uuid, task_id: z.string().regex(/^[a-z0-9][a-z0-9-]{1,62}$/), claim: uuid, record: z.record(z.string(), z.unknown()) }).strict(),
 } as const;
 
 export type AdminTool = keyof typeof ADMIN_TOOLS;

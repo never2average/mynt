@@ -1,0 +1,12 @@
+{
+  "name": "pricing",
+  "description": "Pricing as it stands: applicants with a bureau score of 650 or more are approved, all at one rate.",
+  "applies_to": {
+    "product_lines": [
+      "account_operations",
+      "wealth",
+      "credit"
+    ]
+  },
+  "decide": "python3 decide.py"
+}

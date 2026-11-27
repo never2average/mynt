@@ -316,7 +316,7 @@ describe("the platform admin's search", () => {
     await openBar();
     expect(calls.map((c) => c.url).sort()).toEqual(["/api/admin/ask", "/api/admin/firms", "/api/admin/workspaces"]);
     expect(sections()).toEqual(["Platform admin", "Studio"]);
-    expect(names("Platform admin")).toEqual(["Overview", "Workspaces", "Regulated firms", "Vendors", "Audit trails", "Risk models", "Risk register", "Platform settings"]);
+    expect(names("Platform admin")).toEqual(["Overview", "Workspaces", "Regulated firms", "Vendors", "Audit trails", "Risk models", "Risk register", "Agent benchmarks", "Platform settings"]);
     expect(names("Studio")).toContain("Studio: Dashboard");
     // Workspaces, firms and the Licences tab are found by typing, never listed.
     expect(names()).not.toContain("Harbor Lending");

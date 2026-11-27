@@ -1,0 +1,12 @@
+{
+  "name": "underwriting",
+  "description": "Underwriting as it stands: every applicant is approved for the amount asked, at the product's standard rate.",
+  "applies_to": {
+    "product_lines": [
+      "account_operations",
+      "wealth",
+      "credit"
+    ]
+  },
+  "decide": "python3 decide.py"
+}

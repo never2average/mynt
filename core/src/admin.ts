@@ -1,3 +1,4 @@
+import type { BenchmarkService } from "./benchmarks.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { PlatformKeyVault } from "./platform-keys.js";
 import type { OperationalSettings } from "./platform-settings.js";
@@ -79,6 +80,7 @@ export interface AdminContext {
   confidentialReleases?: ConfidentialReleases | null; // the confidential service's builds Mynt trusts
   platformKeys?: PlatformKeyVault | null; // the platform key vault (platform-keys.ts); one over the store when not given
   operationalSettings?: OperationalSettings | null; // the operational settings (platform-settings.ts); likewise
+  benchmarks?: BenchmarkService | null; // agent benchmarks: runs of the hosted agents' task sets (benchmarks.ts)
 }
 
 // Admin: everything is managed through Mynt itself, and every change is written to the audit log.

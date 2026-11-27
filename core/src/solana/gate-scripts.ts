@@ -248,3 +248,48 @@ for poc in job["pocs"]:
         results[poc] = {"confirmed": False, "reason": f"Mynt couldn't run it: {e}"[:600], "error": True}
 json.dump({"results": results}, open(os.path.join(ROOT, "results.json"), "w"), indent=1)
 `;
+
+// A benchmark sample for the gate's agents (MainnetGateService.requestSample): a whole Anchor workspace made in a
+// sandbox of Mynt's from the coding agents' own starter program (their scaffold script and template, as shipped) with
+// the sample's files laid over it. `capture` keeps the workspace's text files for the white-box audit; `build` puts it
+// through Mynt's verifiable build (solana-verify.sh), whose bytes the red team attacks. Nothing here is a real
+// program's: no program record exists and nothing is deployed anywhere.
+//
+//   bash sample.sh <dir> <name> <program id> capture|build
+export const GATE_SAMPLE_SCRIPT = String.raw`#!/usr/bin/env bash
+set -uo pipefail
+D="$1"; NAME="$2"; ID="$3"; MODE="$4"
+cd "$D" || exit 1
+fail() { python3 -c 'import json,sys; json.dump({"error": sys.argv[1][-1500:]}, open("prep.json", "w"))' "$1"; exit 0; }
+rm -rf build prep.json
+python3 kit/scripts/scaffold_program.py "$D/build/src/solana" --name "$NAME" --program-id "$ID" > prep.log 2>&1 || fail "the starter program couldn't be scaffolded: $(tail -c 600 prep.log)"
+cp -a sample/. build/src/solana/ || fail "the sample's files couldn't be laid over the starter program"
+mkdir -p build/out
+if [ "$MODE" = "build" ]; then
+  bash solana-verify.sh build "$D/build/src" "$D/build/out" "$D/allowlist.json" >> prep.log 2>&1
+  [ -f build/out/programs.json ] || fail "Mynt's Solana build listed no program: $(tail -c 900 prep.log)"
+  python3 -c 'import json; json.dump({"built": True}, open("prep.json", "w"))'
+else
+  python3 - <<'PY' || fail "the sample's files couldn't be captured"
+import hashlib, json, os
+root, files, total = "build/src/solana", {}, 0
+for d, dirs, names in os.walk(root):
+    dirs[:] = sorted(x for x in dirs if x not in ("node_modules", "target", ".git", ".anchor", "test-ledger"))
+    for n in sorted(names):
+        p = os.path.join(d, n)
+        if os.path.islink(p) or n == "package-lock.json":
+            continue
+        try:
+            text = open(p, encoding="utf-8").read()
+        except Exception:
+            continue
+        total += len(text)
+        if total > 8 * 1024 * 1024:
+            raise SystemExit("the sample is over 8 MB")
+        files[os.path.relpath(p, root)] = text
+raw = json.dumps({"files": files}, sort_keys=True).encode()
+open("build/out/sample.sources.json", "wb").write(raw)
+json.dump({"captured": True, "sources_size": len(raw), "sources_sha256": hashlib.sha256(raw).hexdigest()}, open("prep.json", "w"))
+PY
+fi
+`;

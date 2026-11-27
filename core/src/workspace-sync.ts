@@ -1,3 +1,4 @@
+import { notBenchmark } from "./benchmark-marker.js";
 import { randomUUID } from "node:crypto";
 import { inTransaction, type Db } from "./db.js";
 import type { Org, OrgDirectory, OrgEvent, OrgEventSource, OrgMembership } from "./org-directory.js";
@@ -357,7 +358,7 @@ export class WorkspaceSync {
     // mynt clerk sync-workspaces.
     const abandoned = (
       await db.query(
-        `SELECT id::text AS id FROM ${T}.workspaces w WHERE org_sync = 'creating' AND external_org_id IS NULL AND created_at < now() - make_interval(secs => $1::int)
+        `SELECT id::text AS id FROM ${T}.workspaces w WHERE ${notBenchmark("w")} AND org_sync = 'creating' AND external_org_id IS NULL AND created_at < now() - make_interval(secs => $1::int)
            AND NOT EXISTS (SELECT 1 FROM ${T}.apps a WHERE a.workspace_id = w.id)`,
         [ABANDONED_MS / 1000],
       )
@@ -461,7 +462,7 @@ export class WorkspaceSync {
     };
     const rows = (
       await db.query(
-        `SELECT id::text AS id, name, external_org_id FROM ${T}.workspaces WHERE archived_at IS NULL AND org_missing_at IS NULL AND (
+        `SELECT id::text AS id, name, external_org_id FROM ${T}.workspaces WHERE ${notBenchmark()} AND archived_at IS NULL AND org_missing_at IS NULL AND (
            org_sync = 'backfill' OR (external_org_id IS NULL AND (org_sync IS NULL OR (org_sync = 'creating' AND created_at < now() - interval '1 hour'))))
          ORDER BY created_at`,
       )
