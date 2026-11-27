@@ -284,6 +284,14 @@ if (values.help) {
 } else if (command === "serve-http") {
   const port = Number(values.port);
   const { benchmarks, store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env } = await openServices();
+  // Sign-in first, before anything starts: a server meant to require it (CLERK_PUBLISHABLE_KEY set) whose secret key
+  // can't be read (not in the environment, none the key vault could open) stops here, never serving /mcp without it.
+  let config: ReturnType<typeof clerkConfigFromEnv>;
+  try {
+    config = clerkConfigFromEnv(env);
+  } catch (e) {
+    config = die((e as Error).message);
+  }
   // This process runs deploys, so it alone recovers ones a previous run of it left behind.
   solana.recovery = true;
   builds.startWorker();
@@ -297,7 +305,6 @@ if (values.help) {
   productHealth.startWorker();
   liquidity.startWorker();
   covenants.startWorker(); // on its own timer: a rule about missing snapshots has to fire when the health worker never ran
-  const config = clerkConfigFromEnv(env);
   const clerk = config ? new ClerkAuth(config, store) : null;
   // Workspaces are Clerk organizations: Mynt's tools write there, its webhook and a reconcile worker read back.
   const directory = await orgDirectory(store, env);

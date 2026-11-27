@@ -589,6 +589,7 @@ Type a question in the command bar and **Ask AI** is the first result: a few wor
 - **Copy answer** copies the answer's text. **Ask again** re-asks the last question in its place.
 - The answer follows the stream as it is written. Scroll up and it stops following; **Jump to latest** brings it back.
 - Ask AI reads through Mynt's tools as you, never with an app key, and only with read tools.
+- Secrets are replaced with `[hidden]` before anything leaves Studio's server. The model is handed each read with values under secret-named keys and anything shaped like a key or token replaced, never Mynt's reply as sent. Its answer and its thinking are scrubbed again as they stream, a secret split across pieces included, and so is the final answer.
 - Questions and answers are never logged, and the conversation is never stored: the browser sends it again with each follow-up.
 - You may ask 20 questions an hour, one at a time; a follow-up is a question. Past that it says so.
 - The answer comes from the first model that answers: the configured model, then the fallback model.

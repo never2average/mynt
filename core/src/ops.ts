@@ -250,7 +250,9 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
   // Service levels under app agreements missed and not resolved yet (agreement-slas.ts).
   const slaBreaches = await openSlaBreaches(db);
   // Production apps without a signed program agreement in force with a product's sponsor (an agreement ended or
-  // expired after they got there: they keep running, flagged; app-agreements.ts programAgreementCoverage, in SQL).
+  // expired after they got there, or signed only in the e-signature service's test mode: they stay in production,
+  // flagged, and live keys aren't served those products; app-agreements.ts programAgreementCoverage, in SQL).
+  const esignDocuments = await exists("app_agreement_documents");
   const appsMissingAgreements = (await exists("app_agreements")) && (await exists("app_promotions")) && (await exists("sponsorships"))
     ? ((await db.query(
         `WITH need AS (
@@ -264,14 +266,15 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
          WHERE NOT EXISTS (
            SELECT 1 FROM financial_products.app_agreements g
            WHERE g.app_id = n.app_id AND g.kind = 'program' AND g.status = 'signed' AND g.counterparty_entity_id = n.provider_entity_id AND g.products ? n.product_id
-             AND (g.effective_from IS NULL OR g.effective_from <= current_date) AND (g.effective_to IS NULL OR g.effective_to >= current_date))
+             AND (g.effective_from IS NULL OR g.effective_from <= current_date) AND (g.effective_to IS NULL OR g.effective_to >= current_date)
+             ${esignDocuments ? "AND NOT EXISTS (SELECT 1 FROM financial_products.app_agreement_documents d WHERE d.agreement_id = g.id AND d.test_mode AND d.completed_at IS NOT NULL)" : ""})
          GROUP BY n.app_id, n.app_name ORDER BY n.app_name LIMIT 50`,
       )).rows as { app_id: string; app_name: string; missing: number }[])
     : [];
   const attention = [
     ...(agreementAudits.audits ? [`agreement audits: ${agreementAudits.audits} overdue oversight audits (on ${agreementAudits.apps} apps): past their due date and not closed; the licence provider and the app's side see them in list_agreement_audits (overdue: true)`] : []),
     ...(slaBreaches.open ? [`agreement SLAs: ${slaBreaches.open} open SLA breach(es) on ${slaBreaches.agreements} app agreement(s): a service level missed and not resolved yet; both parties see them in list_agreement_slas`] : []),
-    ...(appsMissingAgreements.length ? [`apps: ${appsMissingAgreements.length} production app(s) without a signed program agreement in force with a product's sponsor (ended or expired since they went live); they keep running and their workspaces are told (get_workspace_attention), but their production checks fail until one is signed: ${appsMissingAgreements.map((a) => a.app_name).join(", ")}`] : []),
+    ...(appsMissingAgreements.length ? [`apps: ${appsMissingAgreements.length} production app(s) without a signed program agreement in force with a product's sponsor (ended or expired since they went live, or signed only in e-signature test mode, which isn't binding); they stay in production and their workspaces are told (get_workspace_attention), but live keys aren't served those products and their production checks fail until one is signed: ${appsMissingAgreements.map((a) => a.app_name).join(", ")}`] : []),
     ...(risks.count ? [`risks: ${risks.count} risk review(s) overdue (review date passed, not closed) on apps' or products' risk registers; their keepers review them with update_risk`] : []),
     ...(riskModels?.count ? [`risk models: ${riskModels.count} of Mynt's risk model(s) overdue for validation (next validation date passed, not retired): ${riskModels.models.map((m) => m.name).join(", ")}; record one with validate_risk_model`] : []),
     ...(unhealthyModels?.count ? [`risk models: ${unhealthyModels.count} of Mynt's risk model(s) not healthy (${unhealthyModels.models.map((m) => `${m.name}: ${m.health_words.toLowerCase()}`).join(", ")}); see list_risk_models`] : []),

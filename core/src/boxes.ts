@@ -13,6 +13,8 @@ export const BOX_TIMEOUT_MAX = 300;
 // and then be retried from each position inside it. Runs that can fail start only where a run begins (a lookbehind)
 // or are bounded, and secret-named values are found by a scan that never re-reads text. test/builds.test.js times
 // adversarial inputs against all of it.
+// Mynt Studio's Ask AI keeps its own copy of these shapes (platform/studio/lib/scrub.ts, which can't import this file);
+// platform/studio/test/scrub.test.ts reads this file and fails when the two drift.
 const MYNT_TOKEN_KINDS = ["live", "test", "agent", "bd", "explore", "desk", "review", "paudit", "predteam"];
 const R = "[redacted]";
 const SP = String.raw`[ \t\r]*`;
@@ -31,6 +33,7 @@ const SECRET_PATTERNS: [RegExp, string][] = [
         String.raw`\bmynt_(?:${MYNT_TOKEN_KINDS.join("|")})_[A-Za-z0-9_-]{8,}`, // Mynt app keys and agent tokens
         String.raw`\bmcs_(?:live|test)_[A-Za-z0-9_-]{8,}`, // Mynt client sessions
         String.raw`\bwhsec_[A-Za-z0-9_-]{8,}`, // webhook secrets
+        String.raw`\bmvs_[A-Za-z0-9_-]{8,}|\bmpl_[A-Za-z0-9_-]{8,}|\bfpm_[A-Za-z0-9_-]{8,}`, // Mynt's vendor and partner-ledger signing secrets, and local user tokens
         String.raw`\bsk-ant-[A-Za-z0-9_-]{8,}`, // Anthropic
         String.raw`\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|\bsk-[A-Za-z0-9]{32,}`, // OpenAI
         String.raw`\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9_]{8,}`, // Stripe

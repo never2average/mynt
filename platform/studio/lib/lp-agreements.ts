@@ -5,7 +5,7 @@
 //   (list_app_agreements with each app's id), and what it may do (Withdraw, Sign, End agreement).
 // One row type for both, so one table shows them. Pure, so the route, the view and the tests share it; Mynt checks
 // every action again.
-import { esignOf, esignStatusLine, type EsignInfo } from "./agreement-esign";
+import { esignOf, esignStatusLine, SIGNED_IN_TEST_MODE, signedInTestMode, type EsignInfo } from "./agreement-esign";
 import { AGREEMENT_KIND_LABELS, AGREEMENT_STATUS_LABELS, agreementActions, documentLink, scopeLabelOf, scopesOf, type AgreementAction, type AgreementScope } from "./app-panel";
 
 type Obj = Record<string, unknown>;
@@ -94,7 +94,14 @@ export function agreementRowOf(a: Obj, side: AgreementSide, app?: { id: string; 
     scopes: scopesOf(a.scopes),
     scopeLabel: scopeLabelOf(scopesOf(a.scopes)),
     // A proposal waits for whichever side didn't make it.
-    status: statusKey === "proposed" ? (proposedBy === side ? "Proposed: waiting for them" : "Proposed: waiting for your answer") : (statusWords[statusKey] ?? statusKey),
+    status:
+      statusKey === "proposed"
+        ? proposedBy === side
+          ? "Proposed: waiting for them"
+          : "Proposed: waiting for your answer"
+        : signedInTestMode(statusKey, esign)
+          ? SIGNED_IN_TEST_MODE
+          : (statusWords[statusKey] ?? statusKey),
     statusKey,
     signatures: esign?.byEsign && (statusKey === "accepted" || statusKey === "signed") ? esignStatusLine(esign, side) : statusKey === "accepted" ? manual : null,
     appSigned,

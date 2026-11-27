@@ -649,7 +649,7 @@ So a deployment that sets its keys on the server keeps working exactly as before
 The table's columns are Key, Used by, Source (Key vault, Server environment or Not set), Set on, Set by, Fingerprint, Takes effect and Action.
 
 - **Set key** and **Replace key** open a sheet with one password field. The key is sent once and the field is emptied before the request leaves. Mynt checks the key's format for its type and seals it. A key that fails the check isn't kept.
-- **Remove key** opens a sheet that needs the key's type typed out. The row is retired and the value destroyed.
+- **Remove key** opens a sheet that needs the key's type typed out. The row is retired and the value destroyed. While the server requires sign-in (`CLERK_PUBLISHABLE_KEY` is set), the sign-in provider's secret key and webhook secret can't be removed from the vault unless the server's environment sets them too: removing either would turn sign-in, or the checking of the provider's events, off. Replace them instead. The refusal is audited (`remove_platform_key_refused`).
 - **Export CSV** has the table's columns. There is no value to export.
 
 **When a change takes effect** depends on how the key is used:

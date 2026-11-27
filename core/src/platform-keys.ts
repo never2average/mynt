@@ -46,6 +46,9 @@ export interface PlatformKeyType {
   multiline?: boolean; // a PEM block rather than one line
   check: (value: string) => string | null; // why the value isn't one, or null
   slot?: string; // the active row's name, where it differs from the key (rows from before this table was general)
+  // What stops, in words, if the vault's key goes while this server requires sign-in: such a key is replaced, never
+  // removed, unless the server's environment sets it too (remove_platform_key).
+  sign_in?: string;
   esign?: { provider: string; what: "api_key" | "webhook_id" }; // kept in step with the e-signature settings
 }
 
@@ -147,6 +150,7 @@ export const PLATFORM_KEY_TYPES: readonly PlatformKeyType[] = [
     used_by: "Sign-in and workspaces",
     validation: "Starts with sk_test_ or sk_live_",
     needs_restart: true,
+    sign_in: "sign-in would stop, and the server would refuse to start again without it",
     check: shaped(/^sk_(test|live)_[A-Za-z0-9]{8,}$/, "a key starting with sk_test_ or sk_live_"),
   },
   {
@@ -156,6 +160,7 @@ export const PLATFORM_KEY_TYPES: readonly PlatformKeyType[] = [
     used_by: "Workspace sync",
     validation: "Starts with whsec_",
     needs_restart: false,
+    sign_in: "the sign-in provider's events could no longer be verified, so workspaces would stop following membership changes as they happen",
     check: shaped(/^whsec_[A-Za-z0-9+/=_-]{8,}$/, "a secret starting with whsec_"),
   },
   {
@@ -316,6 +321,16 @@ export class PlatformKeyVault {
 
   source(type: string): KeySource {
     return isSet(this.env[type]) ? "environment" : this.cache.has(type) ? "vault" : "none";
+  }
+
+  /**
+   * Why a type's key mustn't be removed from the vault, or null: this server requires sign-in (CLERK_PUBLISHABLE_KEY is
+   * set), the key is one sign-in rests on, and the vault's copy is the only one (the environment doesn't set it).
+   */
+  removalBlocked(type: string): string | null {
+    const t = TYPE.get(type);
+    if (!t?.sign_in || !isSet(this.env.CLERK_PUBLISHABLE_KEY) || this.source(type) !== "vault") return null;
+    return `${t.label} can't be removed from the vault while this server requires sign-in and its environment doesn't set ${type}: ${t.sign_in}. Replace it with set_platform_key instead; to stop keeping it in the vault, set ${type} in the server's environment first, then remove it here`;
   }
 
   /** The key in effect, from this process's copy: the environment's, else the vault's, else null. Never logged. */
@@ -609,12 +624,17 @@ export function registerPlatformKeyTools(server: McpServer, store: Store, user: 
     {
       title: "Remove a platform key",
       description:
-        "Admin: remove a key from the vault: its row is retired and its value destroyed. Whatever uses it stops (at once, or after a restart for keys read when the server starts) unless the server's environment sets the same key. Removing the e-signature API key also deletes its webhook at the service. Audited.",
+        "Admin: remove a key from the vault: its row is retired and its value destroyed. Whatever uses it stops (at once, or after a restart for keys read when the server starts) unless the server's environment sets the same key. Refused for the sign-in provider's secret key and webhook secret while this server requires sign-in and its environment doesn't set them (removing either would turn sign-in, or the checking of the provider's events, off): replace them with set_platform_key instead. Removing the e-signature API key also deletes its webhook at the service. Audited.",
       inputSchema: z.object({ type: z.enum(PLATFORM_KEY_NAMES), confirm: z.literal(true) }).strict(),
     },
     async ({ type }) => {
       const v = await vault();
       const t = TYPE.get(type)!;
+      const blocked = v.removalBlocked(type);
+      if (blocked) {
+        await store.audit(user.id, "remove_platform_key_refused", type, { type, reason: "sign_in_depends_on_it" });
+        return fail(blocked);
+      }
       let removed: boolean;
       let stillEnv: boolean;
       if (t.esign?.what === "api_key" && esign) {

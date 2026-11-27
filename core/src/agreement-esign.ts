@@ -183,6 +183,12 @@ export async function templateFor(store: Store, entityId: string, products: stri
   return templates.find((t) => t.sponsorship_id && sIds.has(t.sponsorship_id)) ?? templates.find((t) => !t.sponsorship_id && t.licence_id && lIds.has(t.licence_id)) ?? templates.find((t) => !t.sponsorship_id && !t.licence_id);
 }
 
+// The e-signature service reads {{...}} in a document's text as a text tag (a signature, date or text field for a
+// signer) when the template places signatures by text tags. Nothing Mynt writes into the schedule, the document's
+// fields or its title may carry one: the terms summary and the app's, firms', products' and signers' names come from
+// the parties, so a tag written there could add or move a signer's field. The braces stay, set apart.
+export const withoutTextTags = (s: string) => s.replace(/\{(?=\{)/g, "{ ").replace(/\}(?=\})/g, "} ");
+
 // What Mynt fills in for an agreement.
 async function valuesFor(store: Store, a: Row): Promise<Record<Variable, string>> {
   const counterparty = await store.getEntity(a.counterparty_entity_id as string);
@@ -195,7 +201,7 @@ async function valuesFor(store: Store, a: Row): Promise<Record<Variable, string>
   const states = new Set<string>();
   for (const p of products) for (const s of await store.sponsorships({ product_id: p, status: "approved" })) if (s.provider_entity_id === a.counterparty_entity_id) s.jurisdictions.forEach((j) => states.add(j));
   const day = (v: unknown) => (v == null ? "" : typeof v === "string" ? v.slice(0, 10) : new Date(v as Date).toISOString().slice(0, 10));
-  return {
+  const values: Record<Variable, string> = {
     licence_provider: counterparty?.name ?? (a.counterparty_entity_id as string),
     developer_firm: proposerFirm?.name ?? (workspace?.name as string | undefined) ?? proposer?.name ?? "",
     app: app ? `${app.name} (${app.id})` : "",
@@ -208,6 +214,8 @@ async function valuesFor(store: Store, a: Row): Promise<Record<Variable, string>
     // What it covers, in words, as the other side accepted it ("Not set" on an agreement from before scopes).
     scope: Array.isArray(a.scopes) && a.scopes.length ? (a.scopes as string[]).map(agreementScopeLabel).join("; ") : "Not set",
   };
+  for (const k of TEMPLATE_VARIABLES) values[k] = withoutTextTags(values[k]);
+  return values;
 }
 
 const LABELS: Record<Variable, string> = {
@@ -233,9 +241,9 @@ export function scheduleFor(values: Record<Variable, string>, template: Template
         heading: "Agreement",
         lines: [
           [LABELS.agreement_id, values.agreement_id],
-          ["Template", `${template.name}, version ${template.version}`],
+          ["Template", withoutTextTags(`${template.name}, version ${template.version}`)],
           ...(template.sha256 ? ([["Template SHA-256", template.sha256]] as [string, string][]) : []),
-          ...signers.map((s): [string, string] => [s.role === "counterparty" ? "Signs for the licence provider" : "Signs for the developer", s.name]),
+          ...signers.map((s): [string, string] => [s.role === "counterparty" ? "Signs for the licence provider" : "Signs for the developer", withoutTextTags(s.name)]),
         ],
       },
     ],
@@ -466,12 +474,14 @@ export function registerAgreementEsignTools(server: McpServer, store: Store, use
     const me = await store.getUser(user.id);
     return me?.entity_id && effectiveRoles(me.roles).includes("license_provider") ? me.entity_id : null;
   };
-  // The caller's firm when they act for it as a licence provider or vendor (the counterparties of app agreements).
-  const counterpartyFirm = async () => {
+  // The caller's firm when they act for it as a counterparty of an app agreement: a licence provider (with standing)
+  // for any kind, a vendor for every kind but 'program' (a program agreement's other side is the sponsor, so only its
+  // licence providers sign, open or read it).
+  const counterpartyFirm = async (kind: unknown) => {
     if (!sides.counterparty) return null;
     const me = await store.getUser(user.id);
     const roles = me ? effectiveRoles(me.roles) : [];
-    return me?.entity_id && (roles.includes("license_provider") || roles.includes("vendor")) ? me.entity_id : null;
+    return me?.entity_id && (roles.includes("license_provider") || (kind !== "program" && roles.includes("vendor"))) ? me.entity_id : null;
   };
   // Which party the caller belongs to on an agreement: any member of the app's workspace, or of the other firm. With
   // `manage`, only those who may act for it: the workspace's owners and admins.
@@ -480,7 +490,7 @@ export function registerAgreementEsignTools(server: McpServer, store: Store, use
       const app = await memberApp(store, user, a.app_id as string);
       if (app && (!manage || MANAGERS.includes((await appRole(store, user, app)) ?? ""))) return "app";
     }
-    if ((await counterpartyFirm()) === a.counterparty_entity_id) return "counterparty";
+    if ((await counterpartyFirm(a.kind)) === a.counterparty_entity_id) return "counterparty";
     return null;
   };
   const noLpFirm = "You don't act for a firm as a licence provider; its licence providers manage its agreement templates";

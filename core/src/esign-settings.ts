@@ -149,7 +149,12 @@ export class EsignSettings {
     const stored = await this.stored();
     await this.putStored({ ...stored, provider }, user.id);
     await this.store.audit(user.id, "set_esign_api_key", "esign", { provider });
-    const webhook = await this.registerWebhook(user, apiKey);
+    // The server's environment sets the key in effect: the one just pasted is only kept for later, so it registers
+    // nothing at the service (a webhook registered with it would belong to an account Mynt isn't using, and its id
+    // would replace the one in use).
+    const webhook = this.env[ESIGN_ENV[adapter.name].apiKey]?.trim()
+      ? { registered: false, reason: "The server's environment sets the e-signature API key, which overrides the one kept here: no webhook was registered with the key you pasted. It's registered when that key comes into use (remove the environment's, then Re-register webhook)" }
+      : await this.registerWebhook(user, apiKey);
     await this.reload();
     return { ok: true, webhook };
   }
@@ -234,7 +239,7 @@ export function registerEsignAdminTools(server: McpServer, store: Store, user: U
     {
       title: "Set the e-signature API key",
       description:
-        "Admin: set the e-signature service's API key. Mynt checks it with the service, keeps it sealed in the platform key vault (never shown again; set_platform_key does the same), then registers the service's webhook to this server (reusing one already pointing here). The server's environment, where it sets a key, still takes precedence. Audited without the key.",
+        "Admin: set the e-signature service's API key. Mynt checks it with the service, keeps it sealed in the platform key vault (never shown again; set_platform_key does the same), then registers the service's webhook to this server (reusing one already pointing here). The server's environment, where it sets a key, still takes precedence: the pasted key is then only kept for later, and no webhook is registered with it. Audited without the key.",
       inputSchema: { provider: z.enum(ESIGN_PROVIDER_NAMES), api_key: z.string().trim().min(8).max(500).regex(/^[\x21-\x7e]+$/, "The key as the service shows it, without spaces") },
     },
     async ({ provider, api_key }) => {

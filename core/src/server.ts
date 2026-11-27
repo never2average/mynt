@@ -43,7 +43,7 @@ import {
 } from "./store.js";
 import { registerFirmTools, registerMarketplaceTools, registerRosterTools } from "./marketplace.js";
 import { registerLicenseProviderTools, registerSponsorshipBuilderTools } from "./sponsorships.js";
-import { registerAppAgreementTools } from "./app-agreements.js";
+import { missingAgreementText, registerAppAgreementTools, uncoveredSponsors } from "./app-agreements.js";
 import { registerRiskRegisterTools } from "./risk-register.js";
 import { registerRiskModelTools } from "./risk-models.js";
 import { registerRiskDetailTools } from "./risk-detail.js";
@@ -817,6 +817,17 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
     return out;
   };
 
+  // A production app serves real customers, so a product joins it only with what promotion asked of the others: a
+  // signed program agreement in force with each licence provider sponsoring it (app-agreements.ts). Null when the
+  // products named may be added.
+  const needsAgreement = async (app: App, added: string[]) => {
+    if (!added.length || !(await isProduction(store.db, app.id))) return null;
+    const gaps = await uncoveredSponsors(store.db, store, app, added);
+    return gaps.length
+      ? `This app is in production, so a product joins it only once its sponsor has signed a program agreement for it. ${gaps.map(missingAgreementText).join("; ")}. Propose one with propose_app_agreement (the app's Agreements tab), and add the product once it's signed`
+      : null;
+  };
+
   const experienceFields = {
     disclosures: z.array(z.string().min(1)).optional().describe("Text the experience shows users, e.g. risk warnings the products require"),
     actions: z.array(z.enum(EXPERIENCE_ACTIONS)).min(1).optional().describe("What the experience does with the products (default: display)"),
@@ -970,7 +981,8 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
     "update_app",
     {
       title: "Update an app experience",
-      description: "Developer: change one of your app experiences. Only fields you pass are changed.",
+      description:
+        "Developer: change one of your app experiences. Only fields you pass are changed. On an app in production, a product is added only once the app has a signed program agreement in force with each licence provider sponsoring it (propose_app_agreement); until then it's refused, naming the product and the sponsor.",
       inputSchema: {
         app_id: z.string(),
         name: z.string().min(1).optional(),
@@ -985,6 +997,8 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
       if (!app) return fail(`No app with id '${app_id}'`);
       const bad = await unusable(changes.product_ids ?? [], app.id, await isProduction(store.db, app.id));
       if (bad.length) return fail(`Products not available: ${bad.join(", ")}`);
+      const uncovered = await needsAgreement(app, (changes.product_ids ?? []).filter((id) => !app.product_ids.includes(id)));
+      if (uncovered) return fail(uncovered);
       const defined = Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined));
       return json(await store.saveApp({ ...app, ...defined }));
     },
@@ -1060,7 +1074,7 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
     {
       title: "Ask to build on a product",
       description:
-        "Developer: ask a product's innovator to let one of your apps go live with it. Open products need no request; approval products go to the innovator's inbox; private products need an invitation.",
+        "Developer: ask a product's innovator to let one of your apps go live with it. Open products need no request; approval products go to the innovator's inbox; private products need an invitation. For an app in production the product must already be covered by a signed program agreement with each licence provider sponsoring it (propose_app_agreement), or be on the app already.",
       inputSchema: { app_id: z.string(), product_id: z.string(), note: z.string().default("").describe("What you're building and why") },
     },
     async ({ app_id, product_id, note }) => {
@@ -1072,6 +1086,8 @@ function registerDeveloperTools(server: McpServer, store: Store, user: User) {
       if (access.granted) return json({ product_id, granted: true, via: access.via, note: "No request needed" });
       if (record.access_mode === "private") return fail(`'${product_id}' is private; its innovator has to invite you`);
       if (access.via === "pending") return fail(`A request for '${product_id}' is already waiting (${access.request_id})`);
+      const uncovered = app.product_ids.includes(product_id) ? null : await needsAgreement(app, [product_id]);
+      if (uncovered) return fail(uncovered);
       if (!app.product_ids.includes(product_id)) await store.saveApp({ ...app, product_ids: [...app.product_ids, product_id] });
       return json(
         await store.createRequest({ kind: "product_access", product_id, app_id: app.id, campaign_id: null, requester_id: user.id, status: "pending", note }),

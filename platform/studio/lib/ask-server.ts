@@ -15,7 +15,7 @@ import { runAsk, type AskDeps } from "./ask";
 import { cleanAnswer, conversationFrom, hasUncited, NOT_COVERED, questionFrom, type AskAnswer, type AskArea, type AskSource, type AskStreamEvent } from "./ask-answer";
 import { argsSummary, readLabel, readSummary, sourcesOf } from "./ask-sources";
 import { askModels, createLlm, type Llm } from "./llm";
-import { scrub, scrubText } from "./scrub";
+import { scrub, scrubStream, scrubText } from "./scrub";
 import type { Session } from "./session-store";
 import { sessionStore } from "./session-store";
 import { isAuthError, logLine } from "./studio-server";
@@ -125,15 +125,6 @@ export function shownResult(result: unknown): string {
   return text.length > MAX_RESULT_SHOWN ? `${text.slice(0, MAX_RESULT_SHOWN)}\n…(cut short)` : text;
 }
 
-/**
- * A read's reply as the model is given it. The same hiding as the panel's: a value under a field named like a secret
- * (a signing secret, a token, a key) is replaced whatever it looks like, as well as text shaped like a key anywhere.
- * The model can't repeat, and a transcript can't keep, what it was never handed.
- */
-export function readForModel(text: string, result: unknown): string {
-  return typeof result === "string" ? scrubText(text) : JSON.stringify(scrub(result));
-}
-
 const parsed = (text: string): unknown => {
   try {
     return JSON.parse(text);
@@ -150,8 +141,15 @@ const parsed = (text: string): unknown => {
 export async function writeAnswer(area: AskArea, what: string, history: MessageParam[], run: AnswerRun, send: (e: AskStreamEvent) => void, signal: AbortSignal, using: { llm?: Llm; models?: string[] } = {}) {
   const sources: AskSource[] = [];
   let text = "";
+  // What the model writes and thinks is scrubbed as it streams (scrub.ts scrubStream): it has only seen scrubbed reads,
+  // and this is the second lock on what reaches the browser.
+  const written = scrubStream((t) => send({ type: "delta", text: t }));
+  let thinkingId = "";
+  const thoughts = scrubStream((t) => send({ type: "reasoning", id: thinkingId, text: t }));
   // What was written before a read (the model saying it will look), or by a model that then failed, is dropped.
   const reset = () => {
+    thoughts.flush();
+    written.reset();
     if (!text) return;
     text = "";
     send({ type: "reset" });
@@ -214,19 +212,26 @@ export async function writeAnswer(area: AskArea, what: string, history: MessageP
           send({ type: "tool_end", id, ok: true, ms, summary: readSummary(area, name, result), result: shownResult(result) });
           // The model is told this read's numbered sources, and cites only those.
           const legend = cited.map((s) => `[${s.n}] ${s.title}`).join("\n");
-          return { text: `Sources for this read (cite a statement by the number of the source it comes from; the first is the whole read):\n${legend}\n\n${readForModel(out.text, result)}`, isError: false };
+          // The model reads what the panel is shown, in full: values under secret-named keys hidden as well as text
+          // that looks like a secret, never the reply as Mynt sent it.
+          const forModel = typeof result === "string" ? scrubText(result) : JSON.stringify(scrub(result));
+          return { text: `Sources for this read (cite a statement by the number of the source it comes from; the first is the whole read):\n${legend}\n\n${forModel}`, isError: false };
         },
         emit: (ev) => {
           if (ev.type === "text") {
+            thoughts.flush();
             text += ev.delta;
-            send({ type: "delta", text: ev.delta });
+            written.push(ev.delta);
           } else if (ev.type === "reasoning-start") {
+            thoughts.flush();
             thinking++;
+            thinkingId = `r${thinking}`;
             thoughtAt = Date.now();
           } else if (ev.type === "reasoning") {
             thought = true;
-            send({ type: "reasoning", id: `r${thinking}`, text: ev.delta });
+            thoughts.push(ev.delta);
           } else if (ev.type === "reasoning-end") {
+            thoughts.flush();
             thoughtMs += Date.now() - thoughtAt;
           } else if (ev.type === "tool") {
             reset();
@@ -242,6 +247,8 @@ export async function writeAnswer(area: AskArea, what: string, history: MessageP
           }
         },
       });
+      thoughts.flush();
+      written.flush();
       model = candidate;
       break;
     } catch (err) {
@@ -253,7 +260,7 @@ export async function writeAnswer(area: AskArea, what: string, history: MessageP
     }
   }
   if (signal.aborted) return;
-  const answer = model ? cleanAnswer(text, sources.length) : "";
+  const answer = model ? cleanAnswer(scrubText(text), sources.length) : "";
   if (!answer) return send({ type: "done", ...none("unavailable"), ...(thought ? { thoughtMs } : {}) });
   send({ type: "done", answer, covered: !NOT_COVERED.test(answer), model, reason: null, uncited: hasUncited(answer), ...(thought ? { thoughtMs } : {}) });
 }
