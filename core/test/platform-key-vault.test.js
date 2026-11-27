@@ -431,3 +431,72 @@ test("without a vault key nothing can be sealed: the key is refused, in words, a
   assert.match(r.error, /can't seal keys yet/);
   assert.equal((await w.store.db.query(`SELECT count(*)::int AS n FROM ${T}.platform_secrets`)).rows[0].n, 0);
 });
+
+// ---- sign-in can't fall away quietly ----
+
+test("a server that requires sign-in keeps the keys sign-in rests on: removal from the vault is refused unless the environment sets them", async () => {
+  const SIGN_IN = "sk_test_FAKEfakeFAKEfake0001";
+  // Sign-in is meant to be on (the publishable key is set) and the vault holds the only secret key and webhook secret.
+  const w = await setup({ env: { CLERK_PUBLISHABLE_KEY: "pk_test_FAKE" } });
+  ok(await w.admin.call("set_platform_key", { type: "CLERK_SECRET_KEY", value: SIGN_IN }));
+  ok(await w.admin.call("set_platform_key", { type: "CLERK_WEBHOOK_SECRET", value: FAKE.hook }));
+  for (const type of ["CLERK_SECRET_KEY", "CLERK_WEBHOOK_SECRET"]) {
+    const r = await w.admin.call("remove_platform_key", { type, confirm: true });
+    assert.equal(r.isError, true, r.text);
+    assert.match(r.data.error, /can't be removed from the vault while this server requires sign-in/);
+    assert.match(r.data.error, /set_platform_key/);
+    clean(r.text, "the refusal");
+  }
+  assert.equal(w.vault.source("CLERK_SECRET_KEY"), "vault", "still there");
+  assert.equal(w.vault.bootEnv().CLERK_SECRET_KEY, SIGN_IN, "and still what the server starts with");
+  const refusedTrail = (await w.store.db.query(`SELECT action, target, details FROM ${T}.audit_log WHERE action = 'remove_platform_key_refused' ORDER BY created_at, id`)).rows;
+  assert.deepEqual(refusedTrail.map((t) => [t.target, t.details.reason]), [["CLERK_SECRET_KEY", "sign_in_depends_on_it"], ["CLERK_WEBHOOK_SECRET", "sign_in_depends_on_it"]]);
+  assert.equal(auditClass("remove_platform_key_refused"), "security");
+  // Replacing is how it changes; other keys are removed as before.
+  ok(await w.admin.call("set_platform_key", { type: "CLERK_SECRET_KEY", value: "sk_test_FAKEfakeFAKEfake0002" }));
+  ok(await w.admin.call("set_platform_key", { type: "ANTHROPIC_API_KEY", value: FAKE.model }));
+  ok(await w.admin.call("remove_platform_key", { type: "ANTHROPIC_API_KEY", confirm: true }));
+
+  // The environment sets it too: the vault's copy isn't what sign-in rests on, so it may go.
+  const both = await setup({ env: { CLERK_PUBLISHABLE_KEY: "pk_test_FAKE", CLERK_SECRET_KEY: "sk_test_FAKEfromTheEnvironment" } });
+  ok(await both.admin.call("set_platform_key", { type: "CLERK_SECRET_KEY", value: SIGN_IN }));
+  const removed = ok(await both.admin.call("remove_platform_key", { type: "CLERK_SECRET_KEY", confirm: true }));
+  assert.deepEqual([removed.removed, removed.still_set_by_environment], [true, true]);
+
+  // A server without sign-in (local, development): nothing rests on the key, and it's removed as before.
+  const local = await setup();
+  ok(await local.admin.call("set_platform_key", { type: "CLERK_SECRET_KEY", value: SIGN_IN }));
+  assert.equal(ok(await local.admin.call("remove_platform_key", { type: "CLERK_SECRET_KEY", confirm: true })).removed, true);
+});
+
+test("start-up: a server meant to require sign-in refuses to start when no secret key can be read; without sign-in it starts as before", async () => {
+  const { clerkConfigFromEnv, SIGN_IN_KEY_MISSING } = await import("../dist/auth.js");
+  const PUBLIC = { CLERK_PUBLISHABLE_KEY: "pk_test_FAKE", PUBLIC_URL: "https://mynt.example.test" };
+  // Local and development use: neither key, no sign-in.
+  assert.equal(clerkConfigFromEnv({}), null);
+  assert.equal(clerkConfigFromEnv({ PUBLIC_URL: "https://mynt.example.test" }), null);
+  // The publishable key without a secret key: never "no sign-in".
+  assert.throws(() => clerkConfigFromEnv(PUBLIC), (e) => e.message === SIGN_IN_KEY_MISSING);
+  assert.throws(() => clerkConfigFromEnv({ ...PUBLIC, CLERK_SECRET_KEY: "  " }), /Refusing to start without sign-in/);
+  assert.match(SIGN_IN_KEY_MISSING, /CLERK_SECRET_KEY/);
+  // With both, sign-in is on.
+  assert.equal(clerkConfigFromEnv({ ...PUBLIC, CLERK_SECRET_KEY: "sk_test_FAKEfakeFAKEfake0001" }).publishableKey, "pk_test_FAKE");
+
+  // The case that used to start without sign-in: the vault holds the secret key, but it can't be opened (the vault
+  // key it was sealed with isn't the one this server has), so start-up's environment has no secret key.
+  const w = await setup({ env: { CLERK_PUBLISHABLE_KEY: "pk_test_FAKE", PUBLIC_URL: "https://mynt.example.test" } });
+  ok(await w.admin.call("set_platform_key", { type: "CLERK_SECRET_KEY", value: "sk_test_FAKEfakeFAKEfake0001" }));
+  assert.ok(clerkConfigFromEnv(w.vault.bootEnv()), "readable: sign-in is on");
+  await w.store.db.query(`UPDATE ${T}.platform_secrets SET sealed = 'cs1:local:secret:AAAA:AAAA:AAAA' WHERE key_type = 'CLERK_SECRET_KEY' AND status = 'active'`);
+  const printed = [];
+  const error = console.error;
+  console.error = (...a) => printed.push(a.join(" "));
+  let reopened;
+  try {
+    reopened = await PlatformKeyVault.open(w.store, { env: { CLERK_PUBLISHABLE_KEY: "pk_test_FAKE", PUBLIC_URL: "https://mynt.example.test" } });
+  } finally {
+    console.error = error;
+  }
+  assert.equal(reopened.bootEnv().CLERK_SECRET_KEY, undefined);
+  assert.throws(() => clerkConfigFromEnv(reopened.bootEnv()), /Refusing to start without sign-in/);
+});

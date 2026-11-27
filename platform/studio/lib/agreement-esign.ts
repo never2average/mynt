@@ -49,6 +49,11 @@ export function esignOf(agreement: unknown): EsignInfo | null {
   };
 }
 
+// A program agreement signed by an e-signature document made in the service's test mode: signed, but not legally
+// binding, so Mynt doesn't count it for production (core/src/app-agreements.ts). Its status says so.
+export const SIGNED_IN_TEST_MODE = "Signed (test, not binding)";
+export const signedInTestMode = (statusKey: string, e: EsignInfo | null) => statusKey === "signed" && Boolean(e?.testMode && e.signedCopy);
+
 // Where an e-signature stands, in words, for one side.
 export function esignStatusLine(e: EsignInfo, side: "app" | "counterparty"): string | null {
   if (!e.byEsign) return null;

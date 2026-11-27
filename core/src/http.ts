@@ -15,6 +15,7 @@ import { createRuntimeApi, type RuntimeApiOptions } from "./runtime-api.js";
 import { createServer } from "./server.js";
 import { llmsFullCache, llmsTxt } from "./llms-txt.js";
 import { validNonce } from "./confidential/shared/binding.js";
+import { callerAddress, RateLimiter } from "./rate-limit.js";
 import type { Store, User } from "./store.js";
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
@@ -89,6 +90,7 @@ function publicBase(clerk: ClerkAuth | null, runtimeOptions: RuntimeApiOptions, 
 }
 
 interface Handlers {
+  attestation: AttestationLimits;
   meta: (() => Promise<unknown>) | null;
   runtime: ReturnType<typeof createRuntimeApi>;
   llmsFull: (base: string) => Promise<string>;
@@ -131,7 +133,7 @@ async function handle(store: Store, clerk: ClerkAuth | null, ctx: AdminContext, 
     return sendJson(res, 200, { origins: live ? [...live.provider.signingOrigins] : [] }, { "Cache-Control": "public, max-age=300" });
   }
   // The confidential service's attestation, for partners to check before sealing their books to it (verify-mynt-enclave).
-  if (readOnly && url.pathname === "/confidential/attestation") return confidentialAttestation(ctx, req, res, url);
+  if (readOnly && url.pathname === "/confidential/attestation") return confidentialAttestation(ctx, h.attestation, req, res, url);
   // A ramp partner's webhooks, for an offering Mynt runs through an adapter: verified with the partner's own scheme.
   if (url.pathname.startsWith(RAMP_ADAPTER_WEBHOOK_PATH)) return rampAdapterWebhook(store, req, res, url);
   // The runtime API for developers' apps authenticates with app keys, not Clerk.
@@ -201,7 +203,7 @@ export function createMcpHttpServer(
 ): Server {
   const meta = clerk ? authServerMetadata(clerk.issuer) : null;
   const runtime = createRuntimeApi(store, { hosting: ctx.hosting ?? null, ...runtimeOptions });
-  const handlers: Handlers = { meta, runtime, llmsFull: llmsFullCache(store, ctx), runtimeOptions };
+  const handlers: Handlers = { meta, runtime, llmsFull: llmsFullCache(store, ctx), runtimeOptions, attestation: attestationLimits() };
   return createHttpServer((req, res) =>
     handle(store, clerk, ctx, handlers, req, res).catch((err) => {
       console.error(err);
@@ -213,16 +215,25 @@ export function createMcpHttpServer(
 
 // GET /confidential/attestation?nonce=<16-64 URL-safe characters>: the confidential host's attestation, as it gave it
 // (Mynt's server only relays it, so it can't change what partners check), with the releases in effect. Public: it names
-// no secret. One a second across all callers, because each one asks the cloud's attestation service for a token.
+// no secret. Each one asks the cloud's attestation service for a token, so it's limited: one a second per caller address
+// (rate-limit.ts callerAddress: the proxy's trusted header where the operator names one, else the connection's), so
+// one caller can't keep everyone else from checking, and ATTESTATIONS_PER_SECOND across all callers as the ceiling.
 export const CONFIDENTIAL_ATTESTATION_PATH = "/confidential/attestation";
-let lastAttestation = 0;
-async function confidentialAttestation(ctx: AdminContext, req: IncomingMessage, res: ServerResponse, url: URL) {
+export const ATTESTATIONS_PER_SECOND = 5;
+interface AttestationLimits {
+  caller: RateLimiter;
+  all: RateLimiter;
+}
+const attestationLimits = (): AttestationLimits => ({ caller: new RateLimiter(1, 60), all: new RateLimiter(ATTESTATIONS_PER_SECOND, ATTESTATIONS_PER_SECOND * 60) });
+async function confidentialAttestation(ctx: AdminContext, limits: AttestationLimits, req: IncomingMessage, res: ServerResponse, url: URL) {
   const host = ctx.confidential ?? null;
   if (!host) return sendJson(res, 404, { error: "not_configured", message: "This Mynt has no confidential host" });
   const nonce = url.searchParams.get("nonce");
   if (!validNonce(nonce)) return sendJson(res, 400, { error: "bad_nonce", message: "nonce: 16 to 64 characters of A-Z, a-z, 0-9, - and _" });
-  if (Date.now() - lastAttestation < 1000) return sendJson(res, 429, { error: "rate_limited", message: "One attestation a second: try again shortly" }, { "Retry-After": "1" });
-  lastAttestation = Date.now();
+  const wait = limits.caller.take(callerAddress(req));
+  if (wait) return sendJson(res, 429, { error: "rate_limited", message: "One attestation a second: try again shortly" }, { "Retry-After": String(wait) });
+  const busy = limits.all.take("all");
+  if (busy) return sendJson(res, 429, { error: "rate_limited", message: "Too many attestations are being asked for just now: try again shortly" }, { "Retry-After": String(busy) });
   try {
     const attestation = await host.attest(nonce);
     const releases = ctx.confidentialReleases ? (await ctx.confidentialReleases.list()).filter((r) => r.valid && !r.withdrawn_at).map((r) => ({ image_digest: r.image_digest, pcrs: r.pcrs, release: r.release, effective_at: r.effective_at, in_effect: r.in_effect })) : [];

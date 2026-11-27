@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { memberFirms } from "./app-agreements.js";
+import { ownFirms } from "./app-agreements.js";
 import type { Db } from "./db.js";
 import { CONTROL_STEP_WORDS, DEFAULT_RISK_GRADING, deriveResidual, levelOf, loadRiskGrading, NOT_ASSESSED, type ControlStep, type RiskGrading, type RiskLevelKey } from "./risk-grading.js";
 import { CONTROL_STEPS, PLATFORM_SUBJECT_ID, RISK_AREA_OF_CATEGORY, RISK_AREAS, RISK_CATEGORIES, RISK_LEVEL_KEYS, RISK_STATUSES, RISK_SUBJECTS, type RiskArea } from "./risk-register-schema.js";
@@ -256,9 +256,11 @@ const fraudSignals = (): Signal<never> => ({ available: false, reason: "Not meas
 // The vendor services the app's workspace relies on that are failing: the offering's latest conformance run failed,
 // most of its calls in the last week erred, or the subscription or a vendor contract has ended.
 async function vendorSignals(store: Store, app: App) {
-  const firms = await memberFirms(store, app);
+  // Its workspace's own firms' subscriptions and those whose terms were accepted for this app; never those of another
+  // firm a member happens to belong to (app-agreements.ts ownFirms).
+  const firms = await ownFirms(store, app);
   const rows: { subscription_id: string | null; agreement_id: string | null; vendor: string | null; offering: string | null; issue: string; detail: string; since: string | null }[] = [];
-  if (firms.length) {
+  {
     const { rows: subs } = await store.db.query(
       `SELECT s.id, s.status, s.live, s.created_at, s.ended_at, o.id AS offering_id, o.name AS offering, e.name AS vendor,
               (SELECT r.passed FROM ${T}.vendor_conformance_runs r WHERE r.offering_id = o.id ORDER BY r.created_at DESC LIMIT 1) AS last_passed,
@@ -266,9 +268,10 @@ async function vendorSignals(store: Store, app: App) {
               (SELECT coalesce(sum(u.ok + u.errors), 0)::int FROM ${T}.vendor_usage u WHERE u.subscription_id = s.id AND u.day > current_date - 7) AS calls,
               (SELECT coalesce(sum(u.errors), 0)::int FROM ${T}.vendor_usage u WHERE u.subscription_id = s.id AND u.day > current_date - 7) AS errors
          FROM ${T}.vendor_subscriptions s JOIN ${T}.vendor_offerings o ON o.id = s.offering_id LEFT JOIN ${T}.entities e ON e.id = o.entity_id
-        WHERE s.entity_id = ANY($1::uuid[]) AND (s.status = 'active' OR s.ended_at > now() - interval '90 days')
+        WHERE (s.entity_id = ANY($1::uuid[]) OR EXISTS (SELECT 1 FROM ${T}.app_agreements g WHERE g.vendor_subscription_id = s.id AND g.app_id = $2))
+          AND (s.status = 'active' OR s.ended_at > now() - interval '90 days')
         ORDER BY s.created_at`,
-      [firms],
+      [firms, app.id],
     );
     for (const s of subs) {
       const base = { subscription_id: s.id as string, agreement_id: null, vendor: (s.vendor as string | null) ?? null, offering: (s.offering as string | null) ?? null };

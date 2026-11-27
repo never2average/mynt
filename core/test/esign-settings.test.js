@@ -198,3 +198,19 @@ test("stored settings survive a restart: a new EsignSettings reads the sealed ke
   const hash = createHmac("sha256", "hook-1").update(`document_completed@${time}`).digest("hex");
   assert.equal(again.current.provider.verifyWebhook(JSON.stringify({ event: { type: "document_completed", time, hash }, data: { object: { id: "d" } } }), {}).ok, true);
 });
+
+test("a key pasted while the environment's key is in effect is kept for later and registers no webhook with the service", async () => {
+  const w = await setup({ env: { ESIGN_PROVIDER: "signwell", SIGNWELL_API_KEY: "env-fake-key-000000", SIGNWELL_WEBHOOK_ID: "env-hook" } });
+  const r = await w.admin.call("set_esign_api_key", { provider: "signwell", api_key: GOOD });
+  const set = ok(r);
+  assert.equal(set.webhook.registered, false);
+  assert.match(set.webhook.reason, /environment sets the e-signature API key.*no webhook was registered/);
+  // Nothing was registered at the pasted key's account, and no webhook id took the place of the one in use.
+  assert.deepEqual(w.service.hooks, []);
+  assert.ok(!w.service.calls.some((c) => c.path.endsWith("/hooks")), "the service's webhooks were never touched");
+  const rows = (await w.store.db.query(`SELECT key_type FROM ${T}.platform_secrets WHERE status = 'active'`)).rows.map((x) => x.key_type);
+  assert.deepEqual(rows, ["SIGNWELL_API_KEY"], "the key is kept; no webhook id was stored");
+  assert.equal(set.settings.key.source, "environment");
+  assert.equal(set.settings.webhook.source, "environment");
+  assert.ok(!r.text.includes(GOOD));
+});

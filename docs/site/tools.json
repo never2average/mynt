@@ -13109,7 +13109,7 @@
     {
       "name": "propose_app_agreement",
       "title": "Propose an agreement for an app",
-      "description": "Developer (the app's workspace owners and admins): propose a business agreement between the app's workspace and another firm, for that app: 'program' with a licence provider that sponsors every product named (see list_app_agreements' products and their sponsors), 'vendor' with a firm that lists vendor services on Mynt, 'data_sharing' with either, 'msa' (a master services agreement) or 'sla' (service levels, set with add_agreement_sla) with either. Name the products it covers (from the app's own), its scopes (one or more of technology, manpower, financial_regulatory_operations: what it covers, part of what the other side accepts and what's signed; change them with update_agreement_scopes while it's proposed), a short summary of the terms, and optionally a link to the document (https) with its SHA-256 and the dates it runs between. The other firm is told and accepts or declines it (respond_to_app_agreement); then both sides sign (sign_app_agreement). Apps hold no licences themselves: licence coverage is the products'. Audited.",
+      "description": "Developer (the app's workspace owners and admins): propose a business agreement between the app's workspace and another firm, for that app: 'program' with a licence provider that sponsors every product named (see list_app_agreements' products and their sponsors), 'vendor' with a firm that lists vendor services on Mynt, 'data_sharing' with either, 'msa' (a master services agreement) or 'sla' (service levels, set with add_agreement_sla) with either. Name the products it covers (from the app's own; a program agreement may also name a product the licence provider sponsors that the app is about to add, since an app in production adds a sponsored product only once its agreement is signed), its scopes (one or more of technology, manpower, financial_regulatory_operations: what it covers, part of what the other side accepts and what's signed; change them with update_agreement_scopes while it's proposed), a short summary of the terms, and optionally a link to the document (https) with its SHA-256 and the dates it runs between. The other firm is told and accepts or declines it (respond_to_app_agreement); then both sides sign (sign_app_agreement). Apps hold no licences themselves: licence coverage is the products'. Audited.",
       "area": "apps",
       "roles": [
         "developer",
@@ -14285,7 +14285,7 @@
     {
       "name": "remove_platform_key",
       "title": "Remove a platform key",
-      "description": "Admin: remove a key from the vault: its row is retired and its value destroyed. Whatever uses it stops (at once, or after a restart for keys read when the server starts) unless the server's environment sets the same key. Removing the e-signature API key also deletes its webhook at the service. Audited.",
+      "description": "Admin: remove a key from the vault: its row is retired and its value destroyed. Whatever uses it stops (at once, or after a restart for keys read when the server starts) unless the server's environment sets the same key. Refused for the sign-in provider's secret key and webhook secret while this server requires sign-in and its environment doesn't set them (removing either would turn sign-in, or the checking of the provider's events, off): replace them with set_platform_key instead. Removing the e-signature API key also deletes its webhook at the service. Audited.",
       "area": "admin",
       "roles": [
         "admin"
@@ -14754,7 +14754,7 @@
     {
       "name": "request_product_access",
       "title": "Ask to build on a product",
-      "description": "Developer: ask a product's innovator to let one of your apps go live with it. Open products need no request; approval products go to the innovator's inbox; private products need an invitation.",
+      "description": "Developer: ask a product's innovator to let one of your apps go live with it. Open products need no request; approval products go to the innovator's inbox; private products need an invitation. For an app in production the product must already be covered by a signed program agreement with each licence provider sponsoring it (propose_app_agreement), or be on the app already.",
       "area": "apps",
       "roles": [
         "developer",
@@ -16686,7 +16686,7 @@
     {
       "name": "set_esign_api_key",
       "title": "Set the e-signature API key",
-      "description": "Admin: set the e-signature service's API key. Mynt checks it with the service, keeps it sealed in the platform key vault (never shown again; set_platform_key does the same), then registers the service's webhook to this server (reusing one already pointing here). The server's environment, where it sets a key, still takes precedence. Audited without the key.",
+      "description": "Admin: set the e-signature service's API key. Mynt checks it with the service, keeps it sealed in the platform key vault (never shown again; set_platform_key does the same), then registers the service's webhook to this server (reusing one already pointing here). The server's environment, where it sets a key, still takes precedence: the pasted key is then only kept for later, and no webhook is registered with it. Audited without the key.",
       "area": "admin",
       "roles": [
         "admin"
@@ -19072,7 +19072,7 @@
     {
       "name": "update_app",
       "title": "Update an app experience",
-      "description": "Developer: change one of your app experiences. Only fields you pass are changed.",
+      "description": "Developer: change one of your app experiences. Only fields you pass are changed. On an app in production, a product is added only once the app has a signed program agreement in force with each licence provider sponsoring it (propose_app_agreement); until then it's refused, naming the product and the sponsor.",
       "area": "apps",
       "roles": [
         "developer",

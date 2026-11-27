@@ -13,6 +13,7 @@ import { DATA_DICTIONARY } from "./data-dictionary.js";
 import { masked, open, sandboxPrefill, seal, validateValue, vaultAvailable } from "./vault.js";
 import type { ApiKey, App, ProductRecord, Store } from "./store.js";
 import { isProduction, NOT_PRODUCTION } from "./promotion-schema.js";
+import { missingAgreementText, uncoveredSponsors, type ProgramCoverage } from "./app-agreements.js";
 import type { VendorCallOptions } from "./vendor-call.js";
 import { eraseCustomerVerification, requestRampLink } from "./ramp-adapters/index.js";
 import { vendorAction, vendorActionRun, vendorCallback, vendorPrefill } from "./vendors.js";
@@ -568,9 +569,21 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
     if (!sandbox && !(await isProduction(store.db, app.id))) throw new ApiError(403, "app_not_in_production", NOT_PRODUCTION);
     if (!sandbox && app.status !== "published") throw new ApiError(403, "app_not_published", "Live keys work once the app is published; use a sandbox key until then");
 
+    // A live key is served a sponsored product only while the app has a signed program agreement in force with each
+    // licence provider sponsoring it (app-agreements.ts): the promotion check, asked again on every live call, so a
+    // product added after promotion, or one whose agreement has since ended or expired, isn't served to real customers.
+    // Sandbox keys are never asked. Customer sessions already open aren't cut off; they expire within the hour.
+    const uncovered = async (productIds: string[]): Promise<ProgramCoverage[]> => (sandbox ? [] : uncoveredSponsors(store.db, store, app, productIds));
+    const visible = async () => {
+      const records = await appProducts(store, app);
+      const off = new Set((await uncovered(records.map((r) => r.product.id))).map((c) => c.product_id));
+      return records.filter((r) => !off.has(r.product.id));
+    };
     const available = async (productId: string) => {
       const record = (await appProducts(store, app)).find((r) => r.product.id === productId);
       if (!record) throw new ApiError(404, "product_not_found", `Product '${productId}' isn't available to this app`);
+      const gap = await uncovered([productId]);
+      if (gap.length) throw new ApiError(403, "program_agreement_required", `'${productId}' isn't served on live keys yet: ${gap.map(missingAgreementText).join("; ")}. Sandbox keys still work`);
       return record;
     };
 
@@ -616,7 +629,7 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
     }
     if (path === "/v1/products") {
       allow("GET");
-      return send(res, 200, { products: (await appProducts(store, app)).map(productView) }, cors);
+      return send(res, 200, { products: (await visible()).map(productView) }, cors);
     }
     const one = path.match(/^\/v1\/products\/([^/]+)$/);
     if (one) {

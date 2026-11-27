@@ -12,6 +12,7 @@ const fake = {
   steps: [] as Step[],
   requests: [] as { model?: string; tools: { name: string }[]; messages: unknown[]; system: unknown; max_tokens?: number; thinking?: unknown }[],
   calls: [] as { name: string; args: Record<string, unknown> }[],
+  replies: {} as Record<string, string>, // what Mynt answers a read with, by tool name, where a test says
   logged: [] as string[],
   producedAt: [] as number[],
 };
@@ -59,6 +60,7 @@ vi.mock("@/lib/mynt-client", () => {
     connectMynt: async () => ({ listTools: async () => ({ tools: ALL_TOOLS }), close: async () => undefined }),
     callMyntTool: async (_c: unknown, name: string, args: Record<string, unknown>) => {
       fake.calls.push({ name, args });
+      if (fake.replies[name]) return { isError: false, text: fake.replies[name] };
       if (name === "whoami") return { isError: false, text: JSON.stringify({ id: "u1", effective_roles: ["developer"] }) };
       if (name === "list_my_apps") return { isError: false, text: JSON.stringify({ apps: [{ id: "a1", name: "Round-up savings" }] }) };
       return { isError: true, text: JSON.stringify({ error: `unexpected ${name}` }) };
@@ -132,6 +134,7 @@ beforeEach(() => {
   fake.steps = [];
   fake.requests = [];
   fake.calls = [];
+  fake.replies = {};
   fake.logged = [];
   fake.producedAt = [];
   counts.clear();
@@ -559,5 +562,36 @@ describe("Ask AI's limits", () => {
     await chunks(first);
     fake.steps = [{ text: "ok" }];
     expect((await ask("And which builds?")).status).toBe(200);
+  });
+
+  it("a secret in a read never reaches the model, and one the model writes or thinks never reaches the browser, however the stream cuts it", async () => {
+    // Every value here is an obvious fake.
+    const tail = "FAKEfakeFAKEfakeFAKE0001";
+    fake.replies.list_my_apps = JSON.stringify({
+      apps: [{ id: "a1", name: "Round-up savings", webhook_secret: "plain words under a secret-named key", note: `signed with whsec_${tail}, vendor mvs_${tail}, ledger mpl_${tail}, agent mynt_agent_${tail}, bd mynt_bd_${tail}, local fpm_${tail}, sign-in sk_live_${tail}` }],
+    });
+    fake.steps = [
+      { thinking: ["The token is mynt_agent_", `${tail} here.`], tool: { name: "list_my_apps", input: {} } },
+      { pieces: ["Your key is sk_live_", `${tail} and `, "the hook is whsec_", tail, " [1]."], gapMs: 0 },
+    ];
+    const out = await chunks(await ask("Which apps do I have?"));
+
+    // What the model was handed: the record, with the value under the secret-named key and every key-shaped text hidden.
+    const fed = JSON.stringify(fake.requests[1].messages.at(-1));
+    expect(fed).toContain("Round-up savings");
+    expect(fed).not.toContain("plain words under a secret-named key");
+    expect(fed).not.toContain(tail);
+    expect(fed).toContain("[hidden]");
+    // What the panel is shown of the read is the same scrubbed reply.
+    const shown = String(out.find((c) => c.type === "tool_end")!.result);
+    expect(shown).not.toContain(tail);
+    expect(shown).not.toContain("plain words under a secret-named key");
+
+    // What the browser gets of the model's own words and thinking, piece by piece and at the end.
+    const text = (type: string) => out.filter((c) => c.type === type).map((c) => c.text).join("");
+    expect(text("delta")).toBe("Your key is [hidden] and the hook is [hidden] [1].");
+    expect(text("reasoning")).toBe("The token is [hidden] here.");
+    expect(out.at(-1)).toMatchObject({ type: "done", answer: "Your key is [hidden] and the hook is [hidden] [1]." });
+    expect(JSON.stringify(out)).not.toContain(tail);
   });
 });

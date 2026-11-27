@@ -85,7 +85,7 @@ Partners check its public key the same way as the rest: it is bound into every a
 
 ## What partners check
 
-`GET /confidential/attestation?nonce=<16 to 64 URL-safe characters>` (public, one a second) returns the service's own answer, relayed unchanged, with the releases Mynt has announced.
+`GET /confidential/attestation?nonce=<16 to 64 URL-safe characters>` (public; one a second per caller address, and five a second across all callers) returns the service's own answer, relayed unchanged, with the releases Mynt has announced.
 
 ### An attestation from an enclave
 

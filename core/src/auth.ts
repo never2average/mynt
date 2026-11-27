@@ -127,8 +127,18 @@ export class ClerkIdentityProvider implements IdentityProvider {
   }
 }
 
+// Sign-in is on when the secret key is there. CLERK_PUBLISHABLE_KEY says the operator means it to be on: with it set and
+// no secret key to be read (not in the server's environment, and none the platform key vault could open), the server
+// refuses to start, because without sign-in /mcp serves local tokens and read-only guests. With neither set (local
+// and development use), there's no sign-in, as before.
+export const SIGN_IN_KEY_MISSING =
+  "CLERK_PUBLISHABLE_KEY is set, so this server is meant to require sign-in, but no CLERK_SECRET_KEY could be read: the server's environment doesn't set it and the platform key vault has none it can open. Refusing to start without sign-in. Set CLERK_SECRET_KEY in the server's environment (or restore the vault key it was sealed with); to run without sign-in on purpose, unset CLERK_PUBLISHABLE_KEY";
+
 export function clerkConfigFromEnv(env = process.env): ClerkAuthConfig | null {
-  if (!env.CLERK_SECRET_KEY) return null;
+  if (!env.CLERK_SECRET_KEY?.trim()) {
+    if (env.CLERK_PUBLISHABLE_KEY?.trim()) throw new Error(SIGN_IN_KEY_MISSING);
+    return null;
+  }
   if (!env.CLERK_PUBLISHABLE_KEY || !env.PUBLIC_URL) throw new Error("Clerk auth needs CLERK_PUBLISHABLE_KEY and PUBLIC_URL as well");
   return {
     secretKey: env.CLERK_SECRET_KEY,

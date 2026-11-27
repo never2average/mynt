@@ -42,11 +42,13 @@ Agreements are two-sided: either side proposes, and the side that didn't propose
 | End | `terminate_app_agreement` | Either side |
 | Read | `list_app_agreements` | Both sides |
 
+For a `program` agreement the other firm's side is the sponsor's **licence providers** only (with standing at the firm): they answer, sign, open the signing page, end and read it. An account that is only a vendor at that firm has no part in it and isn't shown it. Vendors act on the other kinds.
+
 ### Proposing from the app
 
 `propose_app_agreement({ app_id, counterparty_entity_id, kind, scopes, products?, terms_summary, document_url?, document_sha256?, effective_from?, effective_to? })`
 
-- `products` are ids of the app's own products.
+- `products` are ids of the app's own products. A `program` agreement may also name a product the other firm already sponsors that the app is about to add: an app in production adds a sponsored product only once its agreement is signed (see [After go-live](#ending-after-go-live)), so the agreement comes first.
 - The document link must be https. Its SHA-256 (64 lowercase hex) is kept with it.
 - The other firm is told: an `app_agreement.proposed` event on its webhooks and a notice to each member (`list_firm_notices`).
 
@@ -159,7 +161,8 @@ An agreement counts when:
 
 - its `status` is `signed` (both sides signed);
 - `effective_from` is unset, or on or before today;
-- `effective_to` is unset, or today or later (the last day it runs).
+- `effective_to` is unset, or today or later (the last day it runs);
+- it is binding: one signed by an e-signature document made in the service's **test mode** is signed, but not legally binding, so it doesn't count for production. Sandbox and staging never ask.
 
 A `vendor` or `data_sharing` agreement doesn't count.
 
@@ -175,8 +178,9 @@ A `vendor` or `data_sharing` agreement doesn't count.
   - `its signed agreement ended on <date>`
   - `it was ended on <date>: <reason>`
   - `<sponsor> declined it`
+- One signed in test mode fails it as `The program agreement with <sponsor> for <product> doesn't count for production: it was signed in the e-signature service's test mode, which is for trying the flow and isn't legally binding: end it and sign a new one once a platform admin has turned test mode off`.
 - `fix` is optional. It is `Propose agreement` (`propose_app_agreement`, the app's Agreements tab).
-- `coverage` lists each pair: `{ product_id, product_name, sponsor_entity_id, sponsor_name, covered, agreement_id, agreement_status, note }`.
+- `coverage` lists each pair: `{ product_id, product_name, sponsor_entity_id, sponsor_name, covered, agreement_id, agreement_status, signed_in_test_mode, note }`.
 - With nothing to agree, the check passes as "Not applicable".
 
 ### The app's view
@@ -185,7 +189,12 @@ A `vendor` or `data_sharing` agreement doesn't count.
 
 ### Ending after go-live
 
-An agreement that is terminated or expires after the app reached production doesn't move the app back. The app keeps running, and:
+The check is asked again after promotion, wherever real customers are served:
+
+- **Adding a product.** On an app in production, `update_app` and `request_product_access` refuse to add a product whose sponsor the app has no signed program agreement in force with, naming the product and the sponsor. Propose and sign the agreement first (it may name the product before the app has it), then add the product. Apps not in production add products freely: promotion checks them.
+- **Live calls.** A live key is served a sponsored product only while an agreement in force covers it. Without one, the product is left out of `GET /v1/products`, and a new client session, contract read, hand-off or event for it is refused with `403 program_agreement_required`, naming the sponsor (see [The runtime API](runtime-api.md#program-agreements-on-live-keys)). Customer sessions already open aren't cut off; they expire within the hour. Sandbox keys are never asked.
+
+An agreement that is terminated or expires after the app reached production doesn't move the app back. The app stays in production, live keys stop being served the products it covered, and:
 
 - `production_gate.flagged` is true;
 - its production checks fail, so the workspace's attention list has a `promotion_checks_failing` item naming the missing agreement;
@@ -265,6 +274,10 @@ A licence provider's members upload their firm's program agreement once, and Myn
 
 If the firm has no template yet, or the service can't be reached, the agreement stays `accepted`. The document is made the first time a signer asks to sign.
 
+Nothing the parties wrote can become a signer's field. The service reads `{{…}}` in a document's text as a text tag, so Mynt sets the braces apart (`{ {`) in everything it writes into the schedule and the template's fields: the terms summary, and the app's, firms', products' and signers' names. The licence provider's own file is sent as uploaded.
+
+A document made in test mode stays a test document: the agreement reads `signed`, Studio shows it as **Signed (test, not binding)**, and it doesn't count for production (see [In force](#in-force)).
+
 ### The e-signature webhook
 
 The service's webhook (`POST <PUBLIC_URL>/esign/webhook`) is checked against the service's own scheme with the raw body and a constant-time compare.
@@ -302,7 +315,7 @@ Every step is audited, in the obligations class: `upload_agreement_template`, `r
 Nobody edits the server's environment. A Mynt admin opens **Platform admin → Platform settings** (`/platform/settings`; see [Platform settings](platform-admin.md#platform-settings)) and does the rest in its E-signature tab. The old workspace **Settings → E-signature** address goes there.
 
 1. **Save the key.** Press **Set key**, pick the service (`signwell`), paste its API key into the sheet's password field and press **Check and save key**. Mynt checks the key with a cheap authenticated read of the key's own account. A key the service refuses isn't kept. An accepted key is kept in the [platform key vault](platform-admin.md#the-key-vault): sealed by the confidential host in Mynt's database (`platform_secrets`, one row per key). It is never returned, shown or logged: the tab shows only "Key set on <date> by <admin>". The key is a row of the Key vault tab too, and **Set key** there does the same.
-2. **Mynt registers the webhook.** It registers the service's webhook to `<PUBLIC_URL>/esign/webhook`, reusing one already pointing there, and seals the webhook's id the same way. The service signs its events with that id (HMAC-SHA256 of the event's `type@time`). **Re-register webhook** does this again. Without an https `PUBLIC_URL` the key is kept, and the tab says the webhook waits for one.
+2. **Mynt registers the webhook.** It registers the service's webhook to `<PUBLIC_URL>/esign/webhook`, reusing one already pointing there, and seals the webhook's id the same way. The service signs its events with that id (HMAC-SHA256 of the event's `type@time`). **Re-register webhook** does this again. Without an https `PUBLIC_URL` the key is kept, and the tab says the webhook waits for one. While the server's environment sets the service's API key, a key saved here is only kept for later: no webhook is registered with it, and the answer says so.
 3. **Choose the mode.** **Change mode** opens a sheet with the **Test mode** switch, on by default. On: documents are free and not legally binding, for trying the whole flow. Off: documents are legally binding and count towards the service's billing. Documents already made keep the mode they were made in.
 4. **Remove the key, when needed.** **Remove key** (typed out to confirm) deletes the webhook at the service, then retires the stored key and webhook id and destroys their values. Program agreements are then signed by hand.
 

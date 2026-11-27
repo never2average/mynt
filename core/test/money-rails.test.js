@@ -1213,6 +1213,12 @@ test("end to end: a live transfer goes through the chokepoint, and the ledger fo
   const asked = await store.requestSponsorship(ctx.user.id, { product_id: P, component_key: "deposit", builder_entity_id: ctx.user.entity_id, provider_entity_id: lpUser.entity_id, requested_jurisdictions: ["us-ny"], note: null });
   await store.decideSponsorship(asked.id, { status: "approved", decided_by: lpUser.id, note: null, licence_ids: [held.id], jurisdictions: ["us-ny"] });
   const provider = await connectV(lpUser);
+  // The app is in production on a product that is now sponsored, so its workspace and the sponsor sign the program
+  // agreement production needs: without one in force no new live session starts on the product (client-sessions.test.js).
+  const agreed = await must(dev, "propose_app_agreement", { app_id: app.id, counterparty_entity_id: lpUser.entity_id, kind: "program", scopes: ["financial_regulatory_operations"], products: [P], terms_summary: "The sponsor's program for the deposit" });
+  await must(provider, "respond_to_app_agreement", { agreement_id: agreed.id, decision: "accept" });
+  await must(dev, "sign_app_agreement", { agreement_id: agreed.id });
+  assert.equal((await must(provider, "sign_app_agreement", { agreement_id: agreed.id })).status, "signed");
 
   // No verified state yet: refused, the partner hears nothing, and the quote stays usable.
   const noState = await start("transfer", { quote: q1 });
