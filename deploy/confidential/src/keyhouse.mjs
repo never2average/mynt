@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { KEYS_SCHEMA, validNonce } from "./shared/binding.js";
 import { x25519FromSeed, x25519PublicRaw } from "./shared/envelope.js";
 import { computeSealedHealth, HEALTH_ATTESTER_KEY } from "./shared/health.js";
-import { childKey, newVaultBundle, releaseFromBundle, sealUnder, unsealUnder } from "./shared/sealing.js";
+import { childKey, newVaultBundle, releaseFromBundle, SEAL_CONTEXT, sealUnder, unsealUnder } from "./shared/sealing.js";
 
 // The confidential service ("keyhouse"): what Mynt's server asks of the enclave, and the rules it can't talk its way
 // past, because they're in this image and the image is what the hardware measures.
@@ -15,7 +15,9 @@ import { childKey, newVaultBundle, releaseFromBundle, sealUnder, unsealUnder } f
 //   - What's sealed for a purpose that never comes back out (the vault's legacy root, partners' books, private keys) has
 //     no endpoint that returns it. The vault's keys are released as the data key and the derivation key only.
 //   - Partners' sealed statements are opened, checked and computed here; only one product's figures and a signature
-//     over their fingerprint leave.
+//     over their fingerprint leave. The key that signs them (health-attester) signs nothing else: POST /v1/sign refuses
+//     it for every caller, whatever policy.json lists, so its signature always means "this image checked a statement
+//     and computed this report", and the report says which statement and against what (shared/health.js).
 //   - Nothing is logged but the route, the caller and the outcome: never a body, a key, a token or a figure.
 //
 // Where it runs is a platform (nitro.mjs for an AWS Nitro enclave, cloud.mjs for a Google Confidential Space
@@ -34,13 +36,18 @@ export class Refused extends Error {
   }
 }
 
+// Named keys that sign only inside one operation here, never a message a caller hands over.
+export const RESERVED_SIGNING_KEYS = [HEALTH_ATTESTER_KEY];
+
 export const loadPolicy = (path = new URL("../policy.json", import.meta.url)) => JSON.parse(readFileSync(path, "utf8"));
 
 // A platform: {
 //   host, tag             the host's name (as core's ConfidentialHostKind) and the tag sealed values carry
 //   signingNames          the named signing keys it offers (health-attester)
 //   derivedSigning        true when they're derived from the root (so exist only once it does)
-//   config                settings from outside the image that decide whose keys it uses, bound into the attestation
+//   config                settings from outside the image that decide whose keys it uses and who may call it (the
+//                         wrap key, the signing keys, the hash of the client-certificate authority): bound into every
+//                         attestation, and required, so a verifier compares each with the value it expects
 //   attest(nonce, keys, tlsSpki) -> { format, token, measurements }
 //   newWrappedRoot()      a fresh root, returned only wrapped
 //   unwrapRoot(wrapped)   the root, through the attestation-gated key
@@ -53,6 +60,13 @@ export async function createKeyhouse(config) {
   const { policy } = config;
   const platform = config.platform ?? (await import("./cloud.mjs")).confidentialSpacePlatform(config);
   const HOST_TAG = platform.tag;
+  // Fail closed: a platform that binds no settings, or doesn't say whose client certificates it accepts, never starts.
+  if (!platform.config || !/^[0-9a-f]{64}$/.test(platform.config.client_ca_sha256 ?? "")) throw new Error("the platform must bind its settings, with the client authority's SHA-256, into its attestation");
+  const contextOf = (body) => {
+    if (body.context === undefined || body.context === null || body.context === "") return "";
+    if (typeof body.context !== "string" || !SEAL_CONTEXT.test(body.context)) throw new Refused("bad_context", 400);
+    return body.context;
+  };
   let root = config.wrappedRoot ? await platform.unwrapRoot(config.wrappedRoot) : null;
 
   const requireRoot = () => {
@@ -90,7 +104,7 @@ export async function createKeyhouse(config) {
           .map(async (n) => [n, await publicKey(n)]),
       ),
     ),
-    ...(platform.config ? { config: platform.config } : {}),
+    config: platform.config,
   });
 
   const routes = {
@@ -134,7 +148,7 @@ export async function createKeyhouse(config) {
       purposeOf(body.purpose);
       allowed(caller, "seal", body.purpose);
       if (body.purpose === "vault-keys") throw new Refused("use_vault_adopt", 400);
-      return { sealed: sealUnder(requireRoot(), HOST_TAG, body.purpose, Buffer.from(String(body.plaintext ?? ""), "base64url")) };
+      return { sealed: sealUnder(requireRoot(), HOST_TAG, body.purpose, Buffer.from(String(body.plaintext ?? ""), "base64url"), contextOf(body)) };
     },
 
     "POST /v1/unseal": async (caller, body) => {
@@ -142,7 +156,7 @@ export async function createKeyhouse(config) {
       if (!p.unseal) throw new Refused("never_unsealed");
       allowed(caller, "unseal", body.purpose);
       try {
-        return { plaintext: b64u(unsealUnder(requireRoot(), HOST_TAG, body.purpose, String(body.sealed ?? ""))) };
+        return { plaintext: b64u(unsealUnder(requireRoot(), HOST_TAG, body.purpose, String(body.sealed ?? ""), contextOf(body))) };
       } catch (e) {
         if (e instanceof Refused) throw e;
         throw new Refused("unseal_failed", 400);
@@ -152,6 +166,8 @@ export async function createKeyhouse(config) {
     "POST /v1/sign": async (caller, body) => {
       const message = Buffer.from(String(body.message ?? ""), "base64url");
       if (body.key?.name) {
+        // Before the policy is read: no policy can make a reserved key a general signing key.
+        if (RESERVED_SIGNING_KEYS.includes(body.key.name)) throw new Refused("reserved_key");
         allowed(caller, "sign", body.key.name);
         return signNamed(body.key.name, message);
       }
@@ -169,7 +185,7 @@ export async function createKeyhouse(config) {
     },
 
     "GET /v1/public-key": async (caller, _body, query) => {
-      allowed(caller, "sign", query.get("name") ?? "");
+      allowed(caller, "public_key", query.get("name") ?? "");
       return { public_key: await publicKey(query.get("name")) };
     },
 

@@ -1,6 +1,6 @@
 {
   "AWSTemplateFormatVersion": "2010-09-09",
-  "Description": "Mynt's confidential service (keyhouse) in an AWS Nitro Enclave: one EC2 instance with enclaves enabled, the KMS key that wraps the service's root (usable only by an enclave attesting the release's PCR0), the instance's role, and a security group open to Mynt's server only. Creates nothing else. docs/reference/confidential-computing.md.",
+  "Description": "Mynt's confidential service (keyhouse) in an AWS Nitro Enclave: one EC2 instance with enclaves enabled, the KMS key that wraps the service's root (usable only by an enclave attesting the release's PCR0, its policy changeable only by one break-glass role), the instance's role, a security group open to Mynt's server only, and an alarm that emails whenever the key's policy is changed or the key is disabled, scheduled for deletion or granted (with, unless the account already has one, the CloudTrail trail that alarm needs). Creates nothing else. docs/reference/confidential-computing.md.",
   "Parameters": {
     "ReleaseCommit": {
       "Type": "String",
@@ -21,6 +21,22 @@
       "MinLength": 100,
       "Description": "The authority certificate for Mynt's client certificate, as make-client-cert.sh printed it (base64; a certificate, not a key)."
     },
+    "KeyPolicyAdminRoleArn": {
+      "Type": "String",
+      "AllowedPattern": "^arn:aws[a-z-]*:iam::\\d{12}:role/.+$",
+      "Description": "The one IAM role allowed to change the wrap key's policy (break-glass): nobody else can, not even the account's administrators acting as themselves. Use it only to update this stack when AllowedPcr0s changes at an upgrade; nobody should hold it day to day. It must already exist."
+    },
+    "AlarmEmail": {
+      "Type": "String",
+      "AllowedPattern": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$",
+      "Description": "Where the alarm is sent when the wrap key's policy is changed, or the key is disabled, scheduled for deletion or granted. AWS emails this address once to confirm it: the alarm is silent until the link in that email is clicked."
+    },
+    "CreateAuditTrail": {
+      "Type": "String",
+      "Default": "true",
+      "AllowedValues": ["true", "false"],
+      "Description": "The alarm hears of key changes through CloudTrail, which needs a trail recording management events in this region. true creates one (and a private bucket for its logs, kept 400 days). Choose false only when the account already has such a trail: without one the alarm never fires."
+    },
     "InstanceType": {
       "Type": "String",
       "Default": "c6a.xlarge",
@@ -40,7 +56,8 @@
     }
   },
   "Conditions": {
-    "SessionManager": { "Fn::Equals": [{ "Ref": "AllowSessionManager" }, "true"] }
+    "SessionManager": { "Fn::Equals": [{ "Ref": "AllowSessionManager" }, "true"] },
+    "AuditTrail": { "Fn::Equals": [{ "Ref": "CreateAuditTrail" }, "true"] }
   },
   "Resources": {
     "InstanceRole": {
@@ -78,6 +95,7 @@
         "KeySpec": "SYMMETRIC_DEFAULT",
         "KeyUsage": "ENCRYPT_DECRYPT",
         "EnableKeyRotation": true,
+        "BypassPolicyLockoutSafetyCheck": true,
         "KeyPolicy": {
           "Version": "2012-10-17",
           "Id": "mynt-keyhouse-wrap-key",
@@ -90,7 +108,6 @@
                 "kms:Describe*",
                 "kms:Get*",
                 "kms:List*",
-                "kms:PutKeyPolicy",
                 "kms:Enable*",
                 "kms:Disable*",
                 "kms:Update*",
@@ -100,6 +117,21 @@
                 "kms:CancelKeyDeletion"
               ],
               "Resource": "*"
+            },
+            {
+              "Sid": "BreakGlassChangesThePolicy",
+              "Effect": "Allow",
+              "Principal": { "AWS": { "Ref": "KeyPolicyAdminRoleArn" } },
+              "Action": ["kms:PutKeyPolicy", "kms:GetKeyPolicy", "kms:DescribeKey"],
+              "Resource": "*"
+            },
+            {
+              "Sid": "NobodyElseChangesThePolicy",
+              "Effect": "Deny",
+              "Principal": { "AWS": "*" },
+              "Action": ["kms:PutKeyPolicy"],
+              "Resource": "*",
+              "Condition": { "ArnNotEquals": { "aws:PrincipalArn": { "Ref": "KeyPolicyAdminRoleArn" } } }
             },
             {
               "Sid": "EnclaveUsesWithAttestation",
@@ -126,6 +158,104 @@
             }
           ]
         }
+      }
+    },
+    "AlarmTopic": {
+      "Type": "AWS::SNS::Topic",
+      "Properties": {
+        "DisplayName": "Mynt keyhouse wrap key changed",
+        "Subscription": [{ "Protocol": "email", "Endpoint": { "Ref": "AlarmEmail" } }]
+      }
+    },
+    "AlarmTopicPolicy": {
+      "Type": "AWS::SNS::TopicPolicy",
+      "Properties": {
+        "Topics": [{ "Ref": "AlarmTopic" }],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            { "Sid": "TheRulePublishes", "Effect": "Allow", "Principal": { "Service": "events.amazonaws.com" }, "Action": "sns:Publish", "Resource": { "Ref": "AlarmTopic" } },
+            { "Sid": "TheAlarmPublishes", "Effect": "Allow", "Principal": { "Service": "cloudwatch.amazonaws.com" }, "Action": "sns:Publish", "Resource": { "Ref": "AlarmTopic" }, "Condition": { "StringEquals": { "aws:SourceAccount": { "Ref": "AWS::AccountId" } } } }
+          ]
+        }
+      }
+    },
+    "WrapKeyChangeRule": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "Description": "Mynt keyhouse: the wrap key's policy was changed, or the key was disabled, scheduled for deletion or granted. Sends the call (who, when, from where) to the alarm topic.",
+        "State": "ENABLED",
+        "EventPattern": {
+          "source": ["aws.kms"],
+          "detail-type": ["AWS API Call via CloudTrail"],
+          "detail": {
+            "eventSource": ["kms.amazonaws.com"],
+            "eventName": ["PutKeyPolicy", "ScheduleKeyDeletion", "DisableKey", "DisableKeyRotation", "CreateGrant"],
+            "resources": { "ARN": [{ "Fn::GetAtt": ["WrapKey", "Arn"] }] }
+          }
+        },
+        "Targets": [{ "Id": "alarm-topic", "Arn": { "Ref": "AlarmTopic" } }]
+      }
+    },
+    "WrapKeyChangeAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "Mynt keyhouse: the wrap key's policy was changed (or the key disabled, scheduled for deletion or granted). Unless this was the planned upgrade of AllowedPcr0s, treat the keyhouse's keys as exposed: docs/reference/confidential-computing.md (The key policy).",
+        "Namespace": "AWS/Events",
+        "MetricName": "MatchedEvents",
+        "Dimensions": [{ "Name": "RuleName", "Value": { "Ref": "WrapKeyChangeRule" } }],
+        "Statistic": "Sum",
+        "Period": 60,
+        "EvaluationPeriods": 1,
+        "Threshold": 1,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [{ "Ref": "AlarmTopic" }]
+      }
+    },
+    "AuditBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Condition": "AuditTrail",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "PublicAccessBlockConfiguration": { "BlockPublicAcls": true, "BlockPublicPolicy": true, "IgnorePublicAcls": true, "RestrictPublicBuckets": true },
+        "BucketEncryption": { "ServerSideEncryptionConfiguration": [{ "ServerSideEncryptionByDefault": { "SSEAlgorithm": "AES256" } }] },
+        "LifecycleConfiguration": { "Rules": [{ "Id": "expire", "Status": "Enabled", "ExpirationInDays": 400 }] }
+      }
+    },
+    "AuditBucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Condition": "AuditTrail",
+      "Properties": {
+        "Bucket": { "Ref": "AuditBucket" },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            { "Sid": "TrailChecksTheBucket", "Effect": "Allow", "Principal": { "Service": "cloudtrail.amazonaws.com" }, "Action": "s3:GetBucketAcl", "Resource": { "Fn::GetAtt": ["AuditBucket", "Arn"] } },
+            {
+              "Sid": "TrailWritesItsLogs",
+              "Effect": "Allow",
+              "Principal": { "Service": "cloudtrail.amazonaws.com" },
+              "Action": "s3:PutObject",
+              "Resource": { "Fn::Sub": "${AuditBucket.Arn}/AWSLogs/${AWS::AccountId}/*" },
+              "Condition": { "StringEquals": { "s3:x-amz-acl": "bucket-owner-full-control" } }
+            }
+          ]
+        }
+      }
+    },
+    "AuditTrail": {
+      "Type": "AWS::CloudTrail::Trail",
+      "Condition": "AuditTrail",
+      "DependsOn": ["AuditBucketPolicy"],
+      "Properties": {
+        "IsLogging": true,
+        "S3BucketName": { "Ref": "AuditBucket" },
+        "IsMultiRegionTrail": false,
+        "IncludeGlobalServiceEvents": false,
+        "EnableLogFileValidation": true,
+        "EventSelectors": [{ "ReadWriteType": "WriteOnly", "IncludeManagementEvents": true }]
       }
     },
     "SecurityGroup": {
@@ -172,7 +302,8 @@
   },
   "Outputs": {
     "ConfidentialHostUrl": { "Description": "Set as CONFIDENTIAL_HOST_URL on Mynt's server", "Value": { "Fn::Sub": "https://${Address}:8443" } },
-    "WrapKeyArn": { "Description": "Set as CONFIDENTIAL_HOST_KMS_KEY on Mynt's server", "Value": { "Fn::GetAtt": ["WrapKey", "Arn"] } },
+    "WrapKeyArn": { "Description": "Set as CONFIDENTIAL_HOST_KMS_KEY on Mynt's server, and give it to partners as --expected-kms-key", "Value": { "Fn::GetAtt": ["WrapKey", "Arn"] } },
+    "AlarmTopicArn": { "Description": "Where wrap-key changes are announced (confirm the email AWS sent to AlarmEmail, or it stays silent)", "Value": { "Ref": "AlarmTopic" } },
     "InstanceId": { "Description": "The parent instance", "Value": { "Ref": "Instance" } }
   }
 }

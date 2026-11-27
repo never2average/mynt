@@ -618,6 +618,14 @@ export class ProductHealthService {
     const fingerprint = fingerprintOf(canonical);
     if (fingerprint !== r.fingerprint || canonical !== r.canonical) throw new HealthError("The confidential host's report doesn't match its fingerprint");
     if (r.report.product_id !== s.productId || r.report.sequence !== sequence || r.report.period_end !== end.toISOString()) throw new HealthError("The confidential host answered for another snapshot");
+    // The signed report says which statement was checked and against what: it must be the check Mynt asked for, and
+    // figures only ever come from a statement the firm's registered key signed.
+    const c = r.report.sealed_statement;
+    const x = reading.sealed.expect;
+    if (!c || c.checked.entity_id !== x.entity_id || c.checked.environment !== x.environment || c.checked.request_id !== x.request_id || c.checked.public_key !== x.public_key || c.checked.max_age_ms !== x.max_age_ms)
+      throw new HealthError("The confidential host's report doesn't say it checked the statement Mynt asked it to");
+    if (r.report.source === "partner_ledger" && (c.result !== "ok" || !x.public_key || c.signer_public_key !== x.public_key || c.as_of !== r.report.ledger_as_of))
+      throw new HealthError("The confidential host's report gives figures without a statement the firm's registered key signed");
     const attester = await this.deps.confidential!.publicKey(HEALTH_ATTESTER_KEY);
     if (r.attestation.public_key !== attester || !verifyHealthAttestation(attester, fingerprint, r.attestation.signature)) throw new HealthError("The confidential host's signature doesn't verify");
     const sealed = sealReport(await this.dataKey(s.subject), canonical, s.subject, sequence, fingerprint);

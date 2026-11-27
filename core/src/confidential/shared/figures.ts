@@ -246,4 +246,21 @@ export interface HealthReport {
   flows_not_measured: Record<string, string>;
   figures: Figures;
   notes: string[];
+  // Only on a report the confidential host computed from a partner's sealed statement (health.ts): what it checked the
+  // statement against and what it found. Part of the report, so the fingerprint the host's key signs covers it.
+  sealed_statement?: SealedStatementCheck;
+}
+
+export interface SealedStatementCheck {
+  result: string; // "ok", or the failed check's code (the figures are then unavailable)
+  signer_public_key: string | null; // base58: the key whose signature over the statement verified; null when none did
+  as_of: string | null; // the statement's own clock, when it passed
+  checked: {
+    entity_id: string; // the firm the statement had to be from
+    environment: string;
+    request_id: string | null; // the request it had to answer
+    public_key: string | null; // the firm's registered key it had to be signed with
+    max_age_ms: number;
+    now: string; // the clock its freshness was judged against
+  };
 }

@@ -4,11 +4,12 @@ import { createHash, createHmac, createPublicKey, generateKeyPairSync, randomByt
 import { request } from "node:https";
 import { selfSignedEd25519 } from "../src/cert.mjs";
 import { startKeyhouseServer } from "../src/http.mjs";
+import { confidentialSpacePlatform } from "../src/cloud.mjs";
 import { createKeyhouse, loadPolicy, Refused } from "../src/keyhouse.mjs";
-import { keysNonce } from "../src/shared/binding.js";
+import { clientAuthority, keysNonce } from "../src/shared/binding.js";
 import { sealStatement } from "../src/shared/envelope.js";
 import { healthAttestationMessage, statementMessage } from "../src/shared/health.js";
-import { childKey, sealUnder } from "../src/shared/sealing.js";
+import { childKey, sealUnder, unsealUnder } from "../src/shared/sealing.js";
 import { clientMaterial, fakeKms, fakeLauncher } from "./fakes.mjs";
 
 // The confidential service's own rules, against a fake KMS and a fake launcher: what it refuses, what never leaves it,
@@ -16,6 +17,7 @@ import { clientMaterial, fakeKms, fakeLauncher } from "./fakes.mjs";
 
 const SIGNING = { "health-attester": "projects/p/locations/l/keyRings/r/cryptoKeys/attester/cryptoKeyVersions/1" };
 const WRAP = "projects/p/locations/l/keyRings/r/cryptoKeys/root";
+const CA_SHA256 = "c".repeat(64); // of the authority whose client certificates may call: bound into every attestation
 const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const base58 = (b) => {
   let n = BigInt(`0x${Buffer.from(b).toString("hex")}`);
@@ -33,7 +35,7 @@ const base58 = (b) => {
 
 async function keyhouse({ kms = fakeKms(), launcher = fakeLauncher(), initialised = true } = {}) {
   const tls = selfSignedEd25519("mynt-keyhouse");
-  const base = { kms, launcher, wrapKey: WRAP, signingKeys: SIGNING, tlsSpki: tls.spki, policy: loadPolicy() };
+  const base = { kms, launcher, wrapKey: WRAP, signingKeys: SIGNING, clientCaSha256: CA_SHA256, tlsSpki: tls.spki, policy: loadPolicy() };
   let wrappedRoot = null;
   if (initialised) wrappedRoot = (await (await createKeyhouse(base)).handle("POST", "/v1/init", "mynt-core", {})).wrapped_root;
   return { kh: await createKeyhouse({ ...base, wrappedRoot }), kms, launcher, tls, wrappedRoot };
@@ -101,12 +103,49 @@ test("the vault's legacy root goes in and never comes out: release gives the dat
   await assert.rejects(kh.handle("POST", "/v1/vault/release", "mynt-core", { sealed: sealed.replace(/.$/, "A") }), refusedWith("unseal_failed"));
 });
 
-test("signing: named keys sign in KMS, sealed keys only inside the service", async () => {
+test("sealed with a context (a key's type), a value opens only under the same one; values from before contexts still open", async () => {
+  const { kh, wrappedRoot, kms } = await keyhouse();
+  const seal = (body) => kh.handle("POST", "/v1/seal", "mynt-core", { purpose: "secret", plaintext: b64u("api-key-value"), ...body });
+  const open = async (body) => Buffer.from((await kh.handle("POST", "/v1/unseal", "mynt-core", { purpose: "secret", ...body })).plaintext, "base64url").toString();
+  const { sealed } = await seal({ context: "FREESTYLE_API_KEY" });
+  assert.match(sealed, /^cs2:cs:secret:/);
+  assert.equal(await open({ sealed, context: "FREESTYLE_API_KEY" }), "api-key-value");
+  // The row moved to another type in the database, or read with no type at all: it doesn't open.
+  await assert.rejects(open({ sealed, context: "CLERK_SECRET_KEY" }), refusedWith("unseal_failed"));
+  await assert.rejects(open({ sealed }), refusedWith("unseal_failed"));
+  // Relabelled as the old format, it still doesn't: the context is in what the cipher authenticates.
+  await assert.rejects(open({ sealed: sealed.replace(/^cs2:/, "cs1:"), context: "FREESTYLE_API_KEY" }), refusedWith("unseal_failed"));
+  await assert.rejects(seal({ context: "not a context|x" }), refusedWith("bad_context"));
+  await assert.rejects(open({ sealed, context: { a: 1 } }), refusedWith("bad_context"));
+  // A value sealed before contexts (cs1) opens, whatever context is named: old rows stay readable until sealed again.
+  const old = (await seal({})).sealed;
+  assert.match(old, /^cs1:cs:secret:/);
+  assert.equal(await open({ sealed: old, context: "FREESTYLE_API_KEY" }), "api-key-value");
+  // The shared code agrees, with the root alone.
+  const root = await kms.decrypt(WRAP, wrappedRoot, Buffer.from("mynt-keyhouse-root-v1"));
+  assert.equal(unsealUnder(root, "cs", "secret", sealed, "FREESTYLE_API_KEY").toString(), "api-key-value");
+  assert.throws(() => unsealUnder(root, "cs", "secret", sealed, "ANOTHER_KEY"));
+  assert.throws(() => unsealUnder(root, "cs", "secret", sealed));
+});
+
+test("signing: the health attester is no signing oracle, whatever the policy says; sealed keys sign only inside the service", async () => {
   const { kh, kms } = await keyhouse();
   const msg = randomBytes(40);
-  const s = await kh.handle("POST", "/v1/sign", "mynt-core", { key: { name: "health-attester" }, message: b64u(msg) });
-  assert.ok(verify(null, msg, createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: s.public_key }, format: "jwk" }), Buffer.from(s.signature, "hex")));
-  assert.deepEqual(kms.calls.at(-1), ["sign", SIGNING["health-attester"]]);
+  // The image's own policy doesn't list it, and its public half is all a caller gets.
+  assert.deepEqual(loadPolicy().callers["mynt-core"].sign, ["sealed"]);
+  assert.deepEqual(loadPolicy().callers["mynt-core"].public_key, ["health-attester"]);
+  const before = kms.calls.length;
+  await assert.rejects(kh.handle("POST", "/v1/sign", "mynt-core", { key: { name: "health-attester" }, message: b64u(msg) }), refusedWith("reserved_key"));
+  assert.ok(!kms.calls.slice(before).some((c) => c[0] === "sign"), "KMS was never asked to sign");
+  const pub = await kh.handle("GET", "/v1/public-key", "mynt-core", null, new URLSearchParams({ name: "health-attester" }));
+  assert.ok(pub.public_key);
+  await assert.rejects(kh.handle("GET", "/v1/public-key", "someone-else", null, new URLSearchParams({ name: "health-attester" })), refusedWith("not_allowed"));
+  // Even an image whose policy listed it (as the first one did) refuses: the rule is in the code, before the policy.
+  const policy = loadPolicy();
+  policy.callers["mynt-core"].sign = ["health-attester", "sealed"];
+  const tls = selfSignedEd25519("mynt-keyhouse");
+  const loose = await createKeyhouse({ kms: fakeKms(), launcher: fakeLauncher(), wrapKey: WRAP, signingKeys: SIGNING, clientCaSha256: CA_SHA256, tlsSpki: tls.spki, policy });
+  await assert.rejects(loose.handle("POST", "/v1/sign", "mynt-core", { key: { name: "health-attester" }, message: b64u(msg) }), refusedWith("reserved_key"));
   await assert.rejects(kh.handle("POST", "/v1/sign", "mynt-core", { key: { name: "treasury-attester" }, message: b64u(msg) }), refusedWith("not_allowed"));
   // A key Mynt sealed to the service as signing-key: it signs, and the key itself is never returned.
   const seed = randomBytes(32);
@@ -123,8 +162,38 @@ test("an attestation carries the caller's nonce and the binding of the keys it r
   assert.equal(launcher.issued.at(-1).audience, "mynt-enclave-attestation");
   assert.equal(a.keys.tls_spki_sha256, createHash("sha256").update(tls.spki).digest("hex"));
   assert.ok(a.keys.ingest_public_key && a.keys.signing["health-attester"]);
+  // Key custody is part of what's attested: the wrap key, each signing key's version, and the client authority.
+  assert.deepEqual(a.keys.config, { wrap_key: WRAP, client_ca_sha256: CA_SHA256, "signing_key:health-attester": SIGNING["health-attester"] });
   assert.equal(a.measurements.debug, false);
   await assert.rejects(kh.handle("GET", "/v1/attestation", "mynt-core", null, new URLSearchParams({ nonce: "short" })), refusedWith("bad_nonce"));
+});
+
+test("a service that can't say whose keys and callers it has never starts", async () => {
+  const tls = selfSignedEd25519("mynt-keyhouse");
+  const base = { kms: fakeKms(), launcher: fakeLauncher(), wrapKey: WRAP, signingKeys: SIGNING, tlsSpki: tls.spki, policy: loadPolicy() };
+  await assert.rejects(createKeyhouse(base), /client-certificate authority/);
+  await assert.rejects(createKeyhouse({ ...base, clientCaSha256: "not-a-hash" }), /client-certificate authority/);
+  await assert.rejects(createKeyhouse({ ...base, clientCaSha256: CA_SHA256, wrapKey: "" }), /wrap key/);
+  // A platform that binds nothing (as the container platform once did) is refused by the service itself.
+  const unbound = { ...confidentialSpacePlatform({ ...base, clientCaSha256: CA_SHA256 }), config: null };
+  await assert.rejects(createKeyhouse({ ...base, platform: unbound }), /bind its settings/);
+});
+
+test("the client authority is exactly one certificate, and its hash is of that certificate", () => {
+  const m = clientMaterial("mynt-core");
+  const other = clientMaterial("mynt-core");
+  const a = clientAuthority(m.ca);
+  assert.equal(a.sha256, createHash("sha256").update(new X509Certificate(m.ca).raw).digest("hex"));
+  assert.equal(new X509Certificate(a.pem).fingerprint256, new X509Certificate(m.ca).fingerprint256);
+  // The same certificate wrapped differently hashes the same; another authority doesn't.
+  assert.equal(clientAuthority(`\n${m.ca.replace(/\n/g, "\r\n")}\n`).sha256, a.sha256);
+  assert.notEqual(clientAuthority(other.ca).sha256, a.sha256);
+  // A second authority smuggled in behind the expected one (TLS would trust both; a hash of the first wouldn't show it).
+  assert.throws(() => clientAuthority(m.ca + other.ca), /exactly one/);
+  assert.throws(() => clientAuthority(""), /exactly one/);
+  assert.throws(() => clientAuthority(m.ca + m.key), /exactly one/);
+  // A client certificate isn't an authority.
+  assert.throws(() => clientAuthority(m.cert), /certificate authority/);
 });
 
 test("a partner's sealed statement becomes one product's figures and a signature; a forged or misaddressed one, no figures", async () => {
@@ -161,9 +230,19 @@ test("a partner's sealed statement becomes one product's figures and a signature
   assert.ok(!JSON.stringify(r).includes("999999"), "another product's figures never leave");
   assert.equal(r.attestation.public_key, a.keys.signing["health-attester"]);
   assert.ok(verify(null, healthAttestationMessage(r.fingerprint), createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: r.attestation.public_key }, format: "jwk" }), Buffer.from(r.attestation.signature, "hex")));
+  // The signed report says what was checked: whose key signed the statement, its as_of, and what it was held to.
+  assert.deepEqual(r.report.sealed_statement, {
+    result: "ok",
+    signer_public_key: partnerKey,
+    as_of: statement.as_of,
+    checked: { entity_id: "firm-1", environment: "live", request_id: "req-1", public_key: partnerKey, max_age_ms: 86_400_000, now: now.toISOString() },
+  });
+  assert.equal(r.fingerprint, createHash("sha256").update(r.canonical).digest("hex"));
+  assert.ok(r.canonical.includes(partnerKey) && JSON.parse(r.canonical).sealed_statement.as_of === statement.as_of, "what was checked is inside what the fingerprint, and so the signature, covers");
   // Signed with a key other than the firm's: no figures.
   const bad = await kh.handle("POST", "/v1/health/compute", "mynt-core", { input: input(sealStatement(statement, a.keys.ingest_public_key, meta), { public_key: base58(randomBytes(32)) }) });
   assert.equal(bad.ledger_error, "statement_signature");
+  assert.deepEqual([bad.report.sealed_statement.result, bad.report.sealed_statement.signer_public_key, bad.report.sealed_statement.as_of], ["statement_signature", null, null]);
   assert.equal(bad.report.figures.reserves_cents.value, null);
   assert.equal(bad.report.source, "unavailable");
   // Sealed to some other key: unreadable.
@@ -180,12 +259,14 @@ test("over TLS: no client certificate, no answer; the caller is its certificate'
   const { kh, tls } = await keyhouse();
   const m = clientMaterial("mynt-core");
   const lines = [];
-  const server = await startKeyhouseServer(kh, { cert: tls.cert, key: tls.key, ca: m.ca, port: 0, host: "127.0.0.1", log: (l) => lines.push(l) });
+  // As server.mjs starts it: the authority that was hashed into the attestation, re-encoded, is the one TLS trusts.
+  const server = await startKeyhouseServer(kh, { cert: tls.cert, key: tls.key, ca: clientAuthority(m.ca).pem, port: 0, host: "127.0.0.1", log: (l) => lines.push(l) });
   const port = server.address().port;
+  const stranger = clientMaterial("mynt-core"); // the right name, from an authority the service wasn't given
   const call = (path, body, auth = true) =>
     new Promise((resolve, reject) => {
       const payload = body ? Buffer.from(JSON.stringify(body)) : null;
-      const req = request({ host: "127.0.0.1", port, path, method: body ? "POST" : "GET", rejectUnauthorized: false, ...(auth ? { cert: m.cert, key: m.key } : {}), headers: { "content-type": "application/json" } }, (res) => {
+      const req = request({ host: "127.0.0.1", port, path, method: body ? "POST" : "GET", rejectUnauthorized: false, ...(auth ? { cert: (auth === true ? m : auth).cert, key: (auth === true ? m : auth).key } : {}), headers: { "content-type": "application/json" } }, (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () => resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString() || "null") }));
@@ -195,6 +276,7 @@ test("over TLS: no client certificate, no answer; the caller is its certificate'
     });
   try {
     await assert.rejects(call("/v1/healthz", null, false));
+    await assert.rejects(call("/v1/healthz", null, stranger), "a certificate naming mynt-core from another authority is no caller");
     assert.equal((await call("/v1/healthz")).status, 200);
     const sealed = await call("/v1/seal", { purpose: "secret", plaintext: b64u("value-never-logged") });
     assert.equal(sealed.status, 200);
@@ -211,5 +293,6 @@ test("the sealing format is the shared one: a value sealed by the service opens 
   const root = randomBytes(32);
   const s = sealUnder(root, "cs", "secret", Buffer.from("x"));
   assert.match(s, /^cs1:cs:secret:/);
+  assert.match(sealUnder(root, "cs", "secret", Buffer.from("x"), "A_KEY_TYPE"), /^cs2:cs:secret:/);
   assert.notDeepEqual(childKey(root, "ingest"), childKey(randomBytes(32), "ingest"));
 });

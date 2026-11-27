@@ -1,6 +1,7 @@
 // What admins check first: is anything failing, stuck or costing more than it should, across the agents (builds,
 // the product desk and its algorithm explorers, governance review, the connector), developers' hosting and the
 // server's backups. Read-only.
+import { confidentialHostStatus } from "./confidential/host.js";
 import { COVENANT_HOOK_ELIGIBLE } from "./covenant-schema.js";
 import { readFile } from "node:fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -307,7 +308,7 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...(covenants.blocked_webhooks ? [`covenants: ${covenants.blocked_webhooks} firm webhook(s) blocked: their creator can no longer receive covenant alerts, so a member with the licence-provider role must create them again (list_firm_webhooks)`] : []),
     ...(covenantTimerIdle ? [`covenants: ${covenants.active_rules} rule(s), but the covenant timer ${covenants.timer_last_ran ? `last ran ${covenants.timer_last_ran}` : "has never run"}`] : []),
   ];
-  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors: { ...vendors, money_name_mismatches: moneyNameMismatches }, solana, product_health: productHealth, covenants, agreement_audits: { overdue: agreementAudits.audits, apps_flagged: agreementAudits.apps }, sla_breaches: { open: slaBreaches.open, agreements: slaBreaches.agreements }, workspaces: { failed_offboards: offboards, webhook_secrets_rotated_on_offboard: rotatedOnOffboard, org_missing: orgMissing, org_backfill_pending: backfillPending, org_sync: orgSync }, apps: { production_without_program_agreements: appsMissingAgreements }, risks: { overdue_reviews: risks.count, overdue: risks.risks }, risk_models: riskModels ? { overdue_validations: riskModels.count, overdue: riskModels.models, not_healthy: unhealthyModels ? unhealthyModels.count : null, unhealthy: unhealthyModels ? unhealthyModels.models : null } : null, backups: backups.section };
+  return { attention: attention.length ? attention : ["Nothing needs attention"], window_hours: hours, agents, hosting, vendors: { ...vendors, money_name_mismatches: moneyNameMismatches }, solana, product_health: productHealth, covenants, agreement_audits: { overdue: agreementAudits.audits, apps_flagged: agreementAudits.apps }, sla_breaches: { open: slaBreaches.open, agreements: slaBreaches.agreements }, workspaces: { failed_offboards: offboards, webhook_secrets_rotated_on_offboard: rotatedOnOffboard, org_missing: orgMissing, org_backfill_pending: backfillPending, org_sync: orgSync }, apps: { production_without_program_agreements: appsMissingAgreements }, risks: { overdue_reviews: risks.count, overdue: risks.risks }, risk_models: riskModels ? { overdue_validations: riskModels.count, overdue: riskModels.models, not_healthy: unhealthyModels ? unhealthyModels.count : null, unhealthy: unhealthyModels ? unhealthyModels.models : null } : null, backups: backups.section, confidential_host: confidentialHostStatus().status };
 }
 
 export function registerOpsTools(server: McpServer, db: Db) {
@@ -316,7 +317,7 @@ export function registerOpsTools(server: McpServer, db: Db) {
     {
       title: "What needs attention",
       description:
-        "Admin: failures, stuck runs and this month's spend across builds, the product desk and its algorithm explorations, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying), vendors' services (failed conformance runs, subscriptions whose calls mostly fail), production apps left without a signed program agreement with a product's sponsor, risk reviews and Mynt's risk-model validations that are overdue, and the server's Supabase backups (last run, off-site copy, last restore test). Read-only.",
+        "Admin: failures, stuck runs and this month's spend across builds, the product desk and its algorithm explorations, governance reviews and the connector, plus developers' hosting (VMs that failed, apps stopped or stuck deploying), vendors' services (failed conformance runs, subscriptions whose calls mostly fail), production apps left without a signed program agreement with a product's sponsor, risk reviews and Mynt's risk-model validations that are overdue, and the server's Supabase backups (last run, off-site copy, last restore test). Also says which confidential host this server uses: the local one keeps keys sealed in the server's own process, attesting nothing. Read-only.",
       inputSchema: { hours: z.number().int().min(1).max(24 * 30).default(24) },
       annotations: { readOnlyHint: true },
     },

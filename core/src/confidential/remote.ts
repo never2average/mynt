@@ -2,8 +2,9 @@ import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { connect, type TLSSocket } from "node:tls";
+import { clientAuthority } from "./shared/binding.js";
 import type { SealedHealthInput, SealedHealthResult } from "./shared/health.js";
-import { ConfidentialRefused, isPurpose, PURPOSES, type Attestation, type ConfidentialHost, type ConfidentialHostKind, type Measurements, type Purpose, type SigningKeyRef } from "./host.js";
+import { ConfidentialRefused, isPurpose, PURPOSES, RESERVED_SIGNING_KEYS, type Attestation, type ConfidentialHost, type ConfidentialHostKind, type Measurements, type Purpose, type SigningKeyRef } from "./host.js";
 
 // The confidential service (deploy/confidential) wherever it runs, reached the same way: TLS in both directions, Mynt
 // presenting a client certificate the service trusts (CONFIDENTIAL_HOST_CLIENT_CERT and CONFIDENTIAL_HOST_CLIENT_KEY,
@@ -35,6 +36,23 @@ export function remoteOptionsFromEnv(kind: string, env: NodeJS.ProcessEnv): Pick
   if (!url.startsWith("https://")) throw new ConfidentialRefused("CONFIDENTIAL_HOST_URL must be an https:// address");
   // File paths, never the material itself: the key is read here, held in memory, and never logged.
   return { url, clientCert: readFileSync(need("CONFIDENTIAL_HOST_CLIENT_CERT"), "utf8"), clientKey: readFileSync(need("CONFIDENTIAL_HOST_CLIENT_KEY"), "utf8") };
+}
+
+// The authority that issued Mynt's client certificate, from CONFIDENTIAL_HOST_CLIENT_CA (a path to its certificate,
+// which make-client-cert.sh wrote beside the client certificate; public, not a secret): its SHA-256, which the
+// service's attestation must bind. Refused when the file isn't one authority, or didn't issue the client certificate.
+export function expectedClientAuthority(kind: string, env: NodeJS.ProcessEnv, clientCert: string): string {
+  const path = env.CONFIDENTIAL_HOST_CLIENT_CA;
+  if (!path) throw new ConfidentialRefused(`CONFIDENTIAL_HOST=${kind} needs CONFIDENTIAL_HOST_CLIENT_CA set on the server: the path to the authority certificate (ca.crt) that make-client-cert.sh wrote`);
+  try {
+    const authority = clientAuthority(readFileSync(path, "utf8"));
+    const ca = new X509Certificate(authority.pem);
+    const cert = new X509Certificate(clientCert);
+    if (!cert.checkIssued(ca) || !cert.verify(ca.publicKey)) throw new Error("it didn't issue this server's client certificate (CONFIDENTIAL_HOST_CLIENT_CERT)");
+    return authority.sha256;
+  } catch (e) {
+    throw new ConfidentialRefused(`CONFIDENTIAL_HOST_CLIENT_CA can't be used: ${(e as Error).message}`);
+  }
 }
 
 export class ServiceAnswered extends Error {
@@ -178,18 +196,20 @@ export abstract class RemoteConfidentialHost implements ConfidentialHost {
     return this.send<Attestation>("GET", `/v1/attestation?nonce=${encodeURIComponent(nonce)}`);
   }
 
-  async seal(purpose: Purpose, plaintext: Uint8Array) {
+  async seal(purpose: Purpose, plaintext: Uint8Array, context?: string) {
     if (!isPurpose(purpose)) throw new ConfidentialRefused(`Unknown purpose ${purpose}`);
-    return (await this.send<{ sealed: string }>("POST", "/v1/seal", { purpose, plaintext: Buffer.from(plaintext).toString("base64url") })).sealed;
+    return (await this.send<{ sealed: string }>("POST", "/v1/seal", { purpose, plaintext: Buffer.from(plaintext).toString("base64url"), ...(context ? { context } : {}) })).sealed;
   }
 
-  async unseal(purpose: Purpose, sealed: string) {
+  async unseal(purpose: Purpose, sealed: string, context?: string) {
     if (!isPurpose(purpose)) throw new ConfidentialRefused(`Unknown purpose ${purpose}`);
     if (!PURPOSES[purpose].unseal) throw new ConfidentialRefused(`What's sealed for ${purpose} never leaves the confidential host`);
-    return Buffer.from((await this.send<{ plaintext: string }>("POST", "/v1/unseal", { purpose, sealed })).plaintext, "base64url");
+    return Buffer.from((await this.send<{ plaintext: string }>("POST", "/v1/unseal", { purpose, sealed, ...(context ? { context } : {}) })).plaintext, "base64url");
   }
 
   async sign(key: SigningKeyRef, message: Uint8Array) {
+    // The service refuses this too (its policy is part of the measured image); refused here before anything is sent.
+    if ("name" in key && RESERVED_SIGNING_KEYS.includes(key.name)) throw new ConfidentialRefused(`The ${key.name} key signs only inside the confidential host's own check, never a message handed to it`);
     return this.send<{ public_key: string; signature: string }>("POST", "/v1/sign", { key, message: Buffer.from(message).toString("base64url") });
   }
 
