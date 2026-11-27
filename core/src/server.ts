@@ -63,6 +63,7 @@ import { registerTreasuryTools } from "./treasury-tools.js";
 import { driftFor, registerCovenantTools } from "./covenants.js";
 import { registerRampAdapterTools } from "./ramp-adapters/index.js";
 import { registerFirmWebhookTools, registerServiceTypeCatalog, registerVendorAdminTools, registerVendorInnovatorTools, registerVendorTools } from "./vendors.js";
+import { registerServiceTools, registerServiceTypeRequestAdminTools, registerServiceVendorTools } from "./services.js";
 import { registerVendorOnboardingTools } from "./vendor-onboarding.js";
 import { registerRegulatedFirmOnboardingTools } from "./regulated-firm-onboarding.js";
 import { registerProductRequestInnovatorTools, registerProductRequestTools, requestOffersFor } from "./product-requests.js";
@@ -153,7 +154,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerAttentionTools(server, store, user!);
     registerBuildTools(server, store, user!);
     registerJourneyTools(server, store, user!);
-    if (ctx.hosting) registerHostingTools(server, store, user!, ctx.hosting, ctx.builds ?? null);
+    if (ctx.hosting) registerHostingTools(server, store, user!, ctx.hosting, ctx.builds ?? null, ctx.vendors ?? {});
     if (ctx.modules) registerModuleTools(server, store, user!, ctx.modules);
     registerGtmTools(server, store, user!);
   }
@@ -171,6 +172,10 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerSponsorshipBuilderTools(server, store, user!);
   }
   if (has("vendor") || has("innovator")) registerServiceTypeCatalog(server, store);
+  // Services, the third kind built on Mynt (services.ts): the contract a build reads, a service's own workspace, and
+  // asking Mynt for a service type that doesn't exist yet. Creating one takes the vendor role.
+  if (user && (has("vendor") || has("developer"))) registerServiceTools(server, store, user, ctx.hosting ?? null);
+  if (user && has("vendor")) registerServiceVendorTools(server, store, user, ctx.hosting ?? null, ctx.vendors ?? {});
   // A licence provider's own alerts arrive on its firm's webhooks; builders get these tools with their vendor tools.
   if (has("license_provider") && !has("innovator")) registerFirmWebhookTools(server, store, user!);
   // A vendor's or licence provider's firm (an admin registers it): its record and licences, once.
@@ -279,6 +284,8 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerAppIdeaAdminTools(server, store, user!);
     registerProductIdeaAdminTools(server, store, user!);
     registerVendorAdminTools(server, store, user!);
+    // Admins hold every role, so the requests list is already theirs (it shows them everyone's).
+    registerServiceTypeRequestAdminTools(server, store, user!);
     registerFirmCheckAdminTools(server, store, user!);
     if (!has("vendor")) registerRampAdapterTools(server, store, user!, { admin: true, vendors: ctx.vendors });
     if (ctx.builds) registerCodingAgentAdminTools(server, ctx.builds);
@@ -786,7 +793,11 @@ export function offboardingServices(ctx: Pick<AdminContext, "builds" | "hosting"
 // Developers build software on innovators' products; they never issue, sell or hold funds.
 function registerDeveloperTools(server: McpServer, store: Store, user: User) {
   // An app of a workspace the developer belongs to (workspaces.ts).
-  const ownApp = (id: string) => memberApp(store, user, id);
+  // An app experience of the caller's. A service (services.ts) is another kind: it has its own tools (get_service).
+  const ownApp = async (id: string) => {
+    const app = await memberApp(store, user, id);
+    return app?.kind === "service" ? undefined : app;
+  };
 
   // Products an app may include: published, and not private unless this developer was let in. A product in staging
   // only on an app not in production (sandbox builds): `production` says the app is in production.

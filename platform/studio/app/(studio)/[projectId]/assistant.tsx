@@ -15,6 +15,7 @@ import type { ReactNode } from "react";
 import { APP_TABS, PANEL_TAB_EVENT, type AppTab } from "@/lib/app-panel";
 import { canShip, FINISHED, startsNewBuild, type BuildState } from "@/lib/chat";
 import type { SlashCommand } from "@/lib/slash-commands";
+import { BUILDER_MESSAGE_EVENT, SERVICE_TABS, serviceHref, type ServiceTab } from "@/lib/services";
 
 type ThreadState = {
   isEmpty: boolean;
@@ -89,6 +90,28 @@ export const builderCommands = (projectId: string): SlashCommand[] => [
   { name: "add", description: "Ask the coding agent to add a feature", template: "Add " },
 ];
 
+// A service's builder chat: the same chat, with the service's own tabs (/contract, /conformance, …) and no app tabs.
+const SERVICE_TAB_DESCRIPTIONS: Record<ServiceTab, string> = {
+  overview: "Open the service's overview and checklist",
+  contract: "Open the contract: what the service takes in and gives back, its endpoint and signing rule",
+  conformance: "Open the conformance and practice runs",
+  terms: "Open Terms & pricing: the standard terms versions",
+  subscribers: "Open the firms and apps subscribed",
+  reliability: "Open Reliability: calls, error rate and incidents",
+  security: "Open Security & risk: the risk register and infosec checks",
+  activity: "Open the service's activity",
+};
+export const serviceBuilderCommands = (serviceId: string): SlashCommand[] => [
+  ...SERVICE_TABS.map((tab) => ({ name: tab, description: SERVICE_TAB_DESCRIPTIONS[tab], run: () => window.dispatchEvent(new CustomEvent(PANEL_TAB_EVENT, { detail: { projectId: serviceId, tab } })) })),
+  {
+    name: "ship",
+    description: "Ship the build: the agent wraps up, then Mynt verifies and ships it",
+    run: () => window.dispatchEvent(new CustomEvent(SHIP_EVENT, { detail: { projectId: serviceId } })),
+  },
+  { name: "fix", description: "Ask the coding agent to fix something", template: "Fix " },
+  { name: "add", description: "Ask the coding agent to add a feature", template: "Add " },
+];
+
 // Mynt Studio: Adorable's chat panel, talking to Mynt's coding agent. Adorable's /api/chat ran
 // its own model; the studio's sends each message to Mynt, which steers the app's running build
 // or starts one, and streams back what the agent does. Each build is one conversation.
@@ -100,7 +123,10 @@ export const Assistant = ({
   selectedConversationId = null,
   onThreadStateChange,
   welcome,
+  kind = "app",
 }: {
+  /** What the id is: an app, or a service (built with the same chat, at /services/<id>, with its own tabs' commands). */
+  kind?: "app" | "service";
   initialMessages?: UIMessage[];
   /** The build is still going: follow it live from this cursor as the page opens. */
   follow?: { after: number } | null;
@@ -121,6 +147,7 @@ export const Assistant = ({
       initialBuild={build}
       onThreadStateChange={onThreadStateChange}
       welcome={welcome}
+      kind={kind}
     />
   );
 };
@@ -133,7 +160,9 @@ function ProjectAssistant({
   initialBuild,
   onThreadStateChange,
   welcome,
+  kind,
 }: {
+  kind: "app" | "service";
   projectId: string;
   conversationId: string | null;
   initialMessages: UIMessage[];
@@ -206,7 +235,7 @@ function ProjectAssistant({
       window.history.replaceState(
         window.history.state,
         "",
-        `/${projectId}/${data.buildId}`,
+        kind === "service" ? serviceHref(projectId, data.buildId) : `/${projectId}/${data.buildId}`,
       );
       window.dispatchEvent(
         new CustomEvent("adorable:active-conversation", {
@@ -215,7 +244,7 @@ function ProjectAssistant({
       );
       dispatchProjectsUpdated();
     },
-    [projectId, dispatchProjectsUpdated, setHeld],
+    [projectId, dispatchProjectsUpdated, setHeld, kind],
   );
 
   const transport = useMemo(
@@ -336,7 +365,17 @@ function ProjectAssistant({
   }, [ship, projectId]);
 
   const runtime = useAISDKRuntime(chat);
-  const commands = useMemo(() => builderCommands(projectId), [projectId]);
+  const commands = useMemo(() => (kind === "service" ? serviceBuilderCommands(projectId) : builderCommands(projectId)), [projectId, kind]);
+  // A prepared message from the page (a service's checklist: "Ask the builder to add it") is sent as the user's own.
+  useEffect(() => {
+    const onMessage = (e: Event) => {
+      const detail = (e as CustomEvent<{ projectId?: string; text?: string }>).detail;
+      if (detail?.projectId !== projectId || typeof detail.text !== "string" || !detail.text.trim()) return;
+      void chat.sendMessage({ text: detail.text });
+    };
+    window.addEventListener(BUILDER_MESSAGE_EVENT, onMessage);
+    return () => window.removeEventListener(BUILDER_MESSAGE_EVENT, onMessage);
+  }, [chat, projectId]);
 
   const toolbar = (
     <>

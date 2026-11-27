@@ -9,6 +9,8 @@ import type { BuildService } from "./builds.js";
 import type { Store, User } from "./store.js";
 import { isProduction } from "./promotion-schema.js";
 import { canSeeBuild, createdWorkspaces, memberApp, personalWorkspace, workspaceRole } from "./workspaces.js";
+import { conformanceAfterDeploy, serviceDeployed, serviceOffline, serviceSettings } from "./services.js";
+import type { VendorCallOptions } from "./vendor-call.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const fail = (error: string) => ({ ...json({ error }), isError: true });
@@ -68,7 +70,7 @@ export function developerTenant(tenant: Tenant, direct: boolean): Partial<Tenant
 // Hosting belongs to a workspace: its apps run on its tenant whoever deploys them, and only its owners and admins
 // turn it on or log in to its VMs. A developer tenant from before workspaces keeps what it hosts until it's deployed
 // again; logging in to it needs owner or admin standing in every workspace whose apps it still runs.
-export function registerHostingTools(server: McpServer, store: Store, user: User, hosting: HostingService, builds: BuildService | null = null) {
+export function registerHostingTools(server: McpServer, store: Store, user: User, hosting: HostingService, builds: BuildService | null = null, vendors: VendorCallOptions = {}) {
   const WORKSPACE = z.string().optional().describe("The workspace (list_workspaces). Default: your own");
   // The named workspace if the caller is in it, else their own; `manage`: owners and admins only.
   const workspaceOf = async (id: string | undefined, manage: boolean): Promise<{ id: string } | { error: string }> => {
@@ -172,8 +174,17 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       const { key: runtimeKey, secret } = await store.createApiKey(user.id, { app_id, environment, label: "hosted runtime", allowed_origins: [] });
       // Sealed for the edge and never shown: the workspace's, not the deployer's (their leaving doesn't stop the app).
       await store.db.query("UPDATE financial_products.api_keys SET created_by = NULL, last_secret_issued_to = NULL WHERE id = $1", [runtimeKey.id]);
-      const hosted = await hosting.deploy(tenant, app, found.build, secret, environment === "sandbox", egress, plan, user.id);
+      // A service is handed its vendor signing secret as a hosted setting (direct hosting only).
+      const settings = isDirect(hosting.provider) ? await serviceSettings(store, app_id) : {};
+      const hosted = await hosting.deploy(tenant, app, found.build, secret, environment === "sandbox", egress, plan, user.id, settings);
       await store.audit(user.id, "deploy_app", app_id, { build_id, commit_sha: found.build.commit_sha, environment });
+      // A service's offering follows the deploy: pointed at the hosted address, and off (needs conformance) until Mynt
+      // has tested this build, which it does itself as soon as the build answers.
+      const service = await serviceDeployed(store, hosting, app, build_id, user.id, vendors);
+      if (service && isDirect(hosting.provider)) {
+        const deployed = hosting.pending;
+        hosting.pending = deployed.then(() => conformanceAfterDeploy(store, app, build_id, vendors)).catch((e) => console.error(`Conformance after deploying ${app_id}: ${(e as Error).name}`));
+      }
       const domain = hosting.appDomain(app_id);
       return json({
         ...hosted,
@@ -181,6 +192,7 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
         egress,
         url: domain ? `https://${domain}` : null,
         ...(hosted.services ? { services: hosted.services.map((x) => ({ ...x, url: x.domain ? `https://${x.domain}` : null })) } : {}),
+        ...(service ? { service } : {}),
       });
     },
   );
@@ -194,10 +206,13 @@ export function registerHostingTools(server: McpServer, store: Store, user: User
       annotations: { destructiveHint: true },
     },
     async ({ app_id }) => {
-      if (!(await memberApp(store, user, app_id))) return fail(`No app of yours with id '${app_id}'`);
+      const app = await memberApp(store, user, app_id);
+      if (!app) return fail(`No app of yours with id '${app_id}'`);
       if (!(await hosting.undeploy(app_id))) return fail(`'${app_id}' isn't hosted`);
       await store.audit(user.id, "undeploy_app", app_id);
-      return json({ app_id, hosted: false });
+      // A service's offering is suspended, with the reason, until it is online again.
+      const suspended = await serviceOffline(store, app, user.id);
+      return json({ app_id, hosted: false, ...(suspended ? { service_suspended: suspended } : {}) });
     },
   );
 

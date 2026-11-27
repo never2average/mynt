@@ -98,6 +98,7 @@ A coding agent working in this repository reads [AGENTS.md](../AGENTS.md) first.
 | [runtime-api.md](reference/runtime-api.md) | What an app calls at run time: keys, hand-offs, webhooks, sandbox mode and releases, client sessions, SDKs, journeys, the customer vault |
 | [workspaces-and-sign-in.md](reference/workspaces-and-sign-in.md) | Workspaces, members, what a workspace owns, stages and promotion, the audit trail, profit and loss, invite-only sign-in, linked accounts, chat sessions |
 | [vendors-and-marketplace.md](reference/vendors-and-marketplace.md) | Service types, offerings, conformance, subscriptions, the marketplace and standard terms, vendor onboarding, the Mynt Ramp, the wire contract |
+| [services.md](reference/services.md) | Services, the third kind built on Mynt: creating one, the contract a build reads, the endpoint and signing secret, stages and promotion checks, conformance on each new build, reading a service |
 | [platform-admin.md](reference/platform-admin.md) | The platform admin in Studio, invitations, firms and licence review, the regulatory model, take rates, oversight, the governance desk, the connector |
 | [licence-providers.md](reference/licence-providers.md) | Legal entities, sponsorship, firm checks, covenants, the partner kit, product health, and a sponsored US product end to end |
 | [agreements.md](reference/agreements.md) | App agreements and their scopes, the program agreements Production needs, e-signature, oversight audits, service levels |
@@ -131,6 +132,7 @@ This file used to hold the whole reference. Code comments, older links and insta
 | Opening products to developers | [Building on a product](reference/apps-and-builds.md#building-on-a-product) |
 | Vendors: standard services, per region | [Vendors and the marketplace](reference/vendors-and-marketplace.md) |
 | Onboarding a vendor | [Onboarding a vendor](reference/vendors-and-marketplace.md#onboarding-a-vendor) |
+| Building a service on Mynt and listing it | [Services](reference/services.md) |
 | Onboarding a regulated firm (licence provider) | [Onboarding a regulated firm](reference/licence-providers.md#onboarding-a-regulated-firm) |
 | The vendor wire contract | [The wire contract](reference/vendors-and-marketplace.md#the-wire-contract) |
 | The Mynt Ramp | [The Mynt Ramp](reference/vendors-and-marketplace.md#the-mynt-ramp) |

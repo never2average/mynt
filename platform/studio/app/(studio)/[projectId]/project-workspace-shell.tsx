@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import type { ProjectItem } from "@/lib/project-types";
 import { ProjectConversationsProvider } from "@/lib/project-conversations-context";
 import { ProjectsProvider } from "@/lib/projects-context";
+import { serviceHref } from "@/lib/services";
 import { Loader2Icon } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { AppTopBar, DEVICES, type Device } from "@/components/app-top-bar";
@@ -45,6 +46,7 @@ export function ProjectWorkspaceShell({
     null;
 
   const [projects, setProjects] = useState<ProjectItem[]>([]);
+  const [serviceIds, setServiceIds] = useState<string[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [projectsError, setProjectsError] = useState<string | null>(null);
   const [threadIsRunning, setThreadIsRunning] = useState(false);
@@ -68,11 +70,13 @@ export function ProjectWorkspaceShell({
       const response = await fetch("/api/projects", { cache: "no-store" });
       const data = (await response.json().catch(() => null)) as {
         projects?: ProjectItem[];
+        services?: { id: string }[];
         error?: string;
         message?: string;
       } | null;
       if (response.ok) {
         setProjects(data?.projects ?? []);
+        setServiceIds((data?.services ?? []).map((s) => s.id));
         setProjectsError(null);
       } else if (response.status === 401) {
         window.dispatchEvent(new Event("mynt:signed-out"));
@@ -89,6 +93,11 @@ export function ProjectWorkspaceShell({
   useEffect(() => {
     void loadProjects();
   }, [loadProjects, projectId]);
+
+  // A service's id never opens the app workspace: it goes to the service's own (/services/<id>).
+  useEffect(() => {
+    if (projectId && serviceIds.includes(projectId)) router.replace(serviceHref(projectId, selectedConversationId));
+  }, [projectId, serviceIds, selectedConversationId, router]);
 
   useEffect(() => {
     if (!threadIsRunning && !hasActiveBuild) return;

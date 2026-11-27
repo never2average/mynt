@@ -2,10 +2,15 @@
 """Start an app from templates/mynt-app and wire in this build's generated SDKs.
 
 usage: python3 scripts/scaffold_app.py <dest> [--kind <kind>] [--mobile expo|kotlin|swift|flutter] [--no-web] [--no-mobile]
+       python3 scripts/scaffold_app.py <dest> --service <contract.json>
 
 --kind lays down the screens of an app kind (templates/kinds/<kind>.json) as placeholders: web/src/screens/
 with a shell that switches between them, and mobile/app/<screen>.tsx for Expo. The kind's journey screen is
 the starter's journey runner. The kind itself is copied to mynt-kind.json.
+
+--service starts a service instead of an app (build.json has "service"): templates/mynt-service, with the service
+type's contract from Mynt (job/service-contracts/<key>.json) kept at api/contract/service-contract.json. It has the
+vendor service endpoint on, a status page instead of customer screens, and no SDK or mobile part.
 """
 import argparse, json, os, re, shutil, sys
 
@@ -16,6 +21,8 @@ KIND_TEMPLATE = os.path.join(HERE, "templates", "mynt-app-kind")
 KINDS = os.path.join(HERE, "templates", "kinds")
 PLACEHOLDER = "__MYNT_SDK_PACKAGE__"
 SDK = os.path.join(HERE, "job", "sdk")
+SERVICE_TEMPLATE = os.path.join(HERE, "templates", "mynt-service")
+SERVICE_CONTRACT = os.path.join("api", "contract", "service-contract.json")
 
 
 def rename_package(path, name):
@@ -147,6 +154,23 @@ def lay_down_kind(dest, kind, web, expo):
                 write(os.path.join(dest, "mobile", "app", s["id"] + ".tsx"), MOBILE_SCREEN.format(**fill(s)))
 
 
+def scaffold_service(dest, contract_path):
+    """A service: the vendor service endpoint for one service type, checked against its contract from Mynt."""
+    with open(contract_path) as f:
+        contract = json.load(f)
+    key = contract.get("service_type", {}).get("key", "")
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,59}", key):
+        sys.exit(f"{contract_path} isn't a service type contract (no service_type.key)")
+    for part in ("request", "response", "signature", "fixtures"):
+        if part not in contract:
+            sys.exit(f"{contract_path} isn't a service type contract (no {part})")
+    if contract.get("endpoint", {}).get("app_path") != f"/mynt/services/{key}":
+        sys.exit(f"{contract_path}: the endpoint path must be /mynt/services/{key}")
+    shutil.copytree(SERVICE_TEMPLATE, dest, dirs_exist_ok=True)
+    write(os.path.join(dest, SERVICE_CONTRACT), json.dumps(contract, indent=2) + "\n")
+    print(f"scaffolded {dest}: a service for {key} ({contract['service_type'].get('region', '?')}); write api/src/handle-service.ts")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dest")
@@ -155,7 +179,10 @@ def main():
     ap.add_argument("--no-mobile", action="store_true")
     ap.add_argument("--sdk", default=None, help="the generated SDK folder (default: job/sdk)")
     ap.add_argument("--kind", default=None, help="an app kind from templates/kinds (build.json's kind)")
+    ap.add_argument("--service", default=None, metavar="CONTRACT", help="start a service from its service type's contract (build.json's service.contract)")
     a = ap.parse_args()
+    if a.service and (a.kind or a.no_web or a.no_mobile or a.sdk):
+        sys.exit("--service takes only the contract: a service has no kind, SDK or mobile part")
     kind = load_kind(a.kind) if a.kind else None
     global SDK
     if a.sdk:
@@ -165,6 +192,8 @@ def main():
     # template's README replaces that one.
     if os.path.exists(a.dest) and set(os.listdir(a.dest)) - {".git", "README.md"}:
         sys.exit(f"{a.dest} isn't empty")
+    if a.service:
+        return scaffold_service(a.dest, a.service)
     shutil.copytree(TEMPLATE, a.dest, dirs_exist_ok=True)
     packages = os.path.join(a.dest, "packages")
 

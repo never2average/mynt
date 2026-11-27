@@ -18,6 +18,7 @@ import { matches, usePaged } from "@/components/list-layout"
 import { ConformanceSheet, ListingSheet, PracticeSheet, ServiceSheet, TermsSheet } from "@/components/vendor-sheets"
 import { Button } from "@/components/ui/button"
 import {
+  BUILT_ON_MYNT,
   conformanceWords,
   offeringsCsv,
   offeringStatusWords,
@@ -38,8 +39,12 @@ import {
   type VendorOffering,
 } from "@/lib/vendor-area"
 import { scopeLabelOf } from "@/lib/app-panel"
+import Link from "next/link"
+import { RequestServiceTypeSheet, TypeRequestsTable } from "@/components/build-type"
+import { serviceHref, type ServiceTypeRequest } from "@/lib/services"
 
-export type VendorData = { onboarding: Onboarding; offerings: VendorOffering[]; serviceTypes: ServiceTypeOption[]; licences: LicenceOption[] }
+// requests: the service types this account or its firm asked Mynt for (absent on a Mynt without requests; null when Mynt didn't answer).
+export type VendorData = { onboarding: Onboarding; offerings: VendorOffering[]; serviceTypes: ServiceTypeOption[]; licences: LicenceOption[]; requests?: ServiceTypeRequest[] | null }
 export type OfferingDetailData = { offering: VendorOffering; runs: ConformanceRun[]; practiceRuns?: ConformanceRun[]; termsVersions: TermsVersion[]; subscribers: Subscriber[] | null }
 
 const STATUS_ICON: Record<StepStatus, typeof Circle> = { done: CheckCircle2, next: CircleDot, not_started: Circle, blocked: PauseCircle }
@@ -166,8 +171,9 @@ export function VendorView({
   fetcher?: typeof fetch
 }) {
   const [query, setQuery] = useState("")
+  const [requesting, setRequesting] = useState(false)
   const { sheet, setSheet, dirty, setDirty } = useSheets(initialSheet)
-  const rows = useMemo(() => data.offerings.filter((o) => matches(query, o.name, o.serviceKey, o.region, offeringStatusWords(o.status))), [data.offerings, query])
+  const rows = useMemo(() => data.offerings.filter((o) => matches(query, o.name, o.serviceKey, o.region, offeringStatusWords(o.status), o.service ? BUILT_ON_MYNT : null)), [data.offerings, query])
   const paged = usePaged(rows)
   const firm = data.onboarding.entity !== null
   const close = () => {
@@ -201,9 +207,19 @@ export function VendorView({
           head={["Service", "Type", "Regions", "Conformance", "Terms version", "Listed", "Subscribers"]}
           rowKeys={paged.shown.map((o) => o.id)}
           rows={paged.shown.map((o) => [
-            <button key="n" type="button" className="text-left underline-offset-4 hover:underline" onClick={() => onOpen(o.id)} data-open-service={o.id}>
-              {o.name}
-            </button>,
+            o.service ? (
+              // Built and hosted on Mynt: it has its own workspace (its builder chat, contract, conformance, …).
+              <span key="n" className="flex flex-col" data-built-on-mynt={o.id}>
+                <Link href={serviceHref(o.service.id)} className="underline-offset-4 hover:underline" data-open-built-service={o.service.id}>
+                  {o.name}
+                </Link>
+                <span className="text-xs font-normal text-muted-foreground">{BUILT_ON_MYNT}</span>
+              </span>
+            ) : (
+              <button key="n" type="button" className="text-left underline-offset-4 hover:underline" onClick={() => onOpen(o.id)} data-open-service={o.id}>
+                {o.name}
+              </button>
+            ),
             o.serviceKey,
             o.region,
             conformanceWords(o.lastConformance),
@@ -214,7 +230,36 @@ export function VendorView({
           empty={data.offerings.length ? "No services match this search." : firm ? "No services yet. Create your first one." : "Mynt hasn't added you to your firm yet."}
         />
       </AdminList>
+      {data.requests !== undefined && (
+        // The service types this account or its firm asked Mynt's admins to define, with where each stands.
+        <section className="flex flex-col gap-2" data-requested-types>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-base font-semibold">Requested service types</h2>
+            <Button variant="outline" onClick={() => setRequesting(true)} data-request-service-type>
+              <Plus />
+              Request a service type
+            </Button>
+          </div>
+          <div className="overflow-auto rounded-lg border">
+            {data.requests === null ? (
+              <p className="p-4 text-sm text-muted-foreground" data-requests-unavailable>
+                Not available. Mynt didn&apos;t answer with your requests just now.
+              </p>
+            ) : (
+              <TypeRequestsTable requests={data.requests} />
+            )}
+          </div>
+        </section>
+      )}
       <Sheets state={sheet} data={data} onClose={close} onDone={() => setDirty(true)} fetcher={fetcher} />
+      <RequestServiceTypeSheet
+        open={requesting}
+        onClose={() => {
+          setRequesting(false)
+          onChanged()
+        }}
+        fetcher={fetcher}
+      />
     </div>
   )
 }

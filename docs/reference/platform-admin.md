@@ -119,7 +119,8 @@ Vendors shows:
 
 - the service types per region (`list_service_types`), with Add service type. That runs `define_service_type` for a new key only: Studio never replaces a service type, and the advanced fields stay with the Model Context Protocol (MCP) tool;
 - every offering whatever its status, with its last conformance result (`list_vendor_offerings` with `include_unlisted`), and Suspend offering and Reinstate offering (`suspend_vendor_offering`);
-- a Vendor firms tab with each firm's onboarding progress (`get_vendor_onboarding` with `all_firms`).
+- a Vendor firms tab with each firm's onboarding progress (`get_vendor_onboarding` with `all_firms`);
+- a Requested service types tab: the service types builders and vendors asked for (`list_service_type_requests`), as a table (Requested, Name, Region, Firm, Requested by, Status). A row opens the request with what it does and its example input and output, and two labelled actions. **Define from request** opens Add service type prefilled with the name, region, description and schemas inferred from the examples, for the admin to finish (the consent purpose is theirs to fill), and submits `define_service_type` with `from_request`. **Decline** takes a reason (`decline_service_type_request`). See [Asking for a service type](services.md#asking-for-a-service-type).
 
 See [Vendors and the marketplace](vendors-and-marketplace.md).
 

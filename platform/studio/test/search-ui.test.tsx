@@ -458,8 +458,9 @@ describe("the bar's actions, from what Mynt's search finds", () => {
   it("Studio: a page goes to itself, an app's tab sits under its app, members and audit actions under their browse entries", () => {
     const actions = searchActions("studio", searchIndex({ apps: [{ id: "a2", name: "Budgeting", stage: "staging" }], members: [{ userId: "u1", name: "Ines Diaz", email: null, role: "owner" }], auditActions: ["app.created"], admin: true }));
     const by = (id: string) => actions.find((a) => a.id === id)!;
-    expect(by("page:/licences")).toMatchObject({ name: "Licences", section: { name: "Pages", priority: 5 }, subtitle: "Go to Licences", href: "/licences" });
-    expect(by("app:a2")).toMatchObject({ name: "Budgeting", section: { name: "Apps", priority: 4 }, subtitle: "Staging", href: "/a2" });
+    // Six sections now (Services joined Pages, Apps, Financial products, Members and Audit actions), so the first two rank one higher.
+    expect(by("page:/licences")).toMatchObject({ name: "Licences", section: { name: "Pages", priority: 6 }, subtitle: "Go to Licences", href: "/licences" });
+    expect(by("app:a2")).toMatchObject({ name: "Budgeting", section: { name: "Apps", priority: 5 }, subtitle: "Staging", href: "/a2" });
     expect(by("apptab:a2:security")).toMatchObject({ name: "Security & risk", parent: "app:a2", subtitle: "App tab", href: "/a2?tab=security" });
     expect(by("members")).toMatchObject({ name: "Members", section: { name: "Members", priority: 2 } });
     expect(by("members").href).toBeUndefined();

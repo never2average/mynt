@@ -10,7 +10,7 @@ This is a map of the `docs/` folder: which file to read for what. What Mynt is, 
 | A builder making products and apps | [Products](reference/products.md) | [Apps and builds](reference/apps-and-builds.md), [Runtime API](reference/runtime-api.md), [Mynt Studio](reference/studio.md) |
 | A licence provider | [Firms, licences and licence providers](reference/licence-providers.md) | [Agreements](reference/agreements.md), [Money rails](reference/money-rails.md) |
 | A licence provider's engineer | [Connecting a licence provider to Mynt](partners.md) | [Confidential computing](reference/confidential-computing.md) |
-| A vendor | [Vendors and the marketplace](reference/vendors-and-marketplace.md) | [Agreements](reference/agreements.md) |
+| A vendor | [Vendors and the marketplace](reference/vendors-and-marketplace.md) | [Services](reference/services.md), [Agreements](reference/agreements.md) |
 | A liquidity provider | [Liquidity pools and on-chain treasuries](reference/liquidity-and-treasury.md) | [Product health](reference/licence-providers.md#product-health) |
 | A Mynt admin | [Platform administration](reference/platform-admin.md) | [Risk](reference/risk.md), [Solana programs](reference/solana-programs.md#mainnet-program-gate) |
 | An operator running a server | [Running Mynt](reference/operations.md) | [Mynt's architecture](architecture.md) |
@@ -43,6 +43,7 @@ The [reference index](reference.md) has a longer reading order for each role and
 | [runtime-api.md](reference/runtime-api.md) | What an app calls at run time |
 | [workspaces-and-sign-in.md](reference/workspaces-and-sign-in.md) | Workspaces, promotion, the audit trail and who may sign in |
 | [vendors-and-marketplace.md](reference/vendors-and-marketplace.md) | Standard services, the marketplace and the Mynt Ramp |
+| [services.md](reference/services.md) | Services: the third kind built on Mynt, beside apps and financial products |
 | [platform-admin.md](reference/platform-admin.md) | What a Mynt admin does |
 | [licence-providers.md](reference/licence-providers.md) | Firms, sponsorship, covenants, the partner kit and product health |
 | [agreements.md](reference/agreements.md) | Agreements between apps and firms |

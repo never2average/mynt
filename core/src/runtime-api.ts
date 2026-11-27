@@ -1,3 +1,5 @@
+import { serviceType } from "./vendors.js";
+import { serviceTypeContract } from "./services.js";
 import { RateLimiter } from "./rate-limit.js";
 import { randomUUID } from "node:crypto";
 import { EDGE_KEY_HEADER, EDGE_PLACEHOLDER } from "./freestyle.js";
@@ -595,6 +597,15 @@ export function createRuntimeApi(store: Store, opts: RuntimeApiOptions = {}) {
         ttl_seconds: body.ttl_seconds,
       });
       return send(res, 201, { client_secret: secret, session_id: session.id, expires_at: session.expires_at, product_ids: session.product_ids, scopes: session.scopes, sandbox });
+    }
+    // A standard service type's contract, for a build to keep beside its code (services.ts). Nothing in it is secret.
+    const serviceContract = path.match(/^\/v1\/service_types\/([a-z][a-z0-9_]{0,59})\/contract$/);
+    if (serviceContract) {
+      allow("GET");
+      const region = url.searchParams.get("region") ?? "";
+      const t = /^[A-Z]{2}$/.test(region) ? await serviceType(store.db, region, serviceContract[1]) : undefined;
+      if (!t) throw new ApiError(404, "service_type_not_found", `No service type '${serviceContract[1]}' in region '${region}' (pass ?region=<two-letter code>)`);
+      return send(res, 200, serviceTypeContract(t), cors);
     }
     const contractOf = path.match(/^\/v1\/products\/([^/]+)\/contract$/);
     if (contractOf) {

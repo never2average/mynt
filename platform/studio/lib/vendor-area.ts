@@ -186,7 +186,13 @@ export type VendorOffering = {
   lastConformance: { passed: boolean; at: string | null } | null;
   subscribers: number | null; // null: Mynt didn't say
   createdAt: string | null;
+  // The service this offering was made with, when it is built and hosted on Mynt (its workspace: /services/<id>);
+  // null or absent for one served at the vendor's own endpoints.
+  service?: { id: string; name: string } | null;
 };
+/** Where a service runs, in words: built and hosted on Mynt, or at the vendor's own endpoints. */
+export const BUILT_ON_MYNT = "Built on Mynt";
+export const OWN_ENDPOINT = "Your own endpoint";
 
 export function fromMyOfferings(reply: unknown): VendorOffering[] {
   return arr(reply)
@@ -227,6 +233,7 @@ export function fromMyOfferings(reply: unknown): VendorOffering[] {
           lastConformance: c,
           subscribers: num(o.subscribers),
           createdAt: str(o.created_at),
+          ...(isObj(o.service) && str(o.service.id) ? { service: { id: str(o.service.id)!, name: str(o.service.name) ?? str(o.name) ?? "Service" } } : {}),
         },
       ];
     });

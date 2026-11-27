@@ -43,6 +43,7 @@ import { noticeFirm } from "./firm-notices.js";
 import { agreementScopeLabel } from "./app-agreements-schema.js";
 import { endSubscriptionAgreements, openSubscriptionAgreements, recordClickThrough, setOfferingTerms, StandardTermsSchema, termsOfRow, type StandardTerms, type TermsApp } from "./vendor-terms.js";
 import { appRole, memberApp } from "./workspaces.js";
+import { isProduction } from "./promotion-schema.js";
 
 // Vendors: firms that offer standard services (identity, KYC, account data, bureau reports, e-sign,
 // e-mandates…) which innovators plug into their products instead of each integrating them.
@@ -153,6 +154,9 @@ export interface Offering {
   status: OfferingStatus;
   status_note: string | null;
   terms: StandardTerms | null; // the vendor's standard terms (vendor-terms.ts); null: none on file
+  app_id: string | null; // made with a service built on Mynt (services.ts; the service's id): its endpoints are derived, never typed
+  app_pause: "offline" | "stopped" | null; // why the service took it off: it isn't online, or it was archived
+  app_build_id: string | null; // the deployed build its endpoint answers from
   created_at: string;
   updated_at: string;
 }
@@ -208,6 +212,9 @@ const toOffering = (r: Row): Offering => ({
   status: r.status as OfferingStatus,
   status_note: (r.status_note as string | null) ?? null,
   terms: termsOfRow(r),
+  app_id: (r.app_id as string | null) ?? null,
+  app_pause: (r.app_pause as Offering["app_pause"]) ?? null,
+  app_build_id: (r.app_build_id as string | null) ?? null,
   created_at: iso(r.created_at)!,
   updated_at: iso(r.updated_at)!,
 });
@@ -255,6 +262,40 @@ export async function getSubscription(db: Db, id: string): Promise<Subscription 
   const { rows } = await db.query(`SELECT * FROM ${T}.vendor_subscriptions WHERE id = $1`, [id]);
   return rows[0] ? toSubscription(rows[0]) : undefined;
 }
+// The service built on Mynt an offering was made with, for those who may know it (the vendor's own firm): its id and name.
+export async function servingApp(db: Db, o: Pick<Offering, "app_id">): Promise<{ id: string; name: string | null } | null> {
+  if (!o.app_id) return null;
+  const { rows } = await db.query(`SELECT name FROM ${T}.apps WHERE id = $1`, [o.app_id]);
+  return { id: o.app_id, name: (rows[0]?.name as string | undefined) ?? null };
+}
+// An app's hosted copy, if Mynt hosts it: its status and build. Null when it isn't hosted (or this server never ran hosting).
+export interface HostedCopy {
+  status: "deploying" | "running" | "stopped";
+  build_id: string;
+  error: string | null;
+  services: { expose: string; domain: string | null }[];
+}
+export async function hostedCopy(db: Db, appId: string): Promise<HostedCopy | null> {
+  const has = (await db.query(`SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'hosted_apps'`, [T])).rows.length;
+  if (!has) return null;
+  const r = (await db.query(`SELECT status, build_id::text AS build_id, error, services FROM ${T}.hosted_apps WHERE app_id = $1`, [appId])).rows[0];
+  if (!r) return null;
+  const services = ((typeof r.services === "string" ? JSON.parse(r.services) : r.services) ?? []) as HostedCopy["services"];
+  return { status: r.status as HostedCopy["status"], build_id: r.build_id as string, error: (r.error as string | null) ?? null, services };
+}
+// Why Mynt can't test or call a service's offering right now, in plain words; null when the service answers.
+export async function appNotAnswering(db: Db, o: Offering): Promise<string | null> {
+  if (!o.app_id) return null;
+  const app = await servingApp(db, o);
+  const name = app?.name ?? "the service";
+  if (o.app_pause === "stopped") return `${name} is archived: restore it first (archive_service { archived: false })`;
+  const hosted = await hostedCopy(db, o.app_id);
+  if (!hosted) return `Put the service online first: ${name} isn't hosted on Mynt yet (deploy_app)`;
+  if (hosted.status === "deploying") return `${name} is still being put online; try again once it answers`;
+  if (hosted.status !== "running") return `${name} isn't online${hosted.error ? " (its last deploy failed)" : ""}: put it online again (deploy_app)`;
+  if (!o.test_base_url) return `Put ${name} online again (deploy_app), so Mynt can hand it the signing secret and point this service at it`;
+  return null;
+}
 async function sealedColumn(db: Db, table: string, column: string, id: string): Promise<string | null> {
   const { rows } = await db.query(`SELECT ${column} AS v FROM ${T}.${table} WHERE id = $1`, [id]);
   return (rows[0]?.v as string | undefined) ?? null;
@@ -274,6 +315,8 @@ async function callOffering(
   }
   const base = req.environment === "test" ? o.test_base_url : o.live_base_url;
   if (!base) return { ok: false, http_status: null, body: null, error: `refused: the offering has no ${req.environment} endpoint`, latency_ms: 0 };
+  // An app-served offering: straight to the app's hosted address at Mynt's fixed path, signed and nothing else.
+  if (o.app_id) return callVendor({ base_url: base, service_type: req.service_type, body: req.body, signing_secret: req.signing_secret, credential: null, signature: req.signature, exact_url: true }, opts);
   return callVendor({ base_url: base, service_type: req.service_type, body: req.body, signing_secret: req.signing_secret, credential: req.credential, signature: req.signature }, opts);
 }
 
@@ -657,6 +700,8 @@ export async function runConformance(store: Store, o: Offering, t: ServiceType, 
   // offerings keep their status (an admin suspends), and ops_status shows the failure.
   let status = o.status;
   if (passed && o.status === "draft") status = "conformance_passed";
+  // A service built on Mynt that is in Production is listed: a pass on the build now online puts it straight back.
+  if (passed && o.app_id && status === "conformance_passed" && (await isProduction(store.db, o.app_id))) status = "listed";
   if (!passed && o.status === "conformance_passed") status = "draft";
   if (status !== o.status) await store.db.query(`UPDATE ${T}.vendor_offerings SET status = $2, updated_at = now() WHERE id = $1`, [o.id, status]);
   return { run_id: id, passed, status, cases, ...(gap ? { licence_gap: gap } : {}) };
@@ -932,9 +977,10 @@ async function callBoundVendor(
   }
   const base = a.sandbox ? o.test_base_url : o.live_base_url;
   if (!base) return { kind: "error", status: 503, code: "vendor_unavailable", message: `The ${t.name} service has no live endpoint` };
-  const secret = open((await sealedColumn(store.db, "vendor_subscriptions", "signing_secret", sub.id))!, false);
-  // Sandbox calls carry the test credential and never the live one.
-  const keyId = a.sandbox ? sub.test_credential_key_id : sub.live_credential_key_id;
+  // An app-served offering is signed with its app's one secret (the only one the app was handed, on deploy).
+  const secret = o.app_id ? await conformanceSecret(store, o.id) : open((await sealedColumn(store.db, "vendor_subscriptions", "signing_secret", sub.id))!, false);
+  // Sandbox calls carry the test credential and never the live one. An app-served offering takes none.
+  const keyId = o.app_id ? null : a.sandbox ? sub.test_credential_key_id : sub.live_credential_key_id;
   const sealedCredential = keyId ? await sealedColumn(store.db, "key_vault", "sealed", keyId) : null;
   if (!a.sandbox && o.requires_credential && !sealedCredential) return unavailable("has no live credential set");
   const body = {
@@ -1572,6 +1618,10 @@ const OfferingFields = {
   requires_credential: z.boolean().default(false).describe("true when subscribers must give Mynt a credential you issue them; it's sent as Authorization: Bearer"),
 };
 
+// A service built on Mynt has one signing secret, its own, which nobody is shown.
+const APP_SECRET_WORDS =
+  "This offering belongs to a service built on Mynt: Mynt signs every request to it with the service's own signing secret, which it hands the service as its hosted setting MYNT_VENDOR_SIGNING_SECRET each time it is put online. It is never shown, and there is no per-subscriber secret to take or rotate";
+
 async function entityOf(store: Store, user: User) {
   return ((await store.getUser(user.id)) ?? user).entity_id;
 }
@@ -1631,14 +1681,28 @@ export function registerVendorAdminTools(server: McpServer, store: Store, user: 
       title: "Define a standard service",
       description:
         "Admin: add or replace a standard service type in a region: the input and output JSON Schemas every vendor implements, the consent purpose, the data dictionary fields its output fills, and the licence types (from the region's regulatory model) the subscribing firm and the vendor must hold.",
-      inputSchema: { service_type: ServiceTypeSchema },
+      inputSchema: {
+        service_type: ServiceTypeSchema,
+        from_request: z.string().uuid().optional().describe("The request this answers (list_service_type_requests): it is marked defined, with this service type's key, for its requester to see"),
+      },
     },
-    async ({ service_type }) => {
+    async ({ service_type, from_request }) => {
+      // The request it answers must still be waiting, checked before anything is saved.
+      const request = from_request ? (await store.db.query(`SELECT id::text AS id, status FROM ${T}.service_type_requests WHERE id = $1`, [from_request])).rows[0] : undefined;
+      if (from_request && !request) return fail(`No service type request '${from_request}'`);
+      if (request && request.status !== "requested") return fail(`That request was already ${request.status}`);
       const { errors, fixtures } = await checkServiceType(store, service_type);
       if (errors.length) return fail("The service type can't be saved", { errors });
       const saved = await upsertServiceType(store, service_type, fixtures, user.id);
-      await audit("define_service_type", `${saved.region}/${saved.key}`, { category: saved.category });
-      return json(saved);
+      if (request)
+        await store.db.query(`UPDATE ${T}.service_type_requests SET status = 'defined', service_type_key = $2, region = $3, decided_by = $4, decided_at = now() WHERE id = $1 AND status = 'requested'`, [
+          request.id,
+          saved.key,
+          saved.region,
+          user.id,
+        ]);
+      await audit("define_service_type", `${saved.region}/${saved.key}`, { category: saved.category, ...(request ? { from_request: request.id } : {}) });
+      return json(request ? { ...saved, from_request: request.id } : saved);
     },
   );
 
@@ -1692,7 +1756,14 @@ export function registerVendorAdminTools(server: McpServer, store: Store, user: 
       if (!o) return fail(`No offering '${offering_id}'`);
       const status = suspended ? "suspended" : "draft";
       if (!suspended && o.status !== "suspended") return fail("That offering isn't suspended");
-      await store.db.query(`UPDATE ${T}.vendor_offerings SET status = $2, status_note = $3, updated_at = now() WHERE id = $1`, [o.id, status, note ?? null]);
+      // Taken off by its app, not by an admin: it comes back when the vendor puts the app online or offers it again.
+      if (!suspended && o.app_pause)
+        return fail(
+          o.app_pause === "offline"
+            ? "That offering is off because the service isn't online; it comes back when its builder puts it online again"
+            : "Its builder archived that service; it comes back when they restore it (archive_service)",
+        );
+      await store.db.query(`UPDATE ${T}.vendor_offerings SET status = $2, status_note = $3, app_pause = NULL, updated_at = now() WHERE id = $1`, [o.id, status, note ?? null]);
       await audit("suspend_vendor_offering", o.id, { suspended, note: note ?? null, vendor_entity_id: o.entity_id });
       return json({ ...o, status, status_note: note ?? null, drifted_products: await vendorDriftSweep(store, { offering_id: o.id }) });
     },
@@ -1825,6 +1896,14 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
       if (!o) return fail(`No offering of yours '${a.offering_id}'`);
       // The terms are the vendor's own standing acceptance, so only its members set them (never an admin for it).
       if (standard_terms && o.entity_id !== (await entityOf(store, user))) return fail("Only the vendor's own members set its standard terms");
+      // An app-served offering's endpoint is the app's hosted address at Mynt's fixed path: derived, never typed.
+      if (o.app_id && (a.test_base_url !== undefined || a.live_base_url !== undefined || a.requires_credential !== undefined))
+        return fail(
+          "This offering belongs to a service built on Mynt: Mynt sets its endpoint from the service's hosted address and authenticates by Mynt-Signature alone, so test_base_url, live_base_url and requires_credential can't be set. To serve it from your own endpoint instead, create_vendor_offering",
+        );
+      // Its stage is its listing: Production is listed, and moving back unlists.
+      if (o.app_id && a.listed !== undefined)
+        return fail(a.listed ? "A service built on Mynt is listed by moving it to Production (promote_app with the service's id, once get_promotion_checks passes)" : "A service built on Mynt is unlisted by moving it back to staging (demote_app with the service's id)");
       const bad =
         (await checkUrls([a.test_base_url as string | undefined, a.live_base_url as string | undefined])) ??
         (a.licence_ids ? await checkLicences(o.entity_id, o.region, a.licence_ids as string[]) : null);
@@ -1844,7 +1923,14 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
       const reverify = next.test_base_url !== o.test_base_url || next.live_base_url !== o.live_base_url || JSON.stringify(next.licence_ids) !== JSON.stringify(o.licence_ids);
       if (reverify && o.status !== "suspended") next.status = "draft";
       if (a.listed !== undefined) {
-        if (o.status === "suspended") return fail("An admin suspended this offering");
+        if (o.status === "suspended")
+          return fail(
+            o.app_pause === "offline"
+              ? "The service isn't online: put it online again"
+              : o.app_pause === "stopped"
+                ? "The service is archived: restore it first (archive_service)"
+                : "An admin suspended this offering",
+          );
         if (a.listed) {
           if (!next.test_base_url && !next.adapter) return fail("Set your own test endpoint (test_base_url) and pass run_conformance before listing; a practice run doesn't count");
           if (next.status !== "conformance_passed" && next.status !== "listed") return fail("Run run_conformance until it passes before listing");
@@ -1880,6 +1966,9 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
     async ({ offering_id, test_credential }) => {
       const o = await mine(offering_id);
       if (!o) return fail(`No offering of yours '${offering_id}'`);
+      // A service built on Mynt: Mynt tests the deployed build itself, from outside it, at its hosted address.
+      const off = await appNotAnswering(store.db, o);
+      if (off) return fail(off);
       if (!o.test_base_url && !o.adapter) return fail("This offering has no test endpoint yet: set yours (update_vendor_offering { test_base_url }) and run this again. To practise first, use run_practice_conformance");
       // Defence in depth: the real test never runs against Mynt's own practice sandbox.
       if (o.test_base_url && pointsAtVendorSandbox(o.test_base_url)) return fail("This offering's test endpoint is Mynt's practice sandbox: set your own (update_vendor_offering { test_base_url })");
@@ -1930,7 +2019,13 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
       for (const o of rows.map(toOffering)) {
         const run = (await store.db.query(`SELECT id, passed, cases, created_at FROM ${T}.vendor_conformance_runs WHERE offering_id = $1 ORDER BY created_at DESC LIMIT 1`, [o.id])).rows[0];
         const subs = (await store.db.query(`SELECT count(*)::int AS n FROM ${T}.vendor_subscriptions WHERE offering_id = $1 AND status = 'active'`, [o.id])).rows[0];
-        out.push({ ...o, last_conformance: run ? { run_id: run.id, passed: run.passed, cases: run.cases, at: iso(run.created_at) } : null, subscribers: subs?.n ?? 0 });
+        out.push({
+          ...o,
+          // A service built on Mynt (its id and name): its workspace is /services/<id> in the Studio.
+          service: await servingApp(store.db, o),
+          last_conformance: run ? { run_id: run.id, passed: run.passed, cases: run.cases, at: iso(run.created_at) } : null,
+          subscribers: subs?.n ?? 0,
+        });
       }
       return json(out);
     },
@@ -2001,6 +2096,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
     async ({ subscription_id }) => {
       const found = await subscriberOf(subscription_id);
       if (!found) return fail(`No active subscription '${subscription_id}' to your offerings`);
+      if (found.o.app_id) return fail(APP_SECRET_WORDS);
       // One statement, so two callers can't both see it.
       const { rows } = await store.db.query(
         `UPDATE ${T}.vendor_subscriptions SET secret_shown_at = now() WHERE id = $1 AND secret_shown_at IS NULL RETURNING signing_secret`,
@@ -2022,6 +2118,7 @@ export function registerVendorTools(server: McpServer, store: Store, user: User,
     async ({ subscription_id }) => {
       const found = await subscriberOf(subscription_id);
       if (!found) return fail(`No active subscription '${subscription_id}' to your offerings`);
+      if (found.o.app_id) return fail(APP_SECRET_WORDS);
       const secret = newSecret();
       await store.db.query(`UPDATE ${T}.vendor_subscriptions SET signing_secret = $2, secret_shown_at = now() WHERE id = $1`, [found.sub.id, seal(secret, false)]);
       await auditOffering("rotate_subscription_secret", found.o, { subscription_id: found.sub.id });
@@ -2140,6 +2237,8 @@ export function registerVendorInnovatorTools(server: McpServer, store: Store, us
           vendor_licences: licences,
           conformance: run ? { passed: run.passed as boolean, at: iso(run.created_at) } : null,
           your_subscription_id: (subscribed?.id as string | undefined) ?? null,
+          // Only the vendor's own firm is told it is one of its services built on Mynt; everyone else sees the vendor, as for any offering.
+          ...(o.app_id && entityId && o.entity_id === entityId ? { service: await servingApp(store.db, o) } : {}),
           ...(include_unlisted && opts.admin ? { status: o.status } : {}),
           you_can_subscribe: !gap,
           ...(gap ? { prerequisite: gap } : {}),

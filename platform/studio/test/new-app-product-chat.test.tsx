@@ -11,6 +11,7 @@ import { useState } from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { NewAppWorkspace, productModeCommands, type NewAppProduct } from "@/components/new-app-workspace";
+import { openTypeMenu, pickType, typeOption, typeTrigger } from "./build-type-helper";
 import { DRAFT_PRODUCT, validateProductDraft } from "@/lib/product-chat";
 import { productIdeaMessage, productIdeasFrom, type ProductIdea } from "@/lib/product-ideas";
 import { chipText, type AppKind, type NewAppRequest } from "@/lib/new-app";
@@ -135,30 +136,32 @@ const send = async () => {
   await settle();
 };
 const modeOf = () => document.querySelector("[data-new-app-chat]")!.getAttribute("data-mode");
-const option = (m: string) => document.querySelector(`[data-mode-option="${m}"]`) as HTMLButtonElement;
 const sheet = () => document.querySelector("[data-create-product-sheet]") as HTMLElement | null;
 
 describe("Build app and Create product", () => {
-  it("are a labelled toggle in the composer; switching carries what's typed", async () => {
+  // The two-way toggle became the Type dropdown (a service is the third thing to build): the same switch, picked from its menu.
+  it("are choices of the composer's labelled Type dropdown; switching carries what's typed", async () => {
     await loaded();
-    expect(screen.getByRole("radiogroup", { name: "What to do" })).toBeTruthy();
-    expect(option("build").textContent).toBe("App");
-    expect(option("product").textContent).toBe("Financial product");
-    expect(option("build").getAttribute("aria-checked")).toBe("true");
+    expect(typeTrigger().textContent).toBe("Type: App");
+    expect(typeTrigger().getAttribute("aria-label")).toBe("Type: App");
     expect(modeOf()).toBe("build");
 
     type("A high-yield savings account");
-    await act(async () => void fireEvent.click(option("product")));
+    await openTypeMenu();
+    expect(typeOption("app")!.querySelector("[data-type-option-label]")!.textContent).toBe("App");
+    expect(typeOption("product")!.querySelector("[data-type-option-label]")!.textContent).toBe("Financial product");
+    expect(typeOption("app")!.getAttribute("aria-checked")).toBe("true");
+    await pickType("product");
     await settle();
     expect(modeOf()).toBe("product");
-    expect(option("product").getAttribute("aria-checked")).toBe("true");
+    expect(typeTrigger().textContent).toBe("Type: Financial product");
     expect(screen.getByRole("heading", { name: "What product do you want to create?" })).toBeTruthy();
     expect(input().value).toBe("A high-yield savings account");
     // No products to pick for a product.
     expect(document.querySelector("[data-product-picker]")).toBeNull();
 
     type("Back to apps");
-    await act(async () => void fireEvent.click(option("build")));
+    await pickType("app");
     await settle();
     expect(modeOf()).toBe("build");
     expect(input().value).toBe("Back to apps");
@@ -275,7 +278,7 @@ describe("product ideas in Financial product mode", () => {
     await loaded();
     expect(appChips()).toEqual(["two-key-household-fund"]);
     expect(productChips()).toEqual([]);
-    await act(async () => void fireEvent.click(option("product")));
+    await pickType("product");
     await settle();
     const chips = productChips();
     expect(chips).toHaveLength(6);
@@ -294,7 +297,7 @@ describe("product ideas in Financial product mode", () => {
       expect(singleLine(chip)).toBe(true);
     }
     // The app idea's chip, back in App mode: its label cut short (it has no chip label), the problem as the tooltip.
-    await act(async () => void fireEvent.click(option("build")));
+    await pickType("app");
     await settle();
     const appChip = document.querySelector('[data-chip="two-key-household-fund"]')!;
     expect(appChip.textContent).toBe("Two-adult households argue over…");
@@ -305,7 +308,7 @@ describe("product ideas in Financial product mode", () => {
   it("a chip starts the product chat with the idea as the first message, and starts no build", async () => {
     productIdeas = IDEAS;
     await loaded();
-    await act(async () => void fireEvent.click(option("product")));
+    await pickType("product");
     await settle();
     const id = productChips()[0]!;
     await act(async () => void fireEvent.click(document.querySelector(`[data-product-chip="${id}"]`)!));
@@ -320,7 +323,7 @@ describe("product ideas in Financial product mode", () => {
   it("Templates lists every product idea (Product, For, Product line), and Use opens the Create product sheet filled with it", async () => {
     productIdeas = IDEAS;
     await loaded();
-    await act(async () => void fireEvent.click(option("product")));
+    await pickType("product");
     await settle();
     await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Open Templates" })));
     await settle();
@@ -365,10 +368,10 @@ describe("product ideas in Financial product mode", () => {
     productIdeas = IDEAS;
     kinds = APP_KINDS;
     await loaded();
-    await act(async () => void fireEvent.click(option("product")));
+    await pickType("product");
     await settle();
     await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Open Templates" })));
-    await act(async () => void fireEvent.click(option("build")));
+    await pickType("app");
     await settle();
     const panel = document.querySelector('[data-panel-content="templates"]') as HTMLElement;
     expect(panel.querySelector('[data-template-row="two-key-household-fund"]')).not.toBeNull();
@@ -380,7 +383,7 @@ describe("drafting a product in the chat", () => {
   it("streams the reply and reasoning, shows the draft as a card, opens the sheet filled with it, and creates it once with the confirmed fields", async () => {
     replies = [[...reasoning("Which regulator?"), ...text("Which regulator: FinCEN or OCC?")], [...text("Here's the draft."), ...tool("call-1", { ok: true, draft: DRAFT })]];
     await loaded();
-    await act(async () => void fireEvent.click(option("product")));
+    await pickType("product");
     await settle();
     type("A savings account that rounds up card spend");
     await send();
@@ -431,7 +434,7 @@ describe("drafting a product in the chat", () => {
     replies = [tool("call-1", { ok: true, draft: DRAFT })];
     createReply = { status: 422, body: { error: "mynt_refused", message: "A product with id 'green-savings' already exists" } };
     await loaded();
-    await act(async () => void fireEvent.click(option("product")));
+    await pickType("product");
     await settle();
     type("A savings account that rounds up card spend");
     await send();
@@ -448,7 +451,7 @@ describe("drafting a product in the chat", () => {
   it("shows a draft Mynt sent back, with what to fix, and no button", async () => {
     replies = [[...tool("call-1", { ok: false, error: "region must be one of: US." }), ...text("Which region?")]];
     await loaded();
-    await act(async () => void fireEvent.click(option("product")));
+    await pickType("product");
     await settle();
     type("A savings account in Canada");
     await send();

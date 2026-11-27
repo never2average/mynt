@@ -258,7 +258,8 @@ docker info --format '{{json .Runtimes}}' | grep -q runsc && echo "runtime: runs
 
 // Builds the verified commit and runs it: a compose app as a project with Mynt's override on top, otherwise its
 // Dockerfile, hardened. NAME, SHA, PORT, SOURCE_URL, SOURCE_TOKEN, COMPOSE_FILE_NAME, COMPOSE_OVERRIDE and the
-// MYNT_* settings come from the environment.
+// MYNT_* settings come from the environment. MYNT_VENDOR_SIGNING_SECRET is set only for an app that serves a vendor
+// service (app-services.ts): a compose app passes it to the service that needs it (\${MYNT_VENDOR_SIGNING_SECRET:-}).
 const DIRECT_DEPLOY = `set -euo pipefail
 DIR="$HOME/apps/$NAME/$SHA"
 if [ ! -d "$DIR" ]; then
@@ -276,7 +277,7 @@ else
   docker image inspect "$IMG" >/dev/null 2>&1 || docker build -q -t "$IMG" . >/dev/null
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   docker run -d --name "$NAME" --runtime "$RUNTIME" --restart unless-stopped --read-only --tmpfs /tmp --cap-drop ALL \\
-    --security-opt no-new-privileges --memory 1g --cpus 1 -p "$PORT:8080" -e MYNT_API_KEY -e MYNT_BASE_URL \\
+    --security-opt no-new-privileges --memory 1g --cpus 1 -p "$PORT:8080" -e MYNT_API_KEY -e MYNT_BASE_URL -e MYNT_VENDOR_SIGNING_SECRET \\
     -v /etc/ssl/certs/ca-certificates.crt:${CA_BUNDLE}:ro -e SSL_CERT_FILE=${CA_BUNDLE} -e NODE_EXTRA_CA_CERTS=${CA_BUNDLE} \\
     -e REQUESTS_CA_BUNDLE=${CA_BUNDLE} -e CURL_CA_BUNDLE=${CA_BUNDLE} "$IMG" >/dev/null
 fi
@@ -310,6 +311,9 @@ export function directCommand(kind: HostingCommandKind, name: string, args: Reco
   const [compose, single] = cmd[kind];
   return `if ${project}; then ${compose}; else ${single}; fi 2>&1`;
 }
+
+// The settings a deploy may hand an app besides Mynt's own (the key placeholder and addresses), by name.
+export const HOSTED_SETTINGS = ["MYNT_VENDOR_SIGNING_SECRET"];
 
 // The container an app runs in on its VM.
 export const containerName = (appId: string) => `mynt-app-${appId.slice(0, 8)}`;
@@ -751,7 +755,15 @@ export class HostingService {
   }
 
   // Builds and runs the verified commit on the VM; secrets travel as the job's environment, never its text.
-  private async deployDirect(p: DirectHostingProvider, tenant: Tenant, hosted: HostedApp, appKey: string, sandbox: boolean, plan: { composeFile: string | null; check: ComposeCheck | null }) {
+  private async deployDirect(
+    p: DirectHostingProvider,
+    tenant: Tenant,
+    hosted: HostedApp,
+    appKey: string,
+    sandbox: boolean,
+    plan: { composeFile: string | null; check: ComposeCheck | null },
+    settings: Record<string, string> = {},
+  ) {
     const fail = (message: string) =>
       this.db.query("UPDATE financial_products.hosted_apps SET status = 'stopped', error = $2, updated_at = now() WHERE app_id = $1", [hosted.app_id, message.slice(0, 1000)]);
     try {
@@ -774,8 +786,10 @@ export class HostingService {
         MYNT_BASE_URL: `${origin}/v1`,
         MYNT_API_BASE: `${origin}/v1`,
         MYNT_API_ORIGIN: origin,
+        // The app's own hosted settings (its vendor signing secret): in the job's environment like the rest, never its text.
+        ...settings,
       });
-      if (r.exitCode !== 0) return void (await fail(boxOutput(r.output, [appKey, token ?? ""]).slice(-1000) || "The build was killed by its time limit"));
+      if (r.exitCode !== 0) return void (await fail(boxOutput(r.output, [appKey, token ?? "", ...Object.values(settings)]).slice(-1000) || "The build was killed by its time limit"));
       for (const x of services.length ? services : [{ port: hosted.port, domain: this.appDomain(hosted.app_id) }]) if (x.domain) await p.setRoute(vmId, x.domain, x.port);
       await this.db.query("UPDATE financial_products.hosted_apps SET status = 'running', error = NULL, updated_at = now() WHERE app_id = $1 AND commit_sha = $2", [hosted.app_id, hosted.commit_sha]);
     } catch (e) {
@@ -859,7 +873,11 @@ export class HostingService {
     egress: string[] = [],
     plan: { composeFile: string | null; check: ComposeCheck | null } = { composeFile: null, check: null },
     deployedBy: string | null = null,
+    // Hosted settings only Mynt may hand the app (HOSTED_SETTINGS): today its vendor signing secret.
+    settings: Record<string, string> = {},
   ): Promise<HostedApp> {
+    const unknown = Object.keys(settings).filter((k) => !HOSTED_SETTINGS.includes(k));
+    if (unknown.length) throw new Error(`Not a hosted setting: ${unknown.join(", ")}`);
     if (plan.check?.errors.length) throw new Error(`The compose file isn't accepted: ${plan.check.errors.join("; ")}`);
     if (plan.composeFile && !isDirect(this.provider)) throw new Error("Compose apps need direct hosting (Freestyle)");
     const ports = (await this.hostedApps(tenant.id)).filter((h) => h.app_id !== app.id).flatMap((h) => [h.port, ...(h.services ?? []).map((x) => x.port)]);
@@ -886,7 +904,7 @@ export class HostingService {
         [app.id, JSON.stringify(egress), plan.composeFile, services.length ? JSON.stringify(services) : null],
       ))!,
     );
-    if (isDirect(this.provider)) this.pending = this.deployDirect(this.provider, tenant, hosted, appKey, sandbox, plan);
+    if (isDirect(this.provider)) this.pending = this.deployDirect(this.provider, tenant, hosted, appKey, sandbox, plan, settings);
     return hosted;
   }
 

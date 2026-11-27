@@ -20,10 +20,13 @@ import { NotAvailableYet } from "@/components/not-available"
 import { conformanceWords, csvOf, dateOf, onboardingWords, words, type AdminOffering, type ServiceTypeRow, type VendorFirmRow } from "@/lib/admin"
 import { categoryLabel } from "@/lib/marketplace"
 import { SERVICE_CATEGORIES } from "@/lib/studio-tools"
+import { TypeRequestsTable } from "@/components/build-type"
+import { keyFromName, schemaFromExample, type ServiceTypeRequest } from "@/lib/services"
 
-type View = "types" | "offerings" | "firms"
+type View = "types" | "offerings" | "firms" | "requests"
 // firms: each vendor firm's onboarding progress; null on a Mynt without get_vendor_onboarding.
-export type VendorsData = { serviceTypes: ServiceTypeRow[]; offerings: AdminOffering[]; firms?: VendorFirmRow[] | null }
+// requests: the service types builders asked Mynt to define; absent on a Mynt without requests.
+export type VendorsData = { serviceTypes: ServiceTypeRow[]; offerings: AdminOffering[]; firms?: VendorFirmRow[] | null; requests?: ServiceTypeRequest[] | null }
 const list = (s: string) => s.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean)
 const EMPTY_SCHEMA = '{\n  "type": "object",\n  "properties": {}\n}'
 
@@ -37,19 +40,48 @@ export function schemaOf(text: string): { ok: true; value: Record<string, unknow
   }
 }
 
-export function AddServiceTypeSheet({ open, onClose, onDone, fetcher }: { open: boolean; onClose: () => void; onDone: () => void; fetcher?: typeof fetch }) {
+const BLANK_TYPE = { region: "US", key: "", name: "", category: "identity", description: "", consent: "", fills: "", innovatorLicences: "", vendorLicences: "", movesMoney: false, input: EMPTY_SCHEMA, output: EMPTY_SCHEMA }
+/** Define from request: the form filled from what was asked for (its name, region and what it does, a key from the
+ * name, and the least a schema can say about each example), for the admin to edit before adding. */
+export const typeFormFromRequest = (r: ServiceTypeRequest): typeof BLANK_TYPE => ({
+  ...BLANK_TYPE,
+  region: r.region,
+  key: keyFromName(r.name),
+  name: r.name,
+  category: "other",
+  description: r.whatItDoes,
+  input: JSON.stringify(schemaFromExample(r.exampleInput), null, 2),
+  output: JSON.stringify(schemaFromExample(r.exampleOutput), null, 2),
+})
+
+// `from`: the request this service type answers (Define from request). It is sent with the new type, so Mynt marks the
+// request defined.
+export function AddServiceTypeSheet({ open, onClose, onDone, fetcher, from = null }: { open: boolean; onClose: () => void; onDone: () => void; fetcher?: typeof fetch; from?: ServiceTypeRequest | null }) {
   const { busy, error, result, run, reset } = useAdminAction(fetcher)
-  const [f, setF] = useState({ region: "US", key: "", name: "", category: "identity", description: "", consent: "", fills: "", innovatorLicences: "", vendorLicences: "", movesMoney: false, input: EMPTY_SCHEMA, output: EMPTY_SCHEMA })
+  const [f, setF] = useState(() => (from ? typeFormFromRequest(from) : BLANK_TYPE))
   const [invalid, setInvalid] = useState<string | null>(null)
   useEffect(() => {
     if (open) {
       reset()
       setInvalid(null)
+      if (from) setF(typeFormFromRequest(from))
     }
-  }, [open, reset])
+  }, [open, reset, from])
   const set = (patch: Partial<typeof f>) => setF((x) => ({ ...x, ...patch }))
   return (
-    <AdminSheet id="add-service-type" open={open} onClose={onClose} title="Add service type" description="A new standard service vendors can offer in a region: the contract every vendor implements, and the consent it needs." error={invalid ?? error} result={result}>
+    <AdminSheet
+      id="add-service-type"
+      open={open}
+      onClose={onClose}
+      title={from ? "Define from request" : "Add service type"}
+      description={
+        from
+          ? `${from.requestedBy ?? "A builder"}${from.firm ? ` at ${from.firm}` : ""} asked for this. The schemas below are the least their examples say: edit them into the contract every vendor implements.`
+          : "A new standard service vendors can offer in a region: the contract every vendor implements, and the consent it needs."
+      }
+      error={invalid ?? error}
+      result={result}
+    >
       <form
         className="flex flex-col gap-3"
         data-service-type-form
@@ -75,6 +107,7 @@ export function AddServiceTypeSheet({ open, onClose, onDone, fetcher }: { open: 
               vendor_licences: list(f.vendorLicences),
               moves_money: f.movesMoney,
             },
+            ...(from ? { from_request: from.id } : {}),
           })
           if (r?.ok) onDone()
         }}
@@ -183,6 +216,157 @@ export function SuspendOfferingSheet({ offering, onClose, onDone, fetcher }: { o
   )
 }
 
+// ---- Requested service types ----
+
+export function DeclineRequestSheet({ request, onClose, onDone, fetcher }: { request: ServiceTypeRequest | null; onClose: () => void; onDone: () => void; fetcher?: typeof fetch }) {
+  const { busy, error, result, run, reset } = useAdminAction(fetcher)
+  const [reason, setReason] = useState("")
+  useEffect(() => {
+    reset()
+    setReason("")
+  }, [request, reset])
+  return (
+    <AdminSheet id="decline-type-request" open={request !== null} onClose={onClose} title="Decline request" description="The requester reads your reason. To accept it instead, define the service type from the request." error={error} result={result}>
+      {request && (
+        <form
+          className="flex flex-col gap-3"
+          data-decline-request-form
+          onSubmit={async (e) => {
+            e.preventDefault()
+            const r = await run(`/api/admin/vendors/requests/${encodeURIComponent(request.id)}`, { reason: reason.trim() })
+            if (r?.ok) onDone()
+          }}
+        >
+          <p className="text-sm">
+            {request.name} ({request.region}), asked for by {request.requestedBy ?? "a builder"}
+            {request.firm ? ` at ${request.firm}` : ""}
+          </p>
+          <Field label="Reason">
+            <textarea className={`${fieldClass} min-h-20`} value={reason} onChange={(e) => setReason(e.target.value)} maxLength={1000} required data-decline-reason />
+          </Field>
+          <div>
+            <Button type="submit" variant="destructive" disabled={busy || reason.trim().length < 3 || result !== null} data-decline-request-submit>
+              {busy ? "Saving…" : "Decline request"}
+            </Button>
+          </div>
+        </form>
+      )}
+    </AdminSheet>
+  )
+}
+
+/** One request, opened from its row: what it does and its examples, with its two labelled actions while it waits. */
+export function RequestSheet({ request, onClose, onDefine, onDecline }: { request: ServiceTypeRequest | null; onClose: () => void; onDefine: (r: ServiceTypeRequest) => void; onDecline: (r: ServiceTypeRequest) => void }) {
+  return (
+    <AdminSheet id="type-request" open={request !== null} onClose={onClose} title={request?.name ?? "Request"} description="A standard service type a builder asked Mynt to define.">
+      {request && (
+        <div className="flex flex-col gap-3 text-sm" data-type-request={request.id}>
+          <dl className="grid grid-cols-2 gap-x-6 gap-y-2">
+            {(
+              [
+                ["Region", request.region],
+                ["Status", request.statusWords],
+                ["Requested by", request.requestedBy ?? "Not known"],
+                ["Firm", request.firm ?? "No firm"],
+                ["Requested", dateOf(request.requestedAt)],
+                ...(request.status === "defined" ? [["Defined as", request.serviceTypeKey ?? "Not recorded"]] : []),
+                ...(request.status === "declined" ? [["Reason", request.decisionNote ?? "Not recorded"]] : []),
+              ] as [string, string][]
+            ).map(([label, value]) => (
+              <div key={label} className="flex min-w-0 flex-col">
+                <dt className="text-xs text-muted-foreground">{label}</dt>
+                <dd className="break-words">{value}</dd>
+              </div>
+            ))}
+          </dl>
+          <div>
+            <h3 className="text-xs text-muted-foreground">What it does</h3>
+            <p className="whitespace-pre-wrap" data-request-what>
+              {request.whatItDoes || "Not said"}
+            </p>
+          </div>
+          <div>
+            <h3 className="text-xs text-muted-foreground">Example input</h3>
+            <pre className="overflow-x-auto rounded-md border bg-muted/40 p-2 text-xs" data-request-example="input">
+              {JSON.stringify(request.exampleInput, null, 2)}
+            </pre>
+          </div>
+          <div>
+            <h3 className="text-xs text-muted-foreground">Example output</h3>
+            <pre className="overflow-x-auto rounded-md border bg-muted/40 p-2 text-xs" data-request-example="output">
+              {JSON.stringify(request.exampleOutput, null, 2)}
+            </pre>
+          </div>
+          {request.status === "requested" && (
+            <div className="flex flex-wrap gap-2" data-request-actions>
+              <Button onClick={() => onDefine(request)} data-define-from-request>
+                <Plus />
+                Define from request
+              </Button>
+              <Button variant="outline" onClick={() => onDecline(request)} data-decline-request>
+                <Ban />
+                Decline
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+    </AdminSheet>
+  )
+}
+
+export function RequestedTypes({ requests, onChanged = () => undefined, fetcher }: { requests: ServiceTypeRequest[]; onChanged?: () => void; fetcher?: typeof fetch }) {
+  const [query, setQuery] = useState("")
+  const [status, setStatus] = useState<string[]>([])
+  const [open, setOpen] = useState<ServiceTypeRequest | null>(null)
+  const [defining, setDefining] = useState<ServiceTypeRequest | null>(null)
+  const [declining, setDeclining] = useState<ServiceTypeRequest | null>(null)
+  const [dirty, setDirty] = useState(false)
+  const rows = useMemo(() => requests.filter((r) => matches(query, r.name, r.region, r.firm, r.requestedBy, r.statusWords, r.whatItDoes) && (!status.length || status.includes(r.status))), [requests, query, status])
+  const paged = usePaged(rows)
+  const close = () => {
+    setDefining(null)
+    setDeclining(null)
+    if (dirty) onChanged()
+    setDirty(false)
+  }
+  return (
+    <>
+      <AdminList
+        id="type-requests"
+        search={query}
+        onSearch={setQuery}
+        searchLabel="Search requests by name, region, firm or who asked"
+        facets={[{ id: "status", label: "Status", options: [{ value: "requested", label: "Waiting for Mynt" }, { value: "defined", label: "Defined" }, { value: "declined", label: "Declined" }], selected: status, onChange: (v: string[]) => setStatus(v) }]}
+        onClearFilters={() => setStatus([])}
+        onExport={() => downloadCsv("requested-service-types.csv", csvOf(["Requested", "Name", "Region", "Firm", "Requested by", "Status"], rows.map((r) => [dateOf(r.requestedAt), r.name, r.region, r.firm ?? "", r.requestedBy ?? "", r.statusWords])))}
+        exportDisabled={!rows.length}
+        importable={false}
+        page={paged.page}
+        pages={paged.pages}
+        total={rows.length}
+        onPage={paged.setPage}
+      >
+        {requests.length && !rows.length ? <AdminTable head={["Requested", "Name", "Region", "Firm", "Requested by", "Status"]} rows={[]} empty="No requests match these filters." /> : <TypeRequestsTable admin requests={paged.shown} onOpen={setOpen} />}
+      </AdminList>
+      <RequestSheet
+        request={open}
+        onClose={() => setOpen(null)}
+        onDefine={(r) => {
+          setOpen(null)
+          setDefining(r)
+        }}
+        onDecline={(r) => {
+          setOpen(null)
+          setDeclining(r)
+        }}
+      />
+      <AddServiceTypeSheet open={defining !== null} from={defining} onClose={close} onDone={() => setDirty(true)} fetcher={fetcher} />
+      <DeclineRequestSheet request={declining} onClose={close} onDone={() => setDirty(true)} fetcher={fetcher} />
+    </>
+  )
+}
+
 export function OfferingStatus({ status }: { status: string }) {
   return <StatusDot tone={status === "listed" ? "green" : status === "suspended" ? "red" : "gray"} label={words(status)} data-offering-status={status} />
 }
@@ -235,8 +419,17 @@ export function VendorsView({ data, initialView = "types", onChanged = () => und
         <Tab selected={view === "firms"} onClick={() => setView("firms")} data-vendors-view="firms">
           Vendor firms
         </Tab>
+        <Tab selected={view === "requests"} onClick={() => setView("requests")} data-vendors-view="requests">
+          Requested service types
+        </Tab>
       </TabList>
-      {view === "firms" && data.firms === null ? (
+      {view === "requests" ? (
+        data.requests ? (
+          <RequestedTypes requests={data.requests} onChanged={onChanged} />
+        ) : (
+          <NotAvailableYet what="Requested service types" />
+        )
+      ) : view === "firms" && data.firms === null ? (
         <NotAvailableYet what="Vendor firms' onboarding" />
       ) : (
       <AdminList
@@ -331,7 +524,7 @@ const nextWords = (f: VendorFirmRow) => (f.next ? `${f.next.title}${f.next.waiti
 export function VendorsTab() {
   const pick = useCallback(
     (b: Record<string, unknown>) =>
-      Array.isArray(b.serviceTypes) && Array.isArray(b.offerings) ? ({ serviceTypes: b.serviceTypes, offerings: b.offerings, firms: Array.isArray(b.firms) ? b.firms : null } as VendorsData) : undefined,
+      Array.isArray(b.serviceTypes) && Array.isArray(b.offerings) ? ({ serviceTypes: b.serviceTypes, offerings: b.offerings, firms: Array.isArray(b.firms) ? b.firms : null, ...(Array.isArray(b.requests) ? { requests: b.requests } : {}) } as VendorsData) : undefined,
     [],
   )
   const { state, reload } = useAdminData("/api/admin/vendors", pick)

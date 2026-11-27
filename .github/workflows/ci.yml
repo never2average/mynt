@@ -677,6 +677,20 @@ jobs:
             done
             rm -rf "kind-$k"
           done
+      - name: A service scaffolds from a real contract, its signature and schema tests pass, and Mynt's conformance cases pass against it
+        # templates/mynt-service with the contract of a shipped service type (get_service_type_contract): the template's
+        # own tests, then the service started and tested the way Mynt tests a hosted one (signed, no key).
+        run: |
+          node test/fixtures/generate-service-contract.mjs service-contract.json
+          python3 workspaces/coding-build/scripts/scaffold_app.py service-starter --service service-contract.json
+          (cd service-starter && npm install --no-audit --no-fund && npm run build && npm test)
+          export MYNT_VENDOR_SIGNING_SECRET="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64url"))')"
+          (cd service-starter/api && PORT=38471 node dist/server.js) &
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:38471/api/healthz >/dev/null 2>&1 && break; sleep 0.5; done
+          node test/fixtures/service-conformance.mjs http://127.0.0.1:38471 service-contract.json
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -d '{}' http://127.0.0.1:38471/mynt/services/identity_verification)" = 401
+          kill %1
+          rm -rf service-starter service-contract.json
       - name: The live preview starts (dev_preview.sh) and serves the app and its api, on any host name
         env:
           MYNT_SANDBOX_KEY: mynt_test_ci

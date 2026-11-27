@@ -34,7 +34,10 @@ export function useSearchSources(open: boolean): SearchSources {
     let live = true;
     const ws = encodeURIComponent(selected.id);
     const set = (patch: SearchSources) => live && setSources((s) => ({ ...s, ...patch }));
-    void pick(withWorkspace('/api/projects', selected), (b) => b.projects as SearchSources['apps']).then((apps) => set({ apps: apps ?? [] }));
+    // The workspace's apps, and its services (listed apart by the same route: a service is never an app).
+    void pick(withWorkspace('/api/projects', selected), (b) => ({ apps: b.projects as SearchSources['apps'], services: b.services as SearchSources['services'] })).then((found) =>
+      set({ apps: found?.apps ?? [], services: found?.services ?? [] })
+    );
     // The user's own financial products: each opens its workspace.
     void pick('/api/products?mine=1', (b) => myProductsFrom(b.mine)).then((products) => set({ products: products ?? [] }));
     if (!selected.implicit)

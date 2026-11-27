@@ -55,6 +55,40 @@ test("the starter app is one Compose project: api holds the key, web and mobile 
   assert.ok(files["scripts/scaffold_app.py"]);
 });
 
+test("the service starter answers Mynt's signed requests and nothing else: no app key, no SDK, the secret only from its environment", () => {
+  const t = (p) => files[`templates/mynt-service/${p}`];
+  for (const p of ["compose.yaml", ".env.example", "api/src/server.ts", "api/src/vendor-service.ts", "api/src/handle-service.ts", "api/src/vendor-service.test.ts", "api/contract/service-contract.json", "api/Dockerfile", "web/index.html", "web/Caddyfile", "web/Dockerfile"])
+    assert.ok(t(p), p);
+  const compose = t("compose.yaml");
+  for (const service of ["api", "web"]) assert.match(compose, new RegExp(`\\n  ${service}:\\n`));
+  assert.match(compose, /read_only: true/);
+  assert.match(compose, /cap_drop: \["ALL"\]/);
+  assert.doesNotMatch(compose, /privileged|network_mode: host|\/var\/run\/docker\.sock/);
+  // The signing secret comes from the environment Mynt's hosting sets, with no value anywhere in the template.
+  assert.match(compose, /MYNT_VENDOR_SIGNING_SECRET: \$\{MYNT_VENDOR_SIGNING_SECRET:-\}/);
+  assert.match(t("api/src/server.ts"), /process\.env\.MYNT_VENDOR_SIGNING_SECRET/);
+  for (const [p, text] of Object.entries(files).filter(([p]) => p.startsWith("templates/mynt-service/"))) {
+    assert.doesNotMatch(text, /mvs_[A-Za-z0-9_-]{20,}|whsec_[A-Za-z0-9]{8,}/, `${p} holds no secret`);
+    // No app key and no call to Mynt: a service is authenticated by Mynt-Signature alone and forwards nothing.
+    if (!p.endsWith(".md") && !p.endsWith(".test.ts")) assert.doesNotMatch(text, /MYNT_API_KEY|mynt-sdk|MYNT_API_ORIGIN|x-mynt-app-key/i, `${p} never holds or asks for an app key`);
+  }
+  const service = t("api/src/vendor-service.ts");
+  assert.match(service, /timingSafeEqual/, "the signature is compared in constant time");
+  assert.match(service, /TOLERANCE_SECONDS = 300/);
+  assert.match(service, /if \(!secret\) return false/, "no secret set: everything is refused");
+  assert.ok(service.indexOf("verifySignature(signature, raw") < service.indexOf("JSON.parse(raw"), "the signature is verified over the raw body before it is parsed");
+  assert.match(service, /validInput\(body\.input\)[\s\S]*o\.handle\([\s\S]*validOutput\(output\)/, "input checked, then the service, then the output checked");
+  assert.match(t("api/src/server.ts"), /\/mynt\/services\//);
+  // The web server forwards Mynt's requests to the api and nothing to Mynt.
+  assert.match(t("web/Caddyfile"), /handle \/mynt\/services\/\* \{\s+reverse_proxy api:3000/);
+  assert.doesNotMatch(t("web/Caddyfile"), /v1\/client|MYNT_/);
+  assert.match(t("api/src/handle-service.ts"), /THE ONE FUNCTION TO WRITE/);
+  const contract = JSON.parse(t("api/contract/service-contract.json"));
+  assert.equal(contract.endpoint.app_path, `/mynt/services/${contract.service_type.key}`);
+  assert.match(files["scripts/scaffold_app.py"], /--service/);
+  assert.match(files["CLAUDE.md"], /## Services \(when `job\/build\.json` has `service`\)/);
+});
+
 test("native mobile starters (Kotlin, Swift, Flutter) run a journey on a client session, never an app key", () => {
   const starters = {
     kotlin: ["README.md", "settings.gradle.kts", "app/build.gradle.kts", "app/src/main/AndroidManifest.xml", "app/src/main/kotlin/app/mynt/starter/MainActivity.kt"],

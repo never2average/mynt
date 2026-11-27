@@ -137,7 +137,8 @@ export function appsFrom(reply: unknown): MarketplaceApp[] {
     .filter(isObj)
     .flatMap((a): MarketplaceApp[] => {
       const id = str(a.id);
-      if (!id) return [];
+      // A service built on Mynt (kind "service") is never an app a subscription is for.
+      if (!id || a.kind === "service") return [];
       return [{ id, name: str(a.name) ?? "Untitled app", productIds: arr(a.product_ids).map(str).filter((p): p is string => Boolean(p)).slice(0, 20), canManage: null }];
     });
 }

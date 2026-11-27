@@ -12,7 +12,9 @@
 // product opens its own workspace (/products/<id>: its chat and its tabs). The item on screen is marked active.
 import Link from "next/link"
 import { useEffect, useState } from "react"
-import { AppWindow, ChevronRight, FlaskConical, Landmark, Lightbulb, Rocket, type LucideIcon } from "lucide-react"
+import { AppWindow, ChevronRight, FlaskConical, Landmark, Lightbulb, Rocket, ServerCog, type LucideIcon } from "lucide-react"
+
+import { serviceHref } from "@/lib/services"
 
 import {
   Collapsible,
@@ -33,8 +35,12 @@ import {
 import { APP_STATUS, appHref, productHref, THREAD_KIND_LABELS } from "@/lib/threads"
 import { STAGE_LABELS, STAGES, type StagedApp, type Stage } from "@/lib/workspaces"
 
-// Every item says what it is: an app or a financial product.
-const KIND_ICONS: Record<"app" | "product", LucideIcon> = { app: AppWindow, product: Landmark }
+// Every item says what it is: an app, a financial product or a service (a vendor service built on Mynt, which goes
+// through the same stages and opens its own workspace, /services/<id>: never an app's).
+type Kind = NonNullable<StagedApp["kind"]>
+const KIND_ICONS: Record<Kind, LucideIcon> = { app: AppWindow, product: Landmark, service: ServerCog }
+export const KIND_LABELS: Record<Kind, string> = { ...THREAD_KIND_LABELS, service: "Service" }
+const hrefOf = (item: StagedApp) => (item.kind === "product" ? productHref(item.id) : item.kind === "service" ? serviceHref(item.id, item.conversationId) : appHref(item.id, item.conversationId))
 export const FOLDERS_LABEL = "Apps and products"
 
 // Each folder its own icon, expanded and collapsed (where the icon is all that shows, with the
@@ -61,32 +67,37 @@ function remember(stage: Stage) {
 }
 
 // The stage of the app or product on screen, if it's in the folders.
-function stageOf(groups: Record<Stage, StagedApp[]> | null, activeAppId: string | undefined, activeProductId: string | undefined): Stage | undefined {
+const isActiveItem = (a: StagedApp, activeAppId: string | undefined, activeProductId: string | undefined, activeServiceId: string | undefined) => {
+  const active = a.kind === "product" ? activeProductId : a.kind === "service" ? activeServiceId : activeAppId
+  return Boolean(active) && a.id === active
+}
+function stageOf(groups: Record<Stage, StagedApp[]> | null, activeAppId: string | undefined, activeProductId: string | undefined, activeServiceId?: string): Stage | undefined {
   if (!groups) return undefined
-  const isActive = (a: StagedApp) => ((a.kind ?? "app") === "app" ? Boolean(activeAppId) && a.id === activeAppId : Boolean(activeProductId) && a.id === activeProductId)
-  return STAGES.find((s) => groups[s].some(isActive))
+  return STAGES.find((s) => groups[s].some((a) => isActiveItem(a, activeAppId, activeProductId, activeServiceId)))
 }
 
-/** The folder to open: the open app's (or product's) stage, else the one remembered, else Production. */
-export function initialFolder(groups: Record<Stage, StagedApp[]> | null, activeAppId: string | undefined, saved: Stage | null, activeProductId?: string): Stage {
-  return stageOf(groups, activeAppId, activeProductId) ?? saved ?? "production"
+/** The folder to open: the open app's (or product's, or service's) stage, else the one remembered, else Production. */
+export function initialFolder(groups: Record<Stage, StagedApp[]> | null, activeAppId: string | undefined, saved: Stage | null, activeProductId?: string, activeServiceId?: string): Stage {
+  return stageOf(groups, activeAppId, activeProductId, activeServiceId) ?? saved ?? "production"
 }
 
 export function NavFolders({
   groups,
   activeAppId,
   activeProductId,
+  activeServiceId,
 }: {
   groups: Record<Stage, StagedApp[]> | null // null while loading
   activeAppId?: string
   activeProductId?: string // the product whose workspace is open (/products/<id>)
+  activeServiceId?: string // the service whose workspace is open (/services/<id>)
 }) {
   const { state, setOpen } = useSidebar()
   const collapsed = state === "collapsed"
-  const [active, setActive] = useState<Stage>(() => initialFolder(groups, activeAppId, null, activeProductId))
+  const [active, setActive] = useState<Stage>(() => initialFolder(groups, activeAppId, null, activeProductId, activeServiceId))
 
   // After mounting (localStorage is the browser's), and whenever another app or product is opened: its stage.
-  const appStage = stageOf(groups, activeAppId, activeProductId)
+  const appStage = stageOf(groups, activeAppId, activeProductId, activeServiceId)
   useEffect(() => {
     setActive((current) => appStage ?? remembered() ?? current)
   }, [appStage])
@@ -142,12 +153,12 @@ export function NavFolders({
                     {apps.map((item) => {
                       const kind = item.kind ?? "app"
                       const Icon = KIND_ICONS[kind]
-                      const label = THREAD_KIND_LABELS[kind]
+                      const label = KIND_LABELS[kind]
                       return (
                         <SidebarMenuSubItem key={`${kind}:${item.id}`}>
-                          <SidebarMenuSubButton asChild isActive={kind === "app" ? item.id === activeAppId : item.id === activeProductId}>
+                          <SidebarMenuSubButton asChild isActive={isActiveItem({ ...item, kind }, activeAppId, activeProductId, activeServiceId)}>
                             <Link
-                              href={kind === "app" ? appHref(item.id, item.conversationId) : productHref(item.id)}
+                              href={hrefOf({ ...item, kind })}
                               aria-label={`${label}: ${item.name}`}
                               title={`${label} · ${APP_STATUS[stage]}`}
                               data-thread-item={`${kind}:${item.id}`}

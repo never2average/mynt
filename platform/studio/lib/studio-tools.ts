@@ -98,6 +98,10 @@ export const standardTerms = z
     scopes: agreementScopes,
   })
   .strict();
+// A requested service type's example input or output: one small JSON object (Mynt keeps each under 8 KB).
+const exampleObject = z.record(z.string(), z.unknown()).refine((v) => JSON.stringify(v).length <= 8000, "Keep each example under 8 KB");
+const serviceTypeKey = z.string().regex(/^[a-z][a-z0-9_]{0,59}$/);
+const regionCode = z.string().regex(/^[A-Z]{2}$/);
 
 export const STUDIO_TOOLS = {
   // apps and catalogue
@@ -324,6 +328,38 @@ export const STUDIO_TOOLS = {
   // Run practice test: Mynt's test cases against Mynt's own sandbox for the service. A practice pass never counts as
   // conformance, never changes the service's status and never lets it be listed. It takes the service and nothing else.
   run_practice_conformance: z.object({ offering_id: uuid }).strict(),
+  // Services: the third kind of thing built on Mynt, beside apps and financial products. A service is a vendor service
+  // its firm builds, verifies and hosts like an app (its id is an app id for builds, hosting and stages) with one vendor
+  // offering made with it. Build's Service type creates one (create_service: the vendor role; its endpoint is Mynt's,
+  // never typed), /services/<id> reads it whole (get_service) and archives or restores it (archive_service), the
+  // sidebar and search list them (list_my_services), and anyone may ask Mynt's admins for a service type that doesn't
+  // exist yet (request_service_type: one example input and output, JSON objects) and see where their requests stand.
+  create_service: z
+    .object({
+      workspace_id: workspaceId.optional(),
+      name: z.string().trim().min(1).max(200),
+      description: z.string().trim().min(1).max(4000),
+      service_type: serviceTypeKey,
+      region: regionCode,
+      price: z.object({ amount: z.number().min(0).max(1_000_000), currency: z.string().regex(/^[A-Z]{3}$/) }).strict().optional(),
+      sla_notes: z.string().trim().max(2000).optional(),
+      licence_ids: z.array(z.string().uuid()).max(10).optional(),
+    })
+    .strict(),
+  get_service: z.object({ service_id: id, days: z.number().int().min(1).max(90).optional() }).strict(),
+  list_my_services: z.object({ workspace_id: workspaceId.optional() }).strict(),
+  archive_service: z.object({ service_id: id, archived: z.boolean(), reason: z.string().trim().max(500).optional() }).strict(),
+  get_service_type_contract: z.object({ key: serviceTypeKey, region: regionCode }).strict(),
+  request_service_type: z
+    .object({
+      name: z.string().trim().min(3).max(120),
+      what_it_does: z.string().trim().min(10).max(2000),
+      example_input: exampleObject,
+      example_output: exampleObject,
+      region: regionCode.optional(),
+    })
+    .strict(),
+  list_service_type_requests: z.object({ status: z.enum(["requested", "defined", "declined"]).optional() }).strict(),
   get_app_customers: z.object({ app_id: id }).strict(),
   set_app_target_segments: z.object({ app_id: id, segments: z.array(z.object({ product_id: id, segment_id: id }).strict()).max(100) }).strict(),
   // Risk registers: an app's (its Security & risk tab) and a financial product's (its Risk tab). Add risk and
@@ -875,8 +911,13 @@ export const ADMIN_TOOLS = {
           moves_money: z.boolean(),
         })
         .strict(),
+      // Define from request: the request this service type answers (list_service_type_requests), marked defined with it.
+      from_request: uuid.optional(),
     })
     .strict(),
+  // Requested service types: declining one, with the reason its requester reads. (Reading them is the studio's own
+  // list_service_type_requests, which answers an admin with everyone's.)
+  decline_service_type_request: z.object({ request_id: uuid, reason: z.string().trim().min(3).max(1000) }).strict(),
   list_vendor_offerings: z.object({ include_unlisted: z.literal(true) }).strict(),
   suspend_vendor_offering: z.object({ offering_id: uuid, suspended: z.boolean(), note: z.string().trim().max(500).optional() }).strict(),
   // Vendor firms: each firm's onboarding progress (the Vendors section's Vendor firms tab), reading only.

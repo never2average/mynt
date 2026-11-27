@@ -10,6 +10,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 const pushed: string[] = [];
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: (p: string) => void pushed.push(p) }) }));
 
+import { pickType } from "./build-type-helper";
+
 const { default: NewAppPage } = await import("@/app/(studio)/new/page");
 const { chipText } = await import("@/lib/new-app");
 const { newAppCommands, pickerLabel } = await import("@/components/new-app-workspace");
@@ -76,6 +78,9 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  // The Type picked is remembered per browser and kept in the address: each test starts without either.
+  window.localStorage.clear();
+  window.history.replaceState(null, "", "/");
   vi.unstubAllGlobals();
 });
 
@@ -160,7 +165,7 @@ describe("the New app page", () => {
     await loaded();
     expect(chipIds().every((id) => IDEAS.some((e) => e.id === id))).toBe(true);
     expect(document.querySelector("[data-product-chip]")).toBeNull();
-    await act(async () => void fireEvent.click(document.querySelector('[data-mode-option="product"]')!));
+    await pickType("product");
     await act(async () => {
       await new Promise((r) => setTimeout(r, 20));
     });
