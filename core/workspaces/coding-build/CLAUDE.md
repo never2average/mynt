@@ -138,7 +138,7 @@ The developer works with you one request at a time, as in a chat, and you keep y
 1. **Plan and code** (phase `coding`).
    - If `build.repository` is set, clone it into `~/workspace/app` and create `build.branch`. Authenticate git
      with `$GITHUB_TOKEN` through a credential helper, never in the URL.
-   - If `build.base` is set, this build continues an earlier one: create `build.branch` from `build.base.branch`
+   - If `build.base.branch` is set, this build continues an earlier one: create `build.branch` from that branch
      (at `build.base.commit_sha` when it's set), not from the default branch. That earlier work is the starting
      point; build on it. If that branch isn't there, stop and say so in `job/result.json`'s `notes`.
    - If `build.base.source` is set instead of a branch, the earlier build didn't ship (Mynt's verification blocked
