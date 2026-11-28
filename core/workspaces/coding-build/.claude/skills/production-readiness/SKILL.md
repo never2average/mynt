@@ -5,16 +5,17 @@ description: The production-readiness checklist every Mynt build must pass befor
 
 # Production readiness
 
-Each item passes or fails. Mynt re-runs the checks it can (tests, secrets scan, dependency audit, SBOM,
-disclosures) in a clean sandbox, so make them pass for real.
+Each item passes or fails. Mynt re-runs the checks it can (tests, secrets scan, dependency audit, SBOM, image
+scan, disclosures) in a clean sandbox, so make them pass for real.
 
 | Item | Passes when |
 |---|---|
 | `tests` | All tests pass. |
 | `lint_typecheck` | The linter and type checker report no errors. |
 | `secrets_scan` | There are no secrets in the tree or the git history. |
-| `dependency_audit` | There are no high or critical advisories in production dependencies. |
+| `dependency_audit` | There are no high or critical advisories in production dependencies: `npm run audit` passes, with the lockfile committed. |
 | `sbom` | A CycloneDX SBOM is generated and committed (e.g. `sbom.cdx.json`). |
+| `image_scan` | Every image the Compose file starts builds from a clean checkout, from base images pinned by digest, and has no high or critical vulnerability that a newer base image or package would fix. |
 | `disclosures` | Every required disclosure appears verbatim wherever its product does. |
 | `permitted_actions` | Only the actions each product's build terms permit are used. |
 | `no_financial_data` | The app collects no money, KYC or financial data. |

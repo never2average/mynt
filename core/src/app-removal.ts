@@ -55,6 +55,8 @@ export const APP_REMOVAL_STEPS: { table: string; where: string; list?: string }[
   { table: "solana_program_artifacts", where: `t.build_id IN ${BUILDS}` },
   { table: "build_activity", where: `t.build_id IN ${BUILDS}` },
   { table: "build_events", where: `t.build_id IN ${BUILDS}` },
+  // The source Mynt kept of a build that didn't ship (build-sources.ts).
+  { table: "build_sources", where: `t.build_id IN ${BUILDS}` },
   // What each build's agents spent on models (the meter's run key).
   { table: "agent_spend", where: `t.run_key IN (SELECT 'build:' || id::text FROM ${T}.build_runs WHERE app_id = $1)` },
   { table: "build_runs", where: "t.app_id = $1", list: "id" },

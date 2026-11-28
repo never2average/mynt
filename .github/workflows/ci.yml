@@ -669,6 +669,10 @@ jobs:
           npm run typecheck -w api
           npm run build -w web
           npm run typecheck -w mobile
+      - name: The starter passes its dependency gate (the command Mynt's verification runs on every build)
+        # npm audit --omit=dev --audit-level=high over api, web and mobile, on the lockfile the install just wrote.
+        working-directory: core/starter
+        run: npm run audit
       - name: Every app kind scaffolds, and its api, web and mobile compile
         # Each kind (templates/kinds/<kind>.json) on the starter's installed dependencies and built SDKs.
         run: |
@@ -690,13 +694,15 @@ jobs:
         run: |
           node test/fixtures/generate-service-contract.mjs service-contract.json
           python3 workspaces/coding-build/scripts/scaffold_app.py service-starter --service service-contract.json
-          (cd service-starter && npm install --no-audit --no-fund && npm run build && npm test)
+          (cd service-starter && npm install --no-audit --no-fund && npm run build && npm test && npm run audit)
           export MYNT_VENDOR_SIGNING_SECRET="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64url"))')"
           (cd service-starter/api && PORT=38471 node dist/server.js) &
           for i in $(seq 1 20); do curl -fsS http://127.0.0.1:38471/api/healthz >/dev/null 2>&1 && break; sleep 0.5; done
           node test/fixtures/service-conformance.mjs http://127.0.0.1:38471 service-contract.json
           test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -d '{}' http://127.0.0.1:38471/mynt/services/identity_verification)" = 401
           kill %1
+          # Its images build from the digest-pinned bases, with the lockfile the install wrote.
+          (cd service-starter && rm -rf node_modules api/node_modules api/dist && docker compose build)
           rm -rf service-starter service-contract.json
       - name: The live preview starts (dev_preview.sh) and serves the app and its api, on any host name
         env:
@@ -735,6 +741,12 @@ jobs:
           curl -fsS -o /dev/null -w '%{content_type}' http://127.0.0.1:8080/v1/products | grep -q text/html
           docker compose --profile mobile exec -T mobile wget -qO- http://127.0.0.1:8081/ | grep -qi '<!doctype html>'
           docker compose --profile mobile down -v
+      - name: A fresh starter gets through Mynt's own checks (secrets, dependency audit, static scan, SBOM, image scan)
+        # verify.sh exactly as a build's verification runs it, on the starter as scaffolded with its lockfile: the
+        # pinned scanners are fetched and hash-checked, the images Mynt's hosting would start are built from the
+        # packaged source, listed (SBOM) and scanned. Prints every check with its tool and time, and each image's
+        # scan; fails when one of the named checks fails. A template change that would block every build stops here.
+        run: node test/fixtures/verify-starter.mjs starter
   # Generates every device SDK for a defined product and compiles the native ones with their own toolchains.
   client-sdks:
     needs: changes

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
@@ -66,7 +66,27 @@ function fakeSandboxHost() {
         s.files.delete(mv[1]);
         return { exitCode: 0, stdout: "", stderr: "" };
       }
-      if (command.includes("tar --exclude")) return { exitCode: 0, stdout: `${SHA}  /home/user/mynt-out/app.tgz\n`, stderr: "" };
+      // The packaged source. With host.sourcePackage (bytes), packaging reports their real hash, Mynt can read them
+      // back in pieces (to keep the source of a build that didn't ship) and unpack a kept source in a new sandbox.
+      if (command.includes("tar --exclude")) {
+        if (host.sourcePackage) s.package = host.sourcePackage;
+        const sha = s.package ? createHash("sha256").update(s.package).digest("hex") : SHA;
+        return { exitCode: 0, stdout: `${sha}  /home/user/mynt-out/app.tgz\n`, stderr: "" };
+      }
+      if (command.endsWith("stat -c %s /home/user/mynt-out/app.tgz")) return s.package ? { exitCode: 0, stdout: `${s.package.length}\n`, stderr: "" } : { exitCode: 1, stdout: "", stderr: "" };
+      const piece = command.match(/tail -c \+(\d+) \/home\/user\/mynt-out\/app\.tgz \| head -c (\d+) \| base64 -w0$/);
+      if (piece) {
+        if (!s.package) return { exitCode: 1, stdout: "", stderr: "" };
+        const from = Number(piece[1]) - 1;
+        return { exitCode: 0, stdout: s.package.subarray(from, from + Number(piece[2])).toString("base64"), stderr: "" };
+      }
+      const unpack = command.match(/^set -e; cat (.+?) \| base64 -d > (\S+); .*sha256sum \S+ \| cut -d' ' -f1\)" = "([0-9a-f]{64})" \]; mkdir -p (\S+); tar -xzf/);
+      if (unpack) {
+        const data = Buffer.concat(unpack[1].split(" ").map((part) => Buffer.from(s.files.get(part), "base64")));
+        if (createHash("sha256").update(data).digest("hex") !== unpack[3]) return { exitCode: 1, stdout: "", stderr: "checksum mismatch" };
+        s.unpacked = { dest: unpack[4], data };
+        return { exitCode: 0, stdout: "restored\n", stderr: "" };
+      }
       // The auditor's read-only copy of the source, and Mynt's hash of it before and after the audit.
       if (command.includes("verify.sh --audit-copy")) return { exitCode: 0, stdout: `audit-copy ${TREE}\n`, stderr: "" };
       if (command.includes("verify.sh --rehash")) {
@@ -318,6 +338,14 @@ test("a build is verified by Mynt in a clean sandbox, then Mynt opens the PR", a
   });
   assert.match(MAXWELL_COMMIT, /^[0-9a-f]{40}$/);
   assert.match(verifier.files.get(`${AUDIT}/scripts/audit.mjs`), /run-headless\.mjs/, "the script that launches and watches the workflows is in the auditor's workspace");
+  // Mynt's own record of the pipeline the source went through is in the auditor's job folder, written before it
+  // starts, and its workspace says what the record is.
+  const evidence = JSON.parse(verifier.files.get(`${AUDIT}/job/pipeline-evidence.json`));
+  assert.equal(evidence.kind, "mynt.pipeline-evidence");
+  assert.equal(evidence.build_id, started.id);
+  assert.equal(evidence.source.sha256, SHA);
+  assert.deepEqual(evidence.gates.map((g) => [g.check, g.result]), passingChecks.map((c) => [c.name, c.status]));
+  assert.match(verifier.files.get(`${AUDIT}/CLAUDE.md`), /job\/pipeline-evidence\.json/);
   assert.ok(verifier.commands.some((c) => c.command === `bash ${V}/verify.sh --audit-copy ${SHA}`), "the copy is made from the hash-checked archive");
   assert.equal(sandboxes.agentConfig(vid).cwd, AUDIT);
   // Mynt's audit runs on its own model and budget, not the developer's: the coding agent's runs on the deployment's.
@@ -2745,4 +2773,133 @@ test("push access lost while a build ran: Mynt checks again before opening the p
   } finally {
     BuildService.OWNERSHIP_TTL_MS = ttl;
   }
+});
+
+test("the auditor is shown Mynt's own pipeline record: each check's tool, version, bar and result, and each image's scan and SBOM", async () => {
+  const { pipelineEvidence, writePipelineEvidence } = await import("../dist/pipeline-evidence.js");
+  const checks = [
+    { name: "source", status: "pass", detail: `sha256 ${SHA}` },
+    { name: "dependency_audit", status: "pass", detail: "no high or critical advisories" },
+    { name: "sbom", status: "pass", detail: "CycloneDX SBOM generated: source (412 components); images: api (61 components), web (140 components)" },
+    { name: "image_scan", status: "warn", detail: "no fixable high or critical vulnerability (grype 0.121.3; api 0 critical / 0 high, web 0 critical / 1 high); 1 high or critical with no fix published yet: web: GHSA-x high in pgproto3 v2.3.3 (no fix published)" },
+    { name: "secrets_history", status: "warn", detail: "1 secret(s) in history" },
+  ];
+  const runs = [
+    { check: "dependency_audit", tool: "npm audit", tool_version: "10.9.4", command: "npm audit --omit=dev --audit-level=high, on the lockfile of the verified source", threshold: "a high or critical advisory in a production dependency fails", started_at: "2026-11-28T10:00:00Z", finished_at: "2026-11-28T10:00:04Z" },
+    { check: "image_scan", tool: "grype", tool_version: "0.121.3", command: "docker build …", threshold: "a high or critical vulnerability with a fix available fails; one with no fix yet is a warning", started_at: "2026-11-28T10:01:00Z", finished_at: "2026-11-28T10:05:00Z" },
+  ];
+  const images = {
+    applicable: true,
+    built: true,
+    compose_file: "compose.yaml",
+    coverage: "every image Mynt's hosting starts",
+    images: [{ service: "web", source: "build", dockerfile: "web/Dockerfile", base_images: [{ ref: "caddy:2@sha256:" + "d".repeat(64), pinned: true, final: true }], image_id: "sha256:" + "e".repeat(64), sbom: { path: `${V}/sbom-images/web.cdx.json`, format: "CycloneDX", components: 140 }, scan: { tool: "grype", tool_version: "0.121.3", critical: 0, high: 1, medium: 2, low: 0, unknown: 0, blocking: [], unfixable: ["GHSA-x high in pgproto3 v2.3.3 (no fix published)"] } }],
+    skipped: [{ service: "mobile", reason: "only in profile mobile: Mynt's hosting doesn't start it" }],
+    problems: [],
+  };
+  const e = pipelineEvidence({ build_id: "b1", source_sha256: SHA, checks, runs, images, generated_at: "2026-11-28T10:06:00Z" });
+  // What ran, with what, to which bar, with what result, and when: for every check, in order.
+  assert.deepEqual(e.gates.map((g) => g.check), checks.map((c) => c.name));
+  const sca = e.gates.find((g) => g.check === "dependency_audit");
+  assert.deepEqual(
+    [sca.gate, sca.result, sca.blocking, sca.tool, sca.tool_version, sca.threshold, sca.started_at, sca.finished_at],
+    ["dependency vulnerabilities (SCA)", "pass", true, "npm audit", "10.9.4", "a high or critical advisory in a production dependency fails", "2026-11-28T10:00:00Z", "2026-11-28T10:00:04Z"],
+  );
+  // A check Mynt has no tool record for is still listed with its result, and says nothing it doesn't know.
+  assert.deepEqual([e.gates[0].result, e.gates[0].tool, e.gates[0].started_at], ["pass", null, null]);
+  // Nothing is softened: a warning stays a warning with its detail, and the only check that never blocks is named so.
+  assert.equal(e.gates.find((g) => g.check === "image_scan").result, "warn");
+  assert.match(e.gates.find((g) => g.check === "image_scan").detail, /no fix published/);
+  assert.deepEqual(e.gates.filter((g) => !g.blocking).map((g) => g.check), ["secrets_history"]);
+  // The images, their SBOMs and what wasn't scanned, as Mynt's image stage recorded them.
+  assert.equal(e.images[0].sbom.path, `${V}/sbom-images/web.cdx.json`);
+  assert.equal(e.images[0].scan.high, 1);
+  assert.deepEqual(e.images_not_scanned, images.skipped);
+  assert.equal(e.sbom.source, `${V}/sbom.json`);
+  // It says whose record this is, and what the scanned images are not.
+  assert.match(e.produced_by, /agent that wrote the application had no part/);
+  assert.match(e.deployment, /builds these images again on the app's own machine/);
+  assert.match(e.deployment, /not the deployed bytes/);
+  // An app with nothing to ship as a container says so instead of listing nothing.
+  assert.match(pipelineEvidence({ build_id: "b1", source_sha256: SHA, checks, runs, images: { applicable: false, images: [], skipped: [] }, generated_at: "x" }).image_coverage, /nothing ships as a container image/);
+  assert.equal(pipelineEvidence({ build_id: "b1", source_sha256: SHA, checks, runs, images: null, generated_at: "x" }).image_coverage, "Mynt's image stage wrote no record");
+
+  // Written from Mynt's own files in the verification sandbox, into the auditor's job folder. A solana_build row in
+  // the checks' report is never used: Mynt's own record of that build is.
+  const files = new Map([
+    [`${V}/report.json`, JSON.stringify({ checks: [{ name: "solana_build", status: "pass", detail: "from the report" }, ...checks] })],
+    [`${V}/pipeline.jsonl`, runs.map((r) => JSON.stringify(r)).join("\n") + "\nnot json\n"],
+    [`${V}/images.json`, JSON.stringify(images)],
+  ]);
+  const host = { readFile: async (_id, path) => files.get(path) ?? null, writeFile: async (_id, path, text) => void files.set(path, text) };
+  await writePipelineEvidence(host, "sbx", { build_id: "b1", source_sha256: SHA, solana_check: { name: "solana_build", status: "fail", detail: "Mynt's own record" } });
+  const written = JSON.parse(files.get(`${AUDIT}/job/pipeline-evidence.json`));
+  assert.deepEqual([written.gates[0].check, written.gates[0].result, written.gates[0].detail], ["solana_build", "fail", "Mynt's own record"]);
+  assert.equal(written.gates.length, checks.length + 1);
+  assert.equal(written.gates.find((g) => g.check === "image_scan").tool, "grype");
+  assert.equal(written.images.length, 1);
+});
+
+test("a build Mynt blocks keeps the source it verified, and continue_from starts the next build from it: no repository needed", async () => {
+  const ctx = await setup();
+  const { pg, builds, sandboxes, call } = ctx;
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  const other = await ctx.connect(await ctx.as("Other", ["developer"]));
+  // A package bigger than one read, so it comes back in pieces.
+  sandboxes.sourcePackage = Buffer.alloc(450_000, 7);
+  const sha = createHash("sha256").update(sandboxes.sourcePackage).digest("hex");
+  const blocking = { ...cleanAudit, counts: { critical: 0, high: 3 }, findings: [{ severity: "high", title: "No image scan", file: "compose.yaml", workflow: "probe-cicd-env" }] };
+  const { started, build } = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please" }, verification: { maxwell: blocking } });
+  assert.equal(build.status, "blocked");
+  assert.equal(build.repository, null, "nothing was pushed anywhere");
+  const kept = (await pg.query("SELECT sha256, size, kept_until > now() + interval '6 days' AS week FROM financial_products.build_sources WHERE build_id = $1", [started.id])).rows[0];
+  assert.deepEqual(kept, { sha256: sha, size: 450_000, week: true });
+  const events = (await pg.query("SELECT message FROM financial_products.build_events WHERE build_id = $1 ORDER BY at", [started.id])).rows.map((r) => r.message);
+  assert.ok(events.some((m) => /^Mynt kept this build's source until \d{4}-\d{2}-\d{2}: a new build with continue_from starts from it$/.test(m)), events.join(" | "));
+
+  // Only its own developer continues from it; the next build starts with that exact source unpacked.
+  assert.match((await call(other, "start_build", { goal: "Continue someone else's work", continue_from: started.id })).data.error, /No build of yours/);
+  sandboxes.sourcePackage = null;
+  const next = (await call(dev, "start_build", { goal: "Fix the three findings the audit raised", continue_from: started.id })).data;
+  assert.equal(next.continued_from, started.id);
+  assert.equal(next.repository, null);
+  await builds.tick();
+  const sbx = (await builds.get(next.id)).sandbox_id;
+  sandboxes.ready(sbx);
+  await builds.tick();
+  const box = sandboxes.sandboxes.get(sbx);
+  assert.equal(box.unpacked.dest, "/home/user/workspace/app", "unpacked where the agents work, before the agent starts");
+  assert.equal(createHash("sha256").update(box.unpacked.data).digest("hex"), sha, "the exact package Mynt verified");
+  assert.ok(box.commands.findIndex((c) => c.command.includes("base64 -d")) < box.commands.findIndex((c) => c.command.includes("runner.mjs")));
+  const spec = JSON.parse(box.files.get(`${BUILD}/job/build.json`)).build;
+  assert.deepEqual(spec.base, { source: "~/workspace/app", build_id: started.id, why_it_stopped: build.error });
+  assert.match(box.files.get(`${BUILD}/CLAUDE.md`), /build\.base\.source/);
+  assert.equal((await builds.get(next.id)).status, "coding");
+
+  // Kept for a bounded time: afterwards the refusal says so, and what to do.
+  await pg.query("UPDATE financial_products.build_sources SET kept_until = now() - interval '1 minute'");
+  const late = (await call(dev, "start_build", { goal: "Fix it a week later", continue_from: started.id })).data.error;
+  assert.match(late, /pushed no verified branch, and Mynt isn't keeping its source \(kept for 7 days when verification blocks or fails a build\), so there's nothing to continue from: start a new build without continue_from/);
+});
+
+test("a kept source is only ever the package Mynt hashed, and a build that shipped keeps none", async () => {
+  const { keepSource, KEPT_SOURCE_MAX_BYTES } = await import("../dist/build-sources.js");
+  const ctx = await setup();
+  const { pg, builds, sandboxes, call } = ctx;
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  sandboxes.sourcePackage = Buffer.from("the verified source");
+  const { started, sbx, build } = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please" } });
+  assert.equal(build.status, "succeeded");
+  assert.equal((await pg.query("SELECT count(*)::int AS n FROM financial_products.build_sources")).rows[0].n, 0);
+
+  // Changed in the sandbox since Mynt hashed it, too big, or gone: not kept, with the reason.
+  const db = { query: (q, a) => pg.query(q, a) };
+  const o = { build_id: started.id, sandbox_id: sbx, path: "/home/user/mynt-out/app.tgz", sha256: (await builds.get(started.id)).source_sha256 };
+  assert.equal((await keepSource(db, sandboxes, o)).kept.size, 19);
+  sandboxes.sandboxes.get(sbx).package = Buffer.from("something else entirely");
+  assert.deepEqual(await keepSource(db, sandboxes, o), { kept: null, reason: "the packaged source no longer matches the hash Mynt verified" });
+  sandboxes.sandboxes.get(sbx).package = Buffer.alloc(KEPT_SOURCE_MAX_BYTES + 1);
+  assert.match((await keepSource(db, sandboxes, o)).reason, /over the 24 MB Mynt keeps/);
+  sandboxes.sandboxes.get(sbx).package = null;
+  assert.deepEqual(await keepSource(db, sandboxes, o), { kept: null, reason: "the packaged source is no longer in the build's sandbox" });
 });
