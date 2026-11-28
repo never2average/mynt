@@ -10,7 +10,7 @@ problems = []
 try:
     data = json.load(open(path))
 except Exception as e:
-    sys.exit(f"{path}: not valid JSON ({e})")
+    sys.exit(f"{path}: not valid JSON ({e})" if os.path.isfile(path) else f"{path} doesn't exist yet: write it (see CLAUDE.md, step 4)")
 if not isinstance(data, dict) or not isinstance(data.get("findings"), list):
     sys.exit("findings.json needs a top-level object with a 'findings' list")
 squash = lambda s: re.sub(r"\s+", " ", s).strip()

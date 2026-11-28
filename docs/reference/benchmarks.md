@@ -277,7 +277,7 @@ Every test uses stand-in agents: no real agent, model or sandbox is started, and
 | `benchmarks-governance.test.js` | The firm and licence cases end to end, and that no firm, licence or product is read |
 | `benchmarks-ask.test.js` | Ask AI's scorer, check by check, and a full stand-in run through the two runner tools |
 
-What no test can show, and only a first real run will: that the sandbox image has what the scratch repository and the sample build need, that a real red team can produce a proof Mynt confirms for the two exploitable samples, that a real reviewer uses the register copy in a case, and what any of it costs.
+What no test can show, and only a real run will: that the sandbox image has what the scratch repository and the sample build need, that a real red team finishes its turn with a complete report (the first real runs ended theirs minutes in, without one; see [The red team's report](solana-programs.md#the-red-teams-report)) and can produce a proof Mynt confirms for the two exploitable samples, that a real reviewer uses the register copy in a case, and what any of it costs.
 
 ## What isn't built yet
 
