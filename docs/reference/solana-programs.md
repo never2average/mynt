@@ -685,6 +685,8 @@ The program-audit agent (`core/workspaces/program-audit/`) runs in the same sand
 - A verified critical or high finding blocks, and so does an audit that didn't finish.
 - It never sees the builder agent's conversation.
 
+An audit that stops without a valid `job/findings.json` for no reason of time or budget (the agent ended its turn early, or its run broke off) runs once more in the same sandbox, within the same time limit and what is left of its budget, and is told how the first attempt ended. A second such end blocks. The block says how the run ended, what is wrong with the file and the agent's last message, and the review keeps each attempt (`checks.audit.agent.detail`, `checks.audit.earlier_attempts`).
+
 ### Black-box red team
 
 The red team (`core/workspaces/program-red-team/`) runs in a sandbox of its own that gets only the exact bytes Mynt stored and the IDL, never the source.
@@ -709,6 +711,31 @@ Outcomes:
 - Findings without a PoC, or whose PoC doesn't confirm (a failed transaction, a denial of service), are reported and don't block.
 - A red team that didn't finish blocks.
 - If Mynt can't complete its re-run, the review fails and can be requested again.
+
+#### The red team's report
+
+The red team's result is `job/report.json`, and it has one contract: `core/schemas/program-red-team-report.schema.json`. The gate validates the report against that file. The red team gets the same file in its sandbox as `job/report.schema.json`, and its own check (`scripts/check_report.py` in its workspace) validates against it before the agent ends its turn, so what the check refuses is what Mynt refuses.
+
+| Field | Meaning |
+|---|---|
+| `findings` | One entry per weakness: `id`, `title`, `severity` (`critical`, `high`, `medium`, `low`, `info`), `description`, and optionally `category`, `vulnerability` (the database entry's id) and `poc` (the PoC's folder under `job/poc`). Empty when nothing exploitable was found |
+| `attacks_tried` | Each attack the red team ran and what the program did. A complete report needs at least one |
+| `summary` | What was found, in a sentence or two. A complete report needs one |
+| `complete` | `false` while the work is unfinished, or when the program couldn't be attacked at all. Absent or `true` on a finished report |
+| `incomplete_reason` | Required with `complete: false`: what stopped the work |
+
+A report counts as the red team's result only when it validates, doesn't say it is incomplete, and comes from a run that ended cleanly and in time. "Nothing exploitable found" is a complete result: an empty `findings` list with what was tried. A missing report, one the schema refuses, and one that says it is incomplete all block.
+
+The red team's run is one turn of the agent: it ends when the agent ends its turn. Its workspace therefore has it write a placeholder report first (`complete: false`), wait for the toolchain in the foreground (`scripts/wait_toolchain.sh`) and start its validator detached (`scripts/start_validator.sh`), so it never stops to wait for something in the background.
+
+A red team that stops without a complete, valid report for no reason of time or budget runs once more in the same sandbox, within the same time limit and what is left of its budget, and is told how the first attempt ended. A second such end blocks. The block then says:
+
+- how the run ended (it ended its turn, broke off, ran out of time or budget);
+- what is wrong with the report (missing, not JSON, each field the schema refuses, or the red team's own `incomplete_reason`);
+- what Mynt saw of the toolchain's install in that sandbox (still installing, or failed with its exit code and the last line of its log);
+- the agent's last message.
+
+The review keeps the same under `checks.red_team` (`agent.detail`, `report_problems`, `incomplete_reason`, `toolchain`, `earlier_attempts`), and the events `audit_retried` and `red_team_retried` are on its log.
 
 Trident (Ackee's Anchor fuzzer) isn't run. It fuzzes a program from its source through a hand-written harness, which would put source in front of the black-box red team and make the harness agent-written. The red team's PoCs cover the same ground against the real bytes.
 

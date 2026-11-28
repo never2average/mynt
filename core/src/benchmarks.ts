@@ -915,11 +915,11 @@ export class BenchmarkService {
         let done = false; // the agent's work was complete, so the sample's answer can be scored
         let observed: Record<string, unknown> = { review_status: r.status, blocked_reason: r.blocked_reason ?? null };
         if (audit) {
-          const a = r.audit as { finished?: boolean; agent?: { result?: string | null }; findings?: AuditFinding[] } | null;
+          const a = r.audit as { finished?: boolean; agent?: { result?: string | null; detail?: string }; findings?: AuditFinding[] } | null;
           const stat = r.static_analysis as { passed?: boolean; reasons?: string[] } | null;
           if (stat) checks.push({ name: "static_analysis", status: stat.passed ? "pass" : "warn", detail: stat.passed ? "cargo-audit and Radar reported nothing sure" : `Recorded only: ${(stat.reasons ?? []).join("; ").slice(0, 300)}` });
           done = !!a?.finished;
-          checks.push({ name: "audit_complete", status: !a ? "not_reported" : done ? "pass" : "fail", ...(a && !done ? { detail: `The auditor: ${a.agent?.result ?? "no result"}` } : {}) });
+          checks.push({ name: "audit_complete", status: !a ? "not_reported" : done ? "pass" : "fail", ...(a && !done ? { detail: `The auditor: ${a.agent?.detail ?? a.agent?.result ?? "no result"}`.slice(0, 600) } : {}) });
           const serious = (a?.findings ?? []).filter((f) => BLOCKING.includes(f.severity));
           const verified = serious.filter((f) => f.verified);
           if (done && task.sample === "bad") {
@@ -934,12 +934,12 @@ export class BenchmarkService {
           } else if (done) checks.push({ name: "nothing_falsely_flagged", status: verified.length ? "fail" : "pass", detail: verified.length ? `Blocked on: ${verified.slice(0, 3).map((f) => `${f.severity} ${f.title}`).join("; ")}` : "No verified critical or high finding" });
           observed = { ...observed, findings: (a?.findings ?? []).map((f) => ({ id: f.id, severity: f.severity, vulnerability: f.vulnerability, file: f.file, verified: f.verified })), expected_blocked: task.sample === "bad" };
         } else {
-          const red = r.red_team as { finished?: boolean; agent?: { result?: string | null }; findings?: { id: string; title: string; poc: string | null }[] } | null;
+          const red = r.red_team as { finished?: boolean; agent?: { result?: string | null; detail?: string }; findings?: { id: string; title: string; poc: string | null }[] } | null;
           const confirmations = (r.confirmations as Record<string, { confirmed?: boolean; reason?: string; error?: boolean }> | null) ?? null;
           const pocs = (red?.findings ?? []).filter((f) => f.poc).length;
           // With proofs to re-run, the answer is Mynt's re-run: without its result nothing can be scored.
           done = !!red?.finished && (pocs === 0 || !!confirmations) && r.status !== "failed";
-          checks.push({ name: "red_team_complete", status: !red ? "not_reported" : red.finished ? "pass" : "fail", ...(red && !red.finished ? { detail: `The red team: ${red.agent?.result ?? "no result"}` } : {}) });
+          checks.push({ name: "red_team_complete", status: !red ? "not_reported" : red.finished ? "pass" : "fail", ...(red && !red.finished ? { detail: `The red team: ${red.agent?.detail ?? red.agent?.result ?? "no result"}`.slice(0, 600) } : {}) });
           const confirmed = Object.entries(confirmations ?? {}).filter(([, c]) => c.confirmed).map(([poc]) => poc);
           if (done && task.sample === "bad")
             checks.push({ name: "exploit_confirmed", status: confirmed.length ? "pass" : "fail", detail: confirmed.length ? `Mynt's own re-run confirmed: ${confirmed.join(", ")}` : pocs ? `Mynt re-ran ${pocs} proof(s) of concept and confirmed none (${Object.values(confirmations ?? {}).map((c) => c.reason).filter(Boolean).slice(0, 2).join("; ").slice(0, 300)})` : "The red team wrote no proof of concept" });

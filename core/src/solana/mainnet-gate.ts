@@ -1,9 +1,14 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { AgentMeter } from "../agent-meter.js";
 import type { AgentRun } from "../agent-proxy.js";
-import { agentState, launchAgent, workspaceCwd, workspaceFiles, type AgentHostConfig } from "../agent-host.js";
+import { AGENT_DIR, agentState, launchAgent, workspaceCwd, workspaceFiles, type AgentHostConfig } from "../agent-host.js";
+import type { AgentState } from "../agent-runner.js";
+import { redact } from "../boxes.js";
 import type { SandboxHost } from "../sandbox-host.js";
 import type { Db } from "../db.js";
 import { emitFirmEvent } from "../runtime.js";
@@ -18,6 +23,10 @@ import { SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT } from "./toolchain.js";
 import { agentChecklist, entryProblems, loadCrateAllowlist, loadVulnDb, VULN_CATEGORIES, type CrateAllowlist, type VulnDb } from "./vuln-db.js";
 import { crossCheck, dependencyVerdict, evaluateDepInfo, resolveCrateTree, stripIdlDocs, uncompiledHitExceptions, verifyIdl, workspaceExceptions, type DepInfoCapture, type Exception } from "./crate-tree.js";
 import { runDetections } from "./program-rules.js";
+
+const require = createRequire(import.meta.url);
+const Ajv2020 = require("ajv/dist/2020").default as new (opts: object) => { compile: (s: object) => AjvValidate };
+type AjvValidate = ((data: unknown) => boolean) & { errors?: { instancePath: string; keyword: string; message?: string; params?: Record<string, unknown> }[] | null };
 
 // The mainnet program gate. Every mainnet deploy and every mainnet upgrade must pass, in order:
 //   1. Mynt's hard rules (program-rules.ts): no value-moving program, no hidden admin, the upgrade authority stays
@@ -133,6 +142,8 @@ const REVIEW_TABLES = `
   -- The program's hash when a deploy or upgrade claimed the approval, and the month's budget it reserved.
   ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS claimed_hash text;
   ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS last_attempt_at timestamptz;
+  -- An agent's earlier attempts in this review, by agent ("audit", "red_team"): how each ended and what it spent.
+  ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS agent_attempts jsonb;
   ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS budget_key text;
   ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS budget_settled boolean NOT NULL DEFAULT false;
   -- One open review per program, whatever races.
@@ -207,6 +218,15 @@ const SAMPLE_DIR = "/home/user/mynt-sample";
 const CONFIRM_DIR = "/home/user/mynt-confirm";
 const AUDIT_WS = "program-audit";
 const RED_WS = "program-red-team";
+// Where the red team's sandbox keeps the toolchain's installer, its log and, once it has ended, its exit code.
+const TOOLCHAIN_INSTALLER = "/home/user/mynt-solana-toolchain.sh";
+const TOOLCHAIN_LOG = "/home/user/.mynt-solana-install.log";
+const TOOLCHAIN_EXIT = "/home/user/.mynt-solana-install.exit";
+// An agent that stops without its result for no reason of time or budget (it ended its turn early, or its run broke
+// off) runs once more in the same sandbox, within the same time limit and what is left of its budget.
+export const GATE_AGENT_ATTEMPTS = 2;
+const RETRY_MIN_USD = 0.5;
+const RETRY_MIN_MINUTES = 5;
 // What Mynt reads back of a red team's proofs of concept.
 const MAX_POCS = 10;
 const MAX_POC_FILES = 40;
@@ -223,7 +243,7 @@ const parse = <X>(text: string | null | undefined): X | null => {
     return null;
   }
 };
-const JSON_COLS = new Set(["rules", "static_analysis", "audit", "red_team", "confirmations", "exceptions", "allowed_exceptions", "dependencies", "idl_check", "sample"]);
+const JSON_COLS = new Set(["rules", "static_analysis", "audit", "red_team", "confirmations", "exceptions", "allowed_exceptions", "dependencies", "idl_check", "sample", "agent_attempts"]);
 
 // A benchmark sample as its row keeps it: what was asked, and, once Mynt prepared it, what the agents and Mynt's
 // own checks work from (the whole workspace; for the red team, the bytes and IDL of Mynt's own build of it).
@@ -325,22 +345,104 @@ export interface RedTeamFinding {
   poc: string | null; // the PoC's directory under job/poc, when the red team wrote one
 }
 
-export function parseRedTeam(raw: string | null) {
-  const parsed = parse<{ findings?: Row[]; summary?: unknown; attacks_tried?: unknown }>(raw);
-  if (!parsed || !Array.isArray(parsed.findings)) return null;
-  const findings: RedTeamFinding[] = parsed.findings.slice(0, 50).map((f, i) => ({
-    id: typeof f.id === "string" && /^[A-Za-z0-9_-]{1,40}$/.test(f.id) ? f.id : `R${i + 1}`,
-    title: String(f.title ?? "").slice(0, 300),
-    severity: (SEVERITIES as readonly string[]).includes(String(f.severity).toLowerCase()) ? (String(f.severity).toLowerCase() as Severity) : "info",
-    category: String(f.category ?? "").slice(0, 60),
-    description: String(f.description ?? "").slice(0, 3000),
-    poc: typeof f.poc === "string" && /^[A-Za-z0-9_-]{1,40}$/.test(f.poc.replace(/^poc\//, "")) ? f.poc.replace(/^poc\//, "") : null,
+// The red team's report has one contract: schemas/program-red-team-report.schema.json. The gate validates against
+// it here, and the red team's own check (workspaces/program-red-team/scripts/check_report.py) validates against the
+// same file, handed to it as job/report.schema.json.
+export const RED_TEAM_REPORT_SCHEMA_FILE = fileURLToPath(new URL("../../schemas/program-red-team-report.schema.json", import.meta.url));
+export const RED_TEAM_REPORT_SCHEMA = readFileSync(RED_TEAM_REPORT_SCHEMA_FILE, "utf8");
+let redTeamSchema: AjvValidate | null = null;
+
+export interface RedTeamReport {
+  findings: RedTeamFinding[];
+  summary: string | null;
+  attacks_tried: string[];
+}
+
+// Mynt's reading of job/report.json. `report` is null unless it validates; `problems` says why it doesn't;
+// `incomplete` is the red team's own reason when a valid report says it isn't complete. Only a valid report that
+// doesn't say so counts as the red team's result.
+export function checkRedTeamReport(raw: string | null): { report: RedTeamReport | null; problems: string[]; incomplete: string | null } {
+  if (raw == null || !raw.trim()) return { report: null, problems: ["report.json doesn't exist"], incomplete: null };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { report: null, problems: ["report.json isn't valid JSON"], incomplete: null };
+  }
+  redTeamSchema ??= new Ajv2020({ allErrors: true, strict: false }).compile(JSON.parse(RED_TEAM_REPORT_SCHEMA));
+  if (!redTeamSchema(parsed)) {
+    const problems = (redTeamSchema.errors ?? [])
+      .filter((e) => e.keyword !== "if")
+      .map((e) => {
+        const what = e.keyword === "pattern" && e.params?.pattern === "\\S" ? "must not be empty" : (e.message ?? "invalid");
+        const allowed = e.keyword === "enum" ? ` (${((e.params?.allowedValues as unknown[] | undefined) ?? []).join(", ")})` : "";
+        return `report.json${e.instancePath ? ` ${e.instancePath}` : ""}: ${what}${allowed}`.slice(0, 200);
+      });
+    return { report: null, problems: [...new Set(problems)].slice(0, 8), incomplete: null };
+  }
+  const p = parsed as { complete?: boolean; incomplete_reason?: string; findings: Row[]; summary: string; attacks_tried: string[] };
+  const findings: RedTeamFinding[] = p.findings.map((f) => ({
+    id: f.id as string,
+    title: f.title as string,
+    severity: f.severity as Severity,
+    category: typeof f.category === "string" ? f.category : "",
+    description: f.description as string,
+    poc: typeof f.poc === "string" ? f.poc : null,
   }));
-  return {
-    findings,
-    summary: typeof parsed.summary === "string" ? parsed.summary.slice(0, 3000) : null,
-    attacks_tried: Array.isArray(parsed.attacks_tried) ? parsed.attacks_tried.filter((x) => typeof x === "string").slice(0, 40).map((x) => (x as string).slice(0, 300)) : [],
-  };
+  const report = { findings, summary: p.summary.trim() ? p.summary : null, attacks_tried: p.attacks_tried.slice(0, 40).map((x) => x.slice(0, 300)) };
+  return { report, problems: [], incomplete: p.complete === false ? p.incomplete_reason!.slice(0, 1000) : null };
+}
+
+// The report, when it validates (complete or not).
+export const parseRedTeam = (raw: string | null) => checkRedTeamReport(raw).report;
+
+// Why job/findings.json isn't the audit's result, or null when it is one.
+export function auditFileProblem(raw: string | null) {
+  if (raw == null || !raw.trim()) return "findings.json doesn't exist";
+  const parsed = parse<{ findings?: unknown }>(raw);
+  if (!parsed) return "findings.json isn't valid JSON";
+  return Array.isArray(parsed.findings) ? null : "findings.json has no 'findings' list";
+}
+
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+const oneLine = (s: string, n: number) => clip(redact(s.replace(/\s+/g, " ").trim()), n);
+
+// How a gate agent's run ended, from the runner's own record: `result` is the short form reviews have always shown
+// (the last turn's subtype, or the timeout), `how` says it in words that follow the agent's name, and `retry` is whether one more attempt could
+// help (it ended its turn early or its run broke off; never when it ran out of time or budget).
+export function agentEnding(o: { state: AgentState | null; timedOut: boolean; minutes: number }): { result: string | null; how: string; retry: boolean; exit_code: number | null; error: string | null } {
+  const s = o.state;
+  const base = { exit_code: s?.exit_code ?? null, error: s?.error ? oneLine(s.error, 300) : null };
+  if (o.timedOut) return { ...base, result: `timed out after ${o.minutes} min`, how: `ran out of time (${o.minutes} min)`, retry: false };
+  if (!s) return { ...base, result: null, how: "left no record of its run (it never started, or its sandbox was lost)", retry: true };
+  if (s.error) return { ...base, result: s.last_subtype, how: `failed to run (${base.error})`, retry: true };
+  if (s.last_subtype === "success") return { ...base, result: "success", how: "ended its turn", retry: true };
+  if (s.last_subtype === null) return { ...base, result: null, how: `broke off before its first turn ended${s.exit_code != null ? ` (exit ${s.exit_code})` : ""}`, retry: true };
+  if (s.last_subtype === "error_max_budget_usd") return { ...base, result: s.last_subtype, how: "ran out of its budget", retry: false };
+  return { ...base, result: s.last_subtype, how: `stopped with ${s.last_subtype}`, retry: true };
+}
+
+// Why an agent's run isn't its result, in one line for the review: how it ended, what is wrong with the file it
+// was to write, anything Mynt saw itself (the toolchain's install), and the agent's own last message.
+function noResult(o: { who: string; ending: ReturnType<typeof agentEnding>; file: string | null; problems: string[]; notes: string[]; lastMessage: string | null; attempt: number }) {
+  const parts = [
+    `${o.who} ${o.ending.how}${o.file ? ` without ${o.file}` : ""}${o.attempt > 1 ? `, on ${o.attempt === 2 ? "both" : `all ${o.attempt}`} attempts` : ""}`,
+    ...o.problems,
+    ...o.notes,
+    ...(o.lastMessage?.trim() ? [`its last message: "${oneLine(o.lastMessage, 300)}"`] : []),
+  ];
+  return parts.length > 1 ? `${parts[0]}: ${parts.slice(1).join("; ")}` : parts[0];
+}
+
+// One attempt of a gate agent that didn't count, as the review keeps it.
+export interface AgentAttempt {
+  attempt: number;
+  result: string | null;
+  detail: string;
+  exit_code: number | null;
+  error: string | null;
+  summary: string | null;
+  cost_usd: number;
 }
 
 export class MainnetGateService implements MainnetGateCheck {
@@ -954,6 +1056,108 @@ export class MainnetGateService implements MainnetGateCheck {
     return this.sandboxes!.createSandbox({ name: `mynt-${role}-${r.id}`, type: this.config.sandboxType, ttlSeconds: 3 * 3600, labels: { mynt_mainnet_review: r.id as string, mynt_role: role }, env: {} });
   }
 
+  // The earlier attempts of one of this review's agents: the ones that didn't count.
+  private attempts(r: Row, kind: "audit" | "red_team") {
+    return ((r.agent_attempts as Record<string, AgentAttempt[]> | null) ?? {})[kind] ?? [];
+  }
+
+  // Whether an agent that stopped without its result runs once more, and with what: the attempt's number, what is
+  // left of the agent's budget (the proxy meters every attempt under one key) and of its time limit. Null when it
+  // doesn't: the ending wasn't one another attempt could help, it already had its second, or too little is left.
+  private async again(r: Row, kind: "audit" | "red_team", o: { retry: boolean; capUsd: number; limitMinutes: number; costUsd: number }) {
+    const earlier = this.attempts(r, kind);
+    if (!o.retry || earlier.length + 1 >= GATE_AGENT_ATTEMPTS) return null;
+    const metered = this.meter ? await this.meter.spent(`program-${kind === "audit" ? "audit" : "red-team"}:${r.id}`) : 0;
+    const budgetUsd = o.capUsd - Math.max(metered, earlier.reduce((n, a) => n + a.cost_usd, 0) + o.costUsd);
+    const minutes = Math.floor(o.limitMinutes - this.minutes(r));
+    return budgetUsd >= RETRY_MIN_USD && minutes >= RETRY_MIN_MINUTES ? { attempt: earlier.length + 2, budgetUsd, minutes } : null;
+  }
+
+  // Sets an attempt that didn't count aside and clears the runner's record of it, so the next one starts clean.
+  private async setAside(r: Row, kind: "audit" | "red_team", sandbox: string, attempt: AgentAttempt) {
+    const agent_attempts = { ...((r.agent_attempts as Record<string, AgentAttempt[]> | null) ?? {}), [kind]: [...this.attempts(r, kind), attempt] };
+    await this.sandboxes!.exec(sandbox, `rm -f ${AGENT_DIR}/state.json`, { timeoutSeconds: 30 });
+    await this.update(r.id as string, { agent_attempts });
+    return { ...r, agent_attempts };
+  }
+
+  // The program-audit agent, in the analysis sandbox. A second attempt is told how the first ended.
+  private async startAudit(r: Row, o: { attempt: number; budgetUsd: number; minutes: number; previous: string | null }) {
+    const token = `mynt_paudit_${randomBytes(24).toString("base64url")}`;
+    await this.update(r.id as string, { audit_token_hash: hash(token) });
+    const { p, m } = await this.material(r);
+    return launchAgent(this.sandboxes!, this.config, r.analysis_sandbox_id as string, {
+      prompt: "Audit the Solana program described in job/review.json, following CLAUDE.md and its skills. Write job/findings.json and run scripts/check_findings.py until it passes.",
+      budgetUsd: o.budgetUsd,
+      token,
+      model: this.config.gateModel,
+      workspace: AUDIT_WS,
+      jobFiles: {
+        "job/vulnerabilities.json": JSON.stringify(agentChecklist(this.vulnDb), null, 1),
+        "job/review.json": JSON.stringify(
+          {
+            program: { name: m.name, program_id: p.program_id, sha256: m.sha256, action: r.action },
+            source_dir: `${GATE_DIR}/src`,
+            files: Object.keys(m.sources ?? {}).sort(),
+            deterministic_rules: this.samples ? null : ((r.rules as Row | null) ?? null),
+            static_analysis: r.static_analysis ?? null,
+            idl: this.agentIdl(r, m),
+            dependency_dirs: Object.fromEntries(Object.keys(m.deps?.sources ?? {}).filter((k) => ((r.exceptions as Exception[] | null) ?? []).some((e) => e.id === `crate:${k}`)).map((k) => [k, `${GATE_DIR}/deps/${k}`])),
+            output: "job/findings.json",
+            minutes: o.minutes,
+            attempt: o.attempt,
+            attempts: GATE_AGENT_ATTEMPTS,
+            ...(o.previous ? { previous_attempt: o.previous } : {}),
+          },
+          null,
+          1,
+        ),
+      },
+    });
+  }
+
+  // The red team, in its own sandbox, with the report's schema beside its job. A second attempt is told how the
+  // first ended.
+  private async startRedTeam(r: Row, o: { attempt: number; budgetUsd: number; minutes: number; previous: string | null }) {
+    const token = `mynt_predteam_${randomBytes(24).toString("base64url")}`;
+    await this.update(r.id as string, { red_token_hash: hash(token) });
+    const { p, m } = await this.material(r);
+    return launchAgent(this.sandboxes!, this.config, r.red_sandbox_id as string, {
+      prompt: "Attack the Solana program described in job/target.json, following CLAUDE.md and its skills. Write job/report.json and a runnable proof of concept for every finding, and run scripts/check_report.py until it passes.",
+      budgetUsd: o.budgetUsd,
+      token,
+      model: this.config.gateModel,
+      workspace: RED_WS,
+      jobFiles: {
+        "job/idl.json": JSON.stringify(this.agentIdl(r, m), null, 1),
+        "job/vulnerabilities.json": JSON.stringify(agentChecklist(this.vulnDb), null, 1),
+        "job/report.schema.json": RED_TEAM_REPORT_SCHEMA,
+        "job/target.json": JSON.stringify(
+          {
+            program_id: p.program_id,
+            name: m.name,
+            sha256: m.sha256,
+            program_so: "job/program.so",
+            idl: "job/idl.json",
+            toolchain_env: "~/.mynt-solana/env",
+            toolchain_log: TOOLCHAIN_LOG,
+            toolchain_exit: TOOLCHAIN_EXIT,
+            toolchain_installer: TOOLCHAIN_INSTALLER,
+            output: "job/report.json",
+            schema: "job/report.schema.json",
+            poc_dir: "job/poc",
+            minutes: o.minutes,
+            attempt: o.attempt,
+            attempts: GATE_AGENT_ATTEMPTS,
+            ...(o.previous ? { previous_attempt: o.previous } : {}),
+          },
+          null,
+          1,
+        ),
+      },
+    });
+  }
+
   private minutes(r: Row) {
     return r.step_started_at ? (Date.now() - Date.parse(new Date(r.step_started_at as string).toISOString())) / 60_000 : 0;
   }
@@ -1073,56 +1277,48 @@ export class MainnetGateService implements MainnetGateCheck {
       // A sample goes on to the auditor whatever the tools said: their verdict is recorded, and the agent is measured.
       if (!verdict.passed && !this.samples) return this.block(r, `Static analysis: ${verdict.reasons.join("; ")}`);
       // 2b. The program-audit agent, in the same sandbox, after Mynt has the tools' results.
-      const token = `mynt_paudit_${randomBytes(24).toString("base64url")}`;
-      await this.update(id, { audit_token_hash: hash(token) });
-      const { p, m } = await this.material(r);
-      const pid = await launchAgent(sandboxes, this.config, r.analysis_sandbox_id as string, {
-        prompt: "Audit the Solana program described in job/review.json, following CLAUDE.md and its skills. Write job/findings.json and run scripts/check_findings.py until it passes.",
-        budgetUsd: Number(r.audit_cap_usd),
-        token,
-        model: this.config.gateModel,
-        workspace: AUDIT_WS,
-        jobFiles: {
-          "job/vulnerabilities.json": JSON.stringify(agentChecklist(this.vulnDb), null, 1),
-          "job/review.json": JSON.stringify(
-            {
-              program: { name: m.name, program_id: p.program_id, sha256: m.sha256, action: r.action },
-              source_dir: `${GATE_DIR}/src`,
-              files: Object.keys(m.sources ?? {}).sort(),
-              deterministic_rules: this.samples ? null : ((r.rules as Row | null) ?? null),
-              static_analysis: record,
-              idl: this.agentIdl(r, m),
-              dependency_dirs: Object.fromEntries(Object.keys(m.deps?.sources ?? {}).filter((k) => ((r.exceptions as Exception[] | null) ?? []).some((e) => e.id === `crate:${k}`)).map((k) => [k, `${GATE_DIR}/deps/${k}`])),
-              output: "job/findings.json",
-              minutes: this.config.auditMinutes,
-            },
-            null,
-            1,
-          ),
-        },
-      });
+      const pid = await this.startAudit({ ...r, static_analysis: record }, { attempt: 1, budgetUsd: Number(r.audit_cap_usd), minutes: this.config.auditMinutes, previous: null });
       await this.update(id, { step: "audit", audit_process_id: pid, audit_started_at: new Date(), step_started_at: new Date(), phase_message: "The program-audit agent is reading the source" });
       await this.log(id, null, "audit_started", { model: this.config.gateModel, cap_usd: Number(r.audit_cap_usd) });
       return;
     }
 
     if (r.step === "audit") {
-      const agent = await agentState(sandboxes, r.analysis_sandbox_id as string, r.audit_process_id as string);
+      const sb = r.analysis_sandbox_id as string;
+      const agent = await agentState(sandboxes, sb, r.audit_process_id as string);
       const timedOut = agent.running && this.minutes(r) > this.config.auditMinutes;
       if (agent.running && !timedOut) return;
-      const raw = await sandboxes.readFile(r.analysis_sandbox_id as string, `${workspaceCwd(AUDIT_WS)}/job/findings.json`);
+      const raw = await sandboxes.readFile(sb, `${workspaceCwd(AUDIT_WS)}/job/findings.json`);
       const { m } = await this.material(r);
       const a = assessAudit(raw, m.sources ?? {});
+      const finished = a.finished && agent.ok && !timedOut;
+      const ending = agentEnding({ state: agent.state, timedOut, minutes: this.config.auditMinutes });
+      const earlier = this.attempts(r, "audit");
+      const fileProblem = auditFileProblem(raw);
+      const detail = finished ? null : noResult({ who: "the program-audit agent", ending, file: fileProblem ? "a valid findings.json" : null, problems: fileProblem ? [fileProblem] : [], notes: [], lastMessage: agent.state?.summary ?? null, attempt: earlier.length + 1 });
+      if (detail) {
+        const next = await this.again(r, "audit", { retry: ending.retry, capUsd: Number(r.audit_cap_usd), limitMinutes: this.config.auditMinutes, costUsd: agent.cost });
+        if (next) {
+          const first = noResult({ who: "the program-audit agent", ending, file: fileProblem ? "a valid findings.json" : null, problems: fileProblem ? [fileProblem] : [], notes: [], lastMessage: null, attempt: 1 });
+          const kept = await this.setAside(r, "audit", sb, { attempt: earlier.length + 1, result: ending.result, detail, exit_code: ending.exit_code, error: ending.error, summary: agent.state?.summary?.slice(0, 1500) ?? null, cost_usd: agent.cost });
+          const pid = await this.startAudit(kept, { ...next, previous: first });
+          await this.update(id, { audit_process_id: pid, audit_started_at: new Date(), phase_message: `The program-audit agent stopped without its findings; running it once more (attempt ${next.attempt} of ${GATE_AGENT_ATTEMPTS})` });
+          await this.log(id, null, "audit_retried", { attempt: next.attempt, why: detail.slice(0, 1000) });
+          return;
+        }
+      }
       const audit = {
-        finished: a.finished && agent.ok && !timedOut,
-        agent: { result: timedOut ? `timed out after ${this.config.auditMinutes} min` : (agent.state?.last_subtype ?? null), summary: a.summary ?? agent.state?.summary?.slice(0, 1500) ?? null },
+        finished,
+        attempt: earlier.length + 1,
+        agent: { result: ending.result, summary: a.summary ?? agent.state?.summary?.slice(0, 1500) ?? null, exit_code: ending.exit_code, error: ending.error, ...(detail ? { detail } : {}) },
+        ...(earlier.length ? { earlier_attempts: earlier } : {}),
         findings: a.findings,
         blocking: a.blocking.map((f) => f.id),
       };
-      await sandboxes.stop(r.analysis_sandbox_id as string).catch(() => {});
+      await sandboxes.stop(sb).catch(() => {});
       await this.update(id, { audit, audit_token_hash: null });
-      await this.log(id, null, "audit_finished", { finished: audit.finished, findings: a.findings.length, blocking: a.blocking.length });
-      if (!audit.finished) return this.block(r, `No complete independent audit (the program-audit agent: ${audit.agent.result ?? "no result"}${a.finished ? "" : ", no valid findings.json"}); a mainnet program can't pass without one`);
+      await this.log(id, null, "audit_finished", { finished: audit.finished, findings: a.findings.length, blocking: a.blocking.length, ...(detail ? { why: detail.slice(0, 1000) } : {}) });
+      if (detail) return this.block(r, `No complete independent audit (${detail}); a mainnet program can't pass without one`);
       if (a.blocking.length) return this.block(r, `Audit: ${a.blocking.length} verified critical/high finding(s): ${a.blocking.slice(0, 5).map((f) => `${f.severity} ${f.title} (${f.file}${f.line ? `:${f.line}` : ""})`).join("; ")}`);
       // An audit sample ends here: the red team has samples of its own.
       if (this.samples) return this.gatesPassed({ ...r, audit });
@@ -1134,43 +1330,17 @@ export class MainnetGateService implements MainnetGateCheck {
 
     if (r.step === "red_provisioning") {
       if (!(await this.sandboxReady(r.red_sandbox_id as string))) return;
-      const { p, m } = await this.material(r);
+      const { m } = await this.material(r);
       const sb = r.red_sandbox_id as string;
       const job = `${workspaceCwd(RED_WS)}/job`;
       // The bytes Mynt stored and the IDL; nothing of the source.
-      await this.writeFiles(sb, { [`${job}/program.so.b64`]: Buffer.from(m.program).toString("base64"), "/home/user/mynt-solana-toolchain.sh": SOLANA_TOOLCHAIN_SCRIPT });
+      await this.writeFiles(sb, { [`${job}/program.so.b64`]: Buffer.from(m.program).toString("base64"), [TOOLCHAIN_INSTALLER]: SOLANA_TOOLCHAIN_SCRIPT });
       const decoded = await sandboxes.exec(sb, `base64 -d ${job}/program.so.b64 > ${job}/program.so && rm ${job}/program.so.b64 && sha256sum ${job}/program.so`, { timeoutSeconds: 120 });
       if (decoded.exitCode !== 0) throw new Error("Couldn't place the program in the red team's sandbox");
-      await sandboxes.exec(sb, "bash /home/user/mynt-solana-toolchain.sh > /home/user/.mynt-solana-install.log 2>&1", { detached: true });
-      const token = `mynt_predteam_${randomBytes(24).toString("base64url")}`;
-      await this.update(id, { red_token_hash: hash(token) });
-      const pid = await launchAgent(sandboxes, this.config, sb, {
-        prompt: "Attack the Solana program described in job/target.json, following CLAUDE.md and its skills. Write job/report.json and a runnable proof of concept for every finding, and run scripts/check_report.py until it passes.",
-        budgetUsd: Number(r.red_cap_usd),
-        token,
-        model: this.config.gateModel,
-        workspace: RED_WS,
-        jobFiles: {
-          "job/idl.json": JSON.stringify(this.agentIdl(r, m), null, 1),
-          "job/vulnerabilities.json": JSON.stringify(agentChecklist(this.vulnDb), null, 1),
-          "job/target.json": JSON.stringify(
-            {
-              program_id: p.program_id,
-              name: m.name,
-              sha256: m.sha256,
-              program_so: "job/program.so",
-              idl: "job/idl.json",
-              toolchain_env: "~/.mynt-solana/env",
-              toolchain_log: "/home/user/.mynt-solana-install.log",
-              output: "job/report.json",
-              poc_dir: "job/poc",
-              minutes: this.config.redTeamMinutes,
-            },
-            null,
-            1,
-          ),
-        },
-      });
+      // The install's exit code is kept beside its log: the red team's wait script reads it, and so does Mynt when
+      // the red team stops without a report.
+      await sandboxes.exec(sb, `bash ${TOOLCHAIN_INSTALLER} > ${TOOLCHAIN_LOG} 2>&1; echo $? > ${TOOLCHAIN_EXIT}`, { detached: true });
+      const pid = await this.startRedTeam(r, { attempt: 1, budgetUsd: Number(r.red_cap_usd), minutes: this.config.redTeamMinutes, previous: null });
       await this.update(id, { step: "red_team", red_process_id: pid, red_started_at: new Date(), step_started_at: new Date(), phase_message: "The red team is attacking the program on a local validator" });
       await this.log(id, null, "red_team_started", { model: this.config.gateModel, cap_usd: Number(r.red_cap_usd) });
       return;
@@ -1182,8 +1352,45 @@ export class MainnetGateService implements MainnetGateCheck {
       const timedOut = agent.running && this.minutes(r) > this.config.redTeamMinutes;
       if (agent.running && !timedOut) return;
       const job = `${workspaceCwd(RED_WS)}/job`;
-      const report = parseRedTeam(await sandboxes.readFile(sb, `${job}/report.json`));
-      const finished = !!report && agent.ok && !timedOut;
+      const { report, problems, incomplete } = checkRedTeamReport(await sandboxes.readFile(sb, `${job}/report.json`));
+      // The red team's result is a report that validates against the schema and doesn't say it is incomplete, from
+      // a run that ended cleanly and in time. Anything else blocks.
+      const finished = !!report && !incomplete && agent.ok && !timedOut;
+      const ending = agentEnding({ state: agent.state, timedOut, minutes: this.config.redTeamMinutes });
+      const earlier = this.attempts(r, "red_team");
+      // What Mynt sees of the toolchain's install itself: the red team can't attack without it.
+      let toolchain: string | null = null;
+      const notes: string[] = [];
+      if (!finished) {
+        const exit = (await sandboxes.readFile(sb, TOOLCHAIN_EXIT).catch(() => null))?.trim();
+        toolchain = exit === "0" ? "installed" : exit ? `failed (exit ${exit.slice(0, 8)})` : "still installing";
+        if (!exit) notes.push("the Solana toolchain was still installing when it stopped");
+        else if (exit !== "0") {
+          const log = (await sandboxes.readFile(sb, TOOLCHAIN_LOG).catch(() => null)) ?? "";
+          notes.push(`the Solana toolchain's install failed (exit ${exit.slice(0, 8)}${log.trim() ? `: ${oneLine(log.trim().split("\n").pop()!, 200)}` : ""})`);
+        }
+      }
+      const why = (attempt: number, lastMessage: string | null) =>
+        noResult({
+          who: "the red team",
+          ending,
+          file: !report ? "a valid report.json" : incomplete ? "a complete report.json" : null,
+          problems: !report ? problems : incomplete ? [`its report says it is incomplete: ${oneLine(incomplete, 300)}`] : [],
+          notes,
+          lastMessage,
+          attempt,
+        });
+      const detail = finished ? null : why(earlier.length + 1, agent.state?.summary ?? null);
+      if (detail) {
+        const next = await this.again(r, "red_team", { retry: ending.retry, capUsd: Number(r.red_cap_usd), limitMinutes: this.config.redTeamMinutes, costUsd: agent.cost });
+        if (next) {
+          const kept = await this.setAside(r, "red_team", sb, { attempt: earlier.length + 1, result: ending.result, detail, exit_code: ending.exit_code, error: ending.error, summary: agent.state?.summary?.slice(0, 1500) ?? null, cost_usd: agent.cost });
+          const pid = await this.startRedTeam(kept, { ...next, previous: why(1, null) });
+          await this.update(id, { red_process_id: pid, phase_message: `The red team stopped without a complete report; running it once more (attempt ${next.attempt} of ${GATE_AGENT_ATTEMPTS})` });
+          await this.log(id, null, "red_team_retried", { attempt: next.attempt, why: detail.slice(0, 1000) });
+          return;
+        }
+      }
       // Every PoC the report names, read back as text, for Mynt to run itself.
       const pocs: Record<string, Record<string, string>> = {};
       for (const f of report?.findings ?? []) {
@@ -1193,14 +1400,17 @@ export class MainnetGateService implements MainnetGateCheck {
       }
       const red = {
         finished,
-        agent: { result: timedOut ? `timed out after ${this.config.redTeamMinutes} min` : (agent.state?.last_subtype ?? null), summary: report?.summary ?? agent.state?.summary?.slice(0, 1500) ?? null },
+        attempt: earlier.length + 1,
+        agent: { result: ending.result, summary: report?.summary ?? agent.state?.summary?.slice(0, 1500) ?? null, exit_code: ending.exit_code, error: ending.error, ...(detail ? { detail } : {}) },
+        ...(detail ? { report_problems: problems, incomplete_reason: incomplete, toolchain } : {}),
+        ...(earlier.length ? { earlier_attempts: earlier } : {}),
         attacks_tried: report?.attacks_tried ?? [],
         findings: (report?.findings ?? []).map((f) => ({ ...f, poc: f.poc && pocs[f.poc] ? f.poc : null, poc_files: f.poc && pocs[f.poc] ? Object.keys(pocs[f.poc]) : [] })),
       };
       await sandboxes.stop(sb).catch(() => {});
       await this.update(id, { red_team: { ...red, pocs }, red_token_hash: null });
-      await this.log(id, null, "red_team_finished", { finished, findings: red.findings.length, pocs: Object.keys(pocs).length });
-      if (!finished) return this.block(r, `No complete red-team result (${red.agent.result ?? "no result"}${report ? "" : ", no valid report.json"}); a mainnet program can't pass without one`);
+      await this.log(id, null, "red_team_finished", { finished, findings: red.findings.length, pocs: Object.keys(pocs).length, ...(detail ? { why: detail.slice(0, 1000) } : {}) });
+      if (detail) return this.block(r, `No complete red-team result (${detail}); a mainnet program can't pass without one`);
       if (!Object.keys(pocs).length) return this.gatesPassed({ ...r, red_team: red });
       const s = await this.newSandbox(r, "program-poc-confirm");
       await this.update(id, { step: "confirm_provisioning", confirm_sandbox_id: s.id, step_started_at: new Date(), phase_message: `Mynt is re-running ${Object.keys(pocs).length} proof(s) of concept itself` });

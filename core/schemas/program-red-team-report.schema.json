@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mynt:schema:program-red-team-report:1",
+  "title": "Program red-team report",
+  "description": "What Mynt's program red team writes to job/report.json. The mainnet program gate validates the report against this file, and the red team's own check (scripts/check_report.py in its workspace) validates against the same file, handed to it as job/report.schema.json. A report that doesn't validate, or that says it is incomplete, never lets a program pass.",
+  "type": "object",
+  "required": ["findings", "attacks_tried", "summary"],
+  "properties": {
+    "complete": {
+      "type": "boolean",
+      "description": "false while the work is unfinished, or when the program couldn't be attacked at all (then incomplete_reason says why). Leave it out, or set it true, only when every attack you meant to try has been run."
+    },
+    "incomplete_reason": {
+      "type": "string",
+      "pattern": "\\S",
+      "maxLength": 1000,
+      "description": "Required when complete is false: what stopped the work (for example the toolchain's install failed, with the last line of its log)."
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 50,
+      "description": "One entry per weakness found. Empty when nothing exploitable was found.",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "severity", "description"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,40}$" },
+          "title": { "type": "string", "pattern": "\\S", "maxLength": 300 },
+          "severity": { "enum": ["critical", "high", "medium", "low", "info"] },
+          "category": { "type": "string", "maxLength": 60 },
+          "vulnerability": { "type": ["string", "null"], "maxLength": 60, "description": "The vulnerability database entry's id, when the finding belongs to one." },
+          "description": { "type": "string", "pattern": "\\S", "maxLength": 3000, "description": "What an attacker does and what they gain." },
+          "poc": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]{1,40}$", "description": "The proof of concept's folder name under job/poc (the folder holds run.sh). Null or absent for a finding that couldn't be proved." }
+        }
+      }
+    },
+    "attacks_tried": {
+      "type": "array",
+      "maxItems": 200,
+      "description": "Each attack tried and what happened, one line each.",
+      "items": { "type": "string", "pattern": "\\S", "maxLength": 1000 }
+    },
+    "summary": { "type": "string", "maxLength": 3000 }
+  },
+  "if": { "required": ["complete"], "properties": { "complete": { "const": false } } },
+  "then": { "required": ["incomplete_reason"] },
+  "else": { "properties": { "attacks_tried": { "minItems": 1 }, "summary": { "pattern": "\\S" } } }
+}

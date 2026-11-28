@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -14,7 +16,7 @@ const { createServer } = await import("../dist/server.js");
 const { Store } = await import("../dist/store.js");
 const { SolanaService } = await import("../dist/solana/service.js");
 const { executableHash, base58Decode } = await import("../dist/solana/codec.js");
-const { MainnetGateService, gateConfigFromEnv, assessStatic, assessAudit } = await import("../dist/solana/mainnet-gate.js");
+const { MainnetGateService, gateConfigFromEnv, assessStatic, assessAudit, checkRedTeamReport, agentEnding, RED_TEAM_REPORT_SCHEMA_FILE } = await import("../dist/solana/mainnet-gate.js");
 const { loadVulnDb, entryProblems, dbProblems, suggestFromAdvisories, VULN_CATEGORIES } = await import("../dist/solana/vuln-db.js");
 const { runDetections } = await import("../dist/solana/program-rules.js");
 const CRATE_TREE = await import("../dist/solana/crate-tree.js");
@@ -241,19 +243,43 @@ class FakeSandboxHost {
     if (command.includes("runner.mjs")) {
       const auth = JSON.parse(files.get(`${AGENT_DIR}/auth.json`));
       (this.tokens ??= {})[role] = auth.token;
-      const done = (ok = true) => put(`${AGENT_DIR}/state.json`, { done: true, last_subtype: ok ? "success" : "error_max_budget_usd", cost_usd: 1.5, summary: "done" });
+      const done = (ok = true, summary = "done") => put(`${AGENT_DIR}/state.json`, { done: true, last_subtype: ok ? "success" : "error_max_budget_usd", cost_usd: 1.5, summary });
+      // `auditRuns` / `redTeamRuns`: what each launch of the agent does, in order: { file, summary, state } (a file of
+      // undefined writes nothing; `state` replaces the runner's whole record, null leaving none).
+      const scripted = (runs, launches) => (runs ? (runs[launches.length - 1] ?? runs[runs.length - 1]) : null);
+      const end = (run) => (run.state !== undefined ? (run.state === null ? files.delete(`${AGENT_DIR}/state.json`) : put(`${AGENT_DIR}/state.json`, run.state)) : done(true, run.summary));
       if (role === "program-analysis") {
         sb.auditJob = JSON.parse(files.get(`${workspaceCwd("program-audit")}/job/review.json`));
-        if (this.script.audit !== null) put(`${workspaceCwd("program-audit")}/job/findings.json`, this.script.audit ?? { findings: [], summary: "nothing found" });
-        done(this.script.auditOk ?? true);
+        (sb.auditJobs ??= []).push(sb.auditJob);
+        const run = scripted(this.script.auditRuns, sb.auditJobs);
+        if (run) {
+          if (run.file !== undefined) put(`${workspaceCwd("program-audit")}/job/findings.json`, run.file);
+          end(run);
+        } else {
+          if (this.script.audit !== null) put(`${workspaceCwd("program-audit")}/job/findings.json`, this.script.audit ?? { findings: [], summary: "nothing found" });
+          done(this.script.auditOk ?? true);
+        }
       } else {
         sb.redJob = JSON.parse(files.get(`${workspaceCwd("program-red-team")}/job/target.json`));
+        (sb.redJobs ??= []).push(sb.redJob);
         const job = `${workspaceCwd("program-red-team")}/job`;
-        put(`${job}/report.json`, this.script.redTeam ?? { findings: [], attacks_tried: ["wrong signer: rejected"], summary: "held up" });
-        for (const [path, text] of Object.entries(this.script.pocFiles ?? {})) put(`${job}/poc/${path}`, text);
-        done();
+        const run = scripted(this.script.redTeamRuns, sb.redJobs);
+        if (run) {
+          if (run.file !== undefined) put(`${job}/report.json`, run.file);
+          end(run);
+        } else {
+          put(`${job}/report.json`, this.script.redTeam ?? { findings: [], attacks_tried: ["wrong signer: rejected"], summary: "held up" });
+          for (const [path, text] of Object.entries(this.script.pocFiles ?? {})) put(`${job}/poc/${path}`, text);
+          done();
+        }
       }
       return { processId: 22, exitCode: null, stdout: "", stderr: "" };
+    }
+    if (command.includes("mynt-solana-toolchain.sh")) {
+      sb.toolchainCommand = command;
+      if (this.script.toolchainExit !== undefined) put("/home/user/.mynt-solana-install.exit", `${this.script.toolchainExit}\n`);
+      if (this.script.toolchainLog) put("/home/user/.mynt-solana-install.log", this.script.toolchainLog);
+      return { processId: 55, exitCode: null, stdout: "", stderr: "" };
     }
     if (command.includes("find . -path ./node_modules")) {
       const dir = /cd (\S+) /.exec(command)[1];
@@ -583,6 +609,309 @@ test("the gate's agents are steered by their workspaces, with human-written skil
   }
   assert.match(workspaceFiles("program-audit")["CLAUDE.md"], /job\/findings\.json/);
   assert.match(workspaceFiles("program-red-team")["CLAUDE.md"], /claim\.json[\s\S]*attack\.json/);
+});
+
+// ---- the agents' results: one contract, and a recorded reason when there is none ----
+
+const RED_WORKSPACE = new URL("../workspaces/program-red-team/", import.meta.url).pathname;
+const RED_CLAUDE_MD = readFileSync(join(RED_WORKSPACE, "CLAUDE.md"), "utf8");
+// The red team's workspace as its sandbox has it: the folder, plus the job files Mynt writes.
+const redWorkspace = (target = {}) => {
+  const dir = mkdtempSync(join(tmpdir(), "mynt-red-"));
+  cpSync(RED_WORKSPACE, dir, { recursive: true });
+  mkdirSync(join(dir, "job"));
+  writeFileSync(join(dir, "job/report.schema.json"), readFileSync(RED_TEAM_REPORT_SCHEMA_FILE, "utf8"));
+  writeFileSync(join(dir, "job/target.json"), JSON.stringify({ program_id: ID, program_so: "job/program.so", output: "job/report.json", schema: "job/report.schema.json", poc_dir: "job/poc", ...target }));
+  return dir;
+};
+const redReview = async (w) => {
+  const id = await w.mainnetProgram();
+  const b = await w.build(id);
+  const r = await w.ok(w.dev, "request_mainnet_review", { program_id: id, build_id: b.build_id });
+  await w.tick(12);
+  return w.review(r.review_id);
+};
+const redSandbox = (w) => [...w.sandboxes.sandboxes.values()].find((x) => x.redJobs);
+
+test("the red team's report has one contract: the report its workspace documents is the report the gate accepts, and its own check agrees with the gate", () => {
+  // Exactly what the workspace tells the agent to write: the example under Finish, and the first-step placeholder.
+  const example = /## Finish[\s\S]*?```json\n([\s\S]*?)```/.exec(RED_CLAUDE_MD)[1];
+  const documented = checkRedTeamReport(example);
+  assert.deepEqual(documented.problems, []);
+  assert.equal(documented.incomplete, null, "the documented example is a complete report");
+  assert.equal(documented.report.findings[0].poc, "R1");
+  const placeholder = /write `job\/report\.json` as\s+`(\{[^`]+\})`/.exec(RED_CLAUDE_MD)[1];
+  assert.deepEqual(checkRedTeamReport(placeholder).problems, []);
+  assert.equal(checkRedTeamReport(placeholder).incomplete, "not finished yet", "the placeholder is valid, and never a result");
+  // The workspace names the files and scripts the gate hands over and the agent must use.
+  for (const named of ["job/report.json", "job/report.schema.json", "scripts/check_report.py", "scripts/wait_toolchain.sh", "scripts/start_validator.sh"]) assert.ok(RED_CLAUDE_MD.includes(named), named);
+  for (const script of ["check_report.py", "wait_toolchain.sh", "start_validator.sh"]) assert.ok(statSync(join(RED_WORKSPACE, "scripts", script)).isFile(), script);
+
+  // The gate (ajv, on the schema file) and the agent's own check (check_report.py, on the same file) give the same
+  // verdict on each of these: 0 complete, 2 valid but incomplete, 1 refused.
+  const finding = { id: "R1", title: "Anyone resets any ledger", severity: "critical", category: "wrong_signer", description: "d", poc: "R1" };
+  const good = { findings: [], attacks_tried: ["wrong signer on record: rejected"], summary: "Nothing exploitable found." };
+  const cases = [
+    [JSON.parse(example), 0],
+    [good, 0],
+    [{ ...good, complete: true, findings: [{ ...finding, poc: null }, { ...finding, id: "R2", vulnerability: null, poc: undefined }] }, 0],
+    [JSON.parse(placeholder), 2],
+    [{ ...good, complete: false, incomplete_reason: "the toolchain's install failed: checksum mismatch" }, 2],
+    [{ ...good, complete: false }, 1],
+    [{ ...good, complete: false, incomplete_reason: "  " }, 1],
+    [{ ...good, complete: "yes" }, 1],
+    [{ findings: [] }, 1],
+    [{ ...good, attacks_tried: [] }, 1],
+    [{ ...good, attacks_tried: [""] }, 1],
+    [{ ...good, attacks_tried: "none" }, 1],
+    [{ ...good, summary: " " }, 1],
+    [{ ...good, summary: undefined }, 1],
+    [{ ...good, findings: [{ ...finding, severity: "High" }] }, 1],
+    [{ ...good, findings: [{ ...finding, title: "" }] }, 1],
+    [{ ...good, findings: [{ ...finding, description: undefined }] }, 1],
+    [{ ...good, findings: [{ ...finding, poc: "poc/R1" }] }, 1],
+    [{ ...good, findings: [{ ...finding, id: 7 }] }, 1],
+    [{ ...good, findings: ["R1"] }, 1],
+    [[good], 1],
+  ];
+  const dir = redWorkspace();
+  mkdirSync(join(dir, "job/poc/R1"), { recursive: true });
+  writeFileSync(join(dir, "job/poc/R1/run.sh"), "exit 0\n");
+  const check = () => spawnSync("python3", ["-I", join(dir, "scripts/check_report.py")], { encoding: "utf8" });
+  try {
+    assert.equal(check().status, 1, "no report yet");
+    assert.match(check().stderr, /doesn't exist yet/);
+    for (const [report, expected] of cases) {
+      const text = JSON.stringify(report);
+      const gate = checkRedTeamReport(text);
+      assert.equal(gate.report ? (gate.incomplete ? 2 : 0) : 1, expected, `the gate on ${text}: ${gate.problems.join("; ")}`);
+      writeFileSync(join(dir, "job/report.json"), text);
+      const mine = check();
+      assert.equal(mine.status, expected, `check_report.py on ${text}: ${mine.stdout}${mine.stderr}`);
+    }
+    // The check also catches what only the sandbox can show: a finding naming a PoC that isn't there.
+    writeFileSync(join(dir, "job/report.json"), JSON.stringify({ ...good, findings: [{ ...finding, poc: "R9" }] }));
+    assert.match(check().stdout, /job\/poc\/R9\/run\.sh doesn't exist/);
+    writeFileSync(join(dir, "job/report.json"), "{not json");
+    assert.equal(check().status, 1);
+    // A schema keyword the check doesn't implement is an error, never skipped: the two can't drift apart silently.
+    writeFileSync(join(dir, "job/report.schema.json"), JSON.stringify({ type: "object", minProperties: 1 }));
+    writeFileSync(join(dir, "job/report.json"), JSON.stringify(good));
+    assert.match(check().stderr, /doesn't know the schema keyword\(s\) minProperties/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  assert.deepEqual(checkRedTeamReport(null).problems, ["report.json doesn't exist"]);
+  assert.deepEqual(checkRedTeamReport("{not json").problems, ["report.json isn't valid JSON"]);
+  assert.match(checkRedTeamReport(JSON.stringify({ ...good, findings: [{ ...finding, severity: "High" }] })).problems.join("; "), /report\.json \/findings\/0\/severity: must be equal to one of the allowed values \(critical, high, medium, low, info\)/);
+});
+
+test("the red team's sandbox gets the schema the gate validates with, and the toolchain's exit code is kept for its wait script", async () => {
+  const w = await world();
+  const v = await redReview(w);
+  assert.equal(v.status, "awaiting_approval", v.blocked_reason);
+  const sb = redSandbox(w);
+  assert.equal(sb.files.get(`${workspaceCwd("program-red-team")}/job/report.schema.json`), readFileSync(RED_TEAM_REPORT_SCHEMA_FILE, "utf8"));
+  assert.deepEqual(
+    { schema: sb.redJob.schema, output: sb.redJob.output, exit: sb.redJob.toolchain_exit, log: sb.redJob.toolchain_log, installer: sb.redJob.toolchain_installer, attempt: sb.redJob.attempt, attempts: sb.redJob.attempts },
+    { schema: "job/report.schema.json", output: "job/report.json", exit: "/home/user/.mynt-solana-install.exit", log: "/home/user/.mynt-solana-install.log", installer: "/home/user/mynt-solana-toolchain.sh", attempt: 1, attempts: 2 },
+  );
+  assert.equal(sb.toolchainCommand, "bash /home/user/mynt-solana-toolchain.sh > /home/user/.mynt-solana-install.log 2>&1; echo $? > /home/user/.mynt-solana-install.exit");
+  assert.ok(sb.files.has("/home/user/mynt-solana-toolchain.sh"));
+  for (const f of ["CLAUDE.md", "scripts/check_report.py", "scripts/wait_toolchain.sh", "scripts/start_validator.sh"]) assert.ok(sb.files.has(`${workspaceCwd("program-red-team")}/${f}`), f);
+  assert.equal(v.checks.red_team.attempt, 1);
+  assert.equal(v.checks.red_team.agent.detail, undefined);
+});
+
+test("a red team that ends its turn without a report runs once more, told why; a second such end blocks, saying how it ended, what the toolchain was doing and its last words", async () => {
+  // What production's first runs did: the turn ended cleanly, minutes in, with no report. The second attempt finishes.
+  const report = { complete: true, findings: [], attacks_tried: ["wrong signer on record: rejected"], summary: "held up" };
+  let w = await world({ redTeamRuns: [{ summary: "The toolchain is installing in the background; I'll continue when it is ready." }, { file: report, summary: "done" }] });
+  let v = await redReview(w);
+  assert.equal(v.status, "awaiting_approval", v.blocked_reason);
+  let sb = redSandbox(w);
+  assert.equal(sb.redJobs.length, 2);
+  assert.equal(sb.redJobs[1].attempt, 2);
+  assert.match(sb.redJobs[1].previous_attempt, /^the red team ended its turn without a valid report\.json: report\.json doesn't exist; the Solana toolchain was still installing when it stopped$/);
+  assert.equal(w.sandboxes.stopped.includes([...w.sandboxes.sandboxes.entries()].find(([, x]) => x === sb)[0]), true);
+  assert.equal(v.checks.red_team.finished, true);
+  assert.equal(v.checks.red_team.attempt, 2);
+  assert.equal(v.checks.red_team.earlier_attempts.length, 1);
+  assert.equal(v.checks.red_team.earlier_attempts[0].result, "success");
+  assert.match(v.checks.red_team.earlier_attempts[0].summary, /installing in the background/);
+  const events = (await w.db.query("SELECT event, detail FROM financial_products.solana_mainnet_review_log ORDER BY created_at")).rows;
+  assert.equal(events.filter((e) => e.event === "red_team_retried").length, 1);
+
+  // Twice: blocked, and the review says what happened instead of only "no valid report.json".
+  w = await world({ redTeamRuns: [{ summary: "Waiting for the toolchain; I'll be notified when it is ready." }] });
+  v = await redReview(w);
+  assert.equal(v.status, "blocked");
+  assert.equal(redSandbox(w).redJobs.length, 2, "one more attempt, never a third");
+  assert.equal(
+    v.blocked_reason,
+    `No complete red-team result (the red team ended its turn without a valid report.json, on both attempts: report.json doesn't exist; the Solana toolchain was still installing when it stopped; its last message: "Waiting for the toolchain; I'll be notified when it is ready."); a mainnet program can't pass without one`,
+  );
+  assert.equal(v.checks.red_team.finished, false);
+  assert.equal(v.checks.red_team.toolchain, "still installing");
+  assert.deepEqual(v.checks.red_team.report_problems, ["report.json doesn't exist"]);
+  assert.match(v.checks.red_team.agent.detail, /ended its turn without a valid report\.json/);
+
+  // A failed install is named, with the end of its log.
+  w = await world({ toolchainExit: 1, toolchainLog: "fetching\nchecksum mismatch for the Agave release\n", redTeamRuns: [{ file: { complete: false, incomplete_reason: "the toolchain's install failed twice: checksum mismatch", findings: [], attacks_tried: [], summary: "" }, summary: "I couldn't install the toolchain." }] });
+  v = await redReview(w);
+  assert.equal(v.status, "blocked", "an incomplete report never passes");
+  assert.match(v.blocked_reason, /the red team ended its turn without a complete report\.json, on both attempts: its report says it is incomplete: the toolchain's install failed twice: checksum mismatch; the Solana toolchain's install failed \(exit 1: checksum mismatch for the Agave release\)/);
+  assert.equal(v.checks.red_team.toolchain, "failed (exit 1)");
+  assert.equal(v.checks.red_team.incomplete_reason, "the toolchain's install failed twice: checksum mismatch");
+
+  // A report the schema refuses blocks too, naming what is wrong (the toolchain was fine, so it isn't mentioned).
+  w = await world({ toolchainExit: 0, redTeamRuns: [{ file: { findings: [] }, summary: "Nothing found." }] });
+  v = await redReview(w);
+  assert.equal(v.status, "blocked");
+  assert.match(v.blocked_reason, /without a valid report\.json, on both attempts: report\.json: must have required property 'attacks_tried'; report\.json: must have required property 'summary'; its last message: "Nothing found\."/);
+  assert.equal(v.checks.red_team.toolchain, "installed");
+
+  // Out of budget or out of time is never retried: one attempt, blocked.
+  w = await world({ toolchainExit: 0, redTeamRuns: [{ state: { done: true, last_subtype: "error_max_budget_usd", cost_usd: 8, summary: null } }] });
+  v = await redReview(w);
+  assert.equal(v.status, "blocked");
+  assert.equal(redSandbox(w).redJobs.length, 1);
+  assert.match(v.blocked_reason, /^No complete red-team result \(the red team ran out of its budget without a valid report\.json: report\.json doesn't exist\)/);
+  // A complete report from a run that then ran out of budget still isn't a clean result.
+  w = await world({ toolchainExit: 0, redTeamRuns: [{ file: report, state: { done: true, last_subtype: "error_max_budget_usd", cost_usd: 8, summary: null } }] });
+  v = await redReview(w);
+  assert.equal(v.status, "blocked");
+  assert.match(v.blocked_reason, /^No complete red-team result \(the red team ran out of its budget\)/);
+});
+
+test("the program-audit agent: an early end or a run that broke off runs once more; twice blocks with the reason", async () => {
+  // The run broke off before any result (the "no result" case): the second attempt writes its findings.
+  let w = await world({ auditRuns: [{ state: { done: true, last_subtype: null, exit_code: 1, error: null, cost_usd: 0.2, summary: null } }, { file: { findings: [], summary: "nothing found" } }] });
+  let v = await redReview(w);
+  assert.equal(v.status, "awaiting_approval", v.blocked_reason);
+  const sb = [...w.sandboxes.sandboxes.values()].find((x) => x.auditJobs);
+  assert.equal(sb.auditJobs.length, 2);
+  assert.deepEqual([sb.auditJobs[0].attempt, sb.auditJobs[1].attempt, sb.auditJobs[1].attempts], [1, 2, 2]);
+  assert.equal(sb.auditJobs[1].previous_attempt, "the program-audit agent broke off before its first turn ended (exit 1) without a valid findings.json: findings.json doesn't exist");
+  assert.equal(v.checks.audit.attempt, 2);
+  assert.equal(v.checks.audit.earlier_attempts[0].result, null);
+
+  w = await world({ auditRuns: [{ summary: "I have started the sweep in the background." }] });
+  v = await redReview(w);
+  assert.equal(v.status, "blocked");
+  assert.equal(v.blocked_reason, `No complete independent audit (the program-audit agent ended its turn without a valid findings.json, on both attempts: findings.json doesn't exist; its last message: "I have started the sweep in the background."); a mainnet program can't pass without one`);
+  assert.equal([...w.sandboxes.sandboxes.values()].find((x) => x.auditJobs).auditJobs.length, 2);
+
+  // The runner never got as far as a record.
+  assert.deepEqual(agentEnding({ state: null, timedOut: false, minutes: 30 }), { exit_code: null, error: null, result: null, how: "left no record of its run (it never started, or its sandbox was lost)", retry: true });
+  assert.equal(agentEnding({ state: { last_subtype: null, done: true, exit_code: 1, error: "Couldn't install Claude Code 2.1.0", summary: null }, timedOut: false, minutes: 30 }).how, "failed to run (Couldn't install Claude Code 2.1.0)");
+  assert.deepEqual(agentEnding({ state: { last_subtype: "success", done: false, exit_code: null, error: null, summary: null }, timedOut: true, minutes: 30 }), { exit_code: null, error: null, result: "timed out after 30 min", how: "ran out of time (30 min)", retry: false });
+});
+
+test("the red team's wait script waits in the foreground and says whether the toolchain is ready, still installing or failed", () => {
+  const home = mkdtempSync(join(tmpdir(), "mynt-home-"));
+  const dir = redWorkspace({ toolchain_env: join(home, ".mynt-solana/env"), toolchain_log: join(home, "install.log"), toolchain_exit: join(home, "install.exit"), toolchain_installer: join(home, "toolchain.sh") });
+  const wait = (seconds = "0") => spawnSync("bash", [join(dir, "scripts/wait_toolchain.sh"), seconds], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: home } });
+  try {
+    writeFileSync(join(home, "install.log"), "Downloading the Agave release\n");
+    let r = wait();
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.match(r.stdout, /still installing after 0s[\s\S]*Downloading the Agave release[\s\S]*Run this script again now, in the foreground\. Don't end your turn to wait\./);
+    // The env file alone isn't ready: the installer writes it before its last steps.
+    mkdirSync(join(home, ".mynt-solana"));
+    writeFileSync(join(home, ".mynt-solana/env"), "export PATH\n");
+    assert.equal(wait().status, 2);
+    writeFileSync(join(home, "install.exit"), "1\n");
+    writeFileSync(join(home, "install.log"), "Downloading the Agave release\nchecksum mismatch for the release\n");
+    r = wait();
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /FAILED: the toolchain's install exited 1[\s\S]*checksum mismatch for the release[\s\S]*toolchain\.sh[\s\S]*complete false/);
+    // Ready once the installer's marker is there (also after the agent's own second run of the installer).
+    writeFileSync(join(home, ".mynt-solana/ready-1-2-3"), "");
+    r = wait();
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /^ready: run '\. .*\.mynt-solana\/env'/);
+    // It becomes ready while a call is waiting.
+    rmSync(join(home, ".mynt-solana/ready-1-2-3"));
+    rmSync(join(home, "install.exit"));
+    const started = Date.now();
+    r = spawnSync("bash", ["-c", `(sleep 1; touch '${join(home, ".mynt-solana/ready-1-2-3")}') & bash '${join(dir, "scripts/wait_toolchain.sh")}' 30`], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: home } });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.ok(Date.now() - started < 20_000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("the red team's validator script starts the validator detached with the program at its address, waits until it answers, restarts clean and stops only its own", () => {
+  const home = mkdtempSync(join(tmpdir(), "mynt-home-"));
+  const dir = redWorkspace({ toolchain_env: join(home, ".mynt-solana/env") });
+  const bin = join(home, "bin");
+  mkdirSync(bin);
+  mkdirSync(join(home, ".mynt-solana"));
+  writeFileSync(join(home, ".mynt-solana/env"), `export PATH="${bin}:$PATH"\n`);
+  writeFileSync(join(dir, "job/program.so"), "elf");
+  // Stand-ins for the two binaries: a keygen, and a validator that answers getHealth and getAccountInfo.
+  writeFileSync(join(bin, "solana-keygen"), `#!/usr/bin/env bash\nif [ "$1" = new ]; then while [ $# -gt 0 ]; do [ "$1" = --outfile ] && echo '[1]' > "$2"; shift; done; else echo AuthorityPubkey1111111111111111111111111111; fi\n`);
+  writeFileSync(
+    join(bin, "solana-test-validator"),
+    `#!/usr/bin/env python3
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+args = sys.argv[1:]
+port = int(args[args.index("--rpc-port") + 1])
+program = args[args.index("--upgradeable-program") + 1]
+open(args[args.index("--ledger") + 1] + ".args", "w").write(json.dumps(args))
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        result = "ok" if req["method"] == "getHealth" else {"value": {"owner": "x"} if req["params"][0] == program else None}
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "result": result}).encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a): pass
+HTTPServer(("127.0.0.1", port), H).serve_forever()
+`,
+  );
+  chmodSync(join(bin, "solana-keygen"), 0o755);
+  chmodSync(join(bin, "solana-test-validator"), 0o755);
+  const port = String(20000 + Math.floor(Math.random() * 20000));
+  const run = (...args) => spawnSync("bash", [join(dir, "scripts/start_validator.sh"), ...args], { encoding: "utf8", timeout: 60_000, env: { PATH: process.env.PATH, HOME: home, MYNT_VALIDATOR_RPC_PORT: port } });
+  const alive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  try {
+    let r = run();
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, new RegExp(`^ready: http://127\\.0\\.0\\.1:${port} has ${ID} loaded`));
+    const first = Number(readFileSync(join(dir, "job/validator/pid"), "utf8"));
+    assert.ok(alive(first), "it outlives the script: detached, not a background task of the agent's");
+    const args = JSON.parse(readFileSync(join(dir, "job/validator/ledger.args"), "utf8"));
+    assert.deepEqual(args.slice(args.indexOf("--upgradeable-program"), args.indexOf("--upgradeable-program") + 4), ["--upgradeable-program", ID, "job/program.so", "AuthorityPubkey1111111111111111111111111111"]);
+    assert.ok(args.includes("--reset"));
+    // Again: the earlier one is stopped, and a new one answers.
+    r = run();
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const second = Number(readFileSync(join(dir, "job/validator/pid"), "utf8"));
+    assert.notEqual(second, first);
+    assert.ok(!alive(first) && alive(second));
+    assert.equal(run("stop").stdout.trim(), "stopped");
+    assert.ok(!alive(second));
+    // Without the toolchain it says what to run first, and starts nothing.
+    rmSync(join(home, ".mynt-solana/env"));
+    r = run();
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /run 'bash scripts\/wait_toolchain\.sh' first/);
+  } finally {
+    run("stop");
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 // ---- the vulnerability database ----
