@@ -758,6 +758,31 @@ test("a service in Production: a new build takes over only with its own complete
   assert.ok(!(await productionBlockers(w.store, app.id, b)).some((x) => x.startsWith("Production code review passed")));
 });
 
+test("removing an app takes its reviews and exceptions with it, and is refused while a review is in progress", async () => {
+  const w = await setup();
+  const app = await w.newApp();
+  const b = await w.build(app.id);
+  const first = await w.started(w.ana, app.id);
+  await w.finish(first.sid, partial("refused", "the model refused the work", { model_refusal: { workflows: ["execute-scr"], count: 1, request_ids: ["req_011Cremove"] } }));
+  await w.ada.call("waive_production_review", { app_id: app.id, build_id: b, reason: "The provider refuses the security review; approval pending" });
+  // What the reviewer spent on the model is the review's, under its own meter key.
+  await w.pg.query("CREATE TABLE IF NOT EXISTS financial_products.agent_spend (run_key text PRIMARY KEY, usd numeric, calls integer)");
+  await w.pg.query("INSERT INTO financial_products.agent_spend (run_key, usd, calls) VALUES ($1, 12.5, 40)", [`production-review:${first.id}`]);
+  const second = await w.started(w.ana, app.id);
+  const refused = (await w.ada.call("remove_app", { app_id: app.id })).data;
+  assert.equal(refused.removed, false);
+  assert.ok(refused.refused.some((r) => r === `Production code review ${second.id} is still running: stop it first (stop_production_review)`), JSON.stringify(refused.refused));
+  await w.ada.call("stop_production_review", { id: second.id });
+  const dry = (await w.ada.call("remove_app", { app_id: app.id })).data;
+  assert.equal(dry.dry_run, true, JSON.stringify(dry));
+  assert.deepEqual([dry.would_remove.rows.production_reviews, dry.would_remove.rows.production_review_waivers, dry.would_remove.rows.agent_spend], [2, 1, 1]);
+  const removed = (await w.ada.call("remove_app", { app_id: app.id, confirm: true, reason: "a test app" })).data;
+  assert.equal(removed.removed, true, JSON.stringify(removed));
+  for (const t of ["production_reviews", "production_review_waivers", "agent_spend"]) assert.equal((await w.pg.query(`SELECT count(*)::int AS n FROM financial_products.${t}`)).rows[0].n, 0, t);
+  // What happened stays in the audit trail.
+  assert.equal((await w.audits("waive_production_review")).length, 1);
+});
+
 test("coverage is read from the report alone: what finished, what didn't and why", () => {
   assert.equal(reviewCoverage(null, ["execute-scr"]), null);
   assert.deepEqual(reviewCoverage({ workflows_run: ["execute-scr"], skipped: [{ workflow: "probe-cicd-env", kind: "time", reason: "ended at the  time limit" }] }, ["execute-scr", "probe-cicd-env", "other"]), {
