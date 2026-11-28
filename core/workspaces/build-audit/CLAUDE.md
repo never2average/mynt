@@ -17,6 +17,21 @@ steps are the same.
 - `budget_usd` and `model`: the model budget left for this audit (Maxwell's runs spend from it too) and its model;
 - `attempt` (of `attempts`): when it is 2, an earlier run ended without a complete report. Start again from step 1.
 
+`job/pipeline-evidence.json` is the pipeline's record. The application's repository has no pipeline files of its
+own: every build of it goes through Mynt's verification, which ran on this exact source, in this clean sandbox,
+before you started. Mynt wrote the record from its own results; the agent that wrote the application had no part
+in it. It gives:
+- `gates`: each check Mynt ran, with its tool and version, the command, the bar it holds a build to, its result
+  and when it ran. A `fail` stops the build;
+- `images`: each container image Mynt built from this source, with its base images, its scan counts (and every
+  high or critical vulnerability by id) and the path of its CycloneDX SBOM; `images_not_scanned` and
+  `image_coverage` say what the scan left out;
+- `sbom.source`: the path of the source's CycloneDX SBOM;
+- `deployment`: how the images reach production, and what the scanned images are and aren't.
+
+A production code review has no such file: Mynt's checks ran when the build was verified, in another sandbox,
+and their results are not here. Without the file, register only what the checkout itself shows.
+
 ## Rules
 - **Do not modify anything inside `app_dir`:** no edits, new files, deletions or fixes, and don't make it
   writable. Mynt re-hashes the tree afterwards, and any change blocks the build. Work, clone and install in your
@@ -42,6 +57,12 @@ Run the script from this folder. It does the `maxwell-static-audit` skill's step
    Maxwell's own helpers. The application's checkout is a copy of `app_dir` at
    `~/maxwell/applications/<app_id>/repos/<repo_id>/`, without any `node_modules` or `.git` folder. Do only
    this: don't review the code yourself.
+   Register the pipeline as `job/pipeline-evidence.json` records it, no more and no less, in Maxwell's own
+   records: the repository's CI system; the company's gates, each with its tool and whether it blocks; and one
+   image record per entry of `images`, with its scan summary and its SBOM copied to where Maxwell keeps an
+   image's SBOM. Put a copy of the record itself in the checkout copy at `.mynt/pipeline-evidence.json`, so the
+   workflows can read it beside the source. A gate or image the record doesn't list isn't registered, and
+   nothing in the record is a reason to leave a finding out.
 3. `node scripts/audit.mjs run --company mynt-verify --app <app_id>`. It checks the registration with Maxwell's
    own checks, starts the workflows in the background and returns at once. If it refuses, it names what is
    missing: fix that and run it again.

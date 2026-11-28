@@ -154,14 +154,23 @@ The agent doesn't grade its own work. When it finishes, Mynt verifies the build 
 
 1. **Package.** Mynt packages the source (without dependencies) and records its SHA-256. The verifier downloads it and checks the checksum.
 2. **Mynt's own checks** (`core/src/verify-script.ts`):
-   - tests;
-   - lint and types;
-   - a secrets scan with `gitleaks`;
-   - a dependency audit;
-   - a CycloneDX software bill of materials (SBOM) with `syft`;
-   - every required disclosure present in the source.
 
-   `gitleaks` and `syft` are pinned versions, checked against their releases' published checksums.
+   | Check | What Mynt runs | Fails when |
+   |---|---|---|
+   | `source` | the package's SHA-256 | it isn't the one Mynt recorded |
+   | `tests` | `npm ci`, then `npm test` (or `pytest`) | a test fails, or there are none |
+   | `lint_typecheck` | the app's `lint` and `typecheck` scripts | either fails (a warning when the app has neither) |
+   | `secrets_scan` | `gitleaks` over the files of the source | any secret is found |
+   | `secrets_history` | `gitleaks` over the repository's history | never: a secret only in the history is a warning to rotate it |
+   | `dependency_audit` | `npm audit --omit=dev --audit-level=high` on the source's lockfile (or `pip-audit`) | a production dependency has a high or critical advisory |
+   | `static_scan` | `njsscan` and `bandit`, test files left out | a high-severity finding |
+   | `sbom` | `syft`: a CycloneDX SBOM of the source, and one of every image built for `image_scan` | the source or an image has no SBOM with components |
+   | `image_scan` | the app's images built with `docker build`, then `grype` over each image's SBOM | see [The image scan](#the-image-scan) |
+   | `disclosures` | a search of the source for every disclosure the app's products require | one is missing |
+
+   `gitleaks`, `syft` and `grype` are pinned by version and by the SHA-256 of their release archive, both kept in `core/src/verify-script.ts`; a download that doesn't match is not used and its check fails. `njsscan` and `bandit` are pinned by version. To move a scanner, change its version and its two hashes (x86-64 and arm64) together.
+
+   The dependency gate is Mynt's command, run whatever the app's own scripts and install flags say. An install's `--no-audit` only leaves npm's advisory printout out of that install. The starter has the same command as `npm run audit`, so a developer and CI can run the gate Mynt runs.
 3. **Independent audit**, only with `BUILD_AUDIT=maxwell`. See [The independent audit](#the-independent-audit).
 4. **Decision**, from Mynt's results only. The agent's own report is kept, as advice.
    - The build is `blocked` when the source changed during the audit, when an audit didn't finish or is incomplete, or on critical or high findings (the first few are named).
@@ -173,11 +182,30 @@ While Mynt verifies, the build's `phase_message` is the step it is on: the check
 
 A build that didn't ship also has `next_step`: what to do about it. That is either to fix the named findings or checks and continue from the build, or to verify again. When the reason is Mynt's own (the audit ran out of time or budget, or Maxwell itself is broken), it names the setting a Mynt admin must change: `BUILD_AUDIT_MINUTES`, `BUILD_AUDIT_CAP_USD`, `BUILD_AUDIT_WORKFLOWS` or `BUILD_MAXWELL_COMMIT`.
 
+### The image scan
+
+An app that ships as containers has its images built and scanned by Mynt, in the verification sandbox (`core/src/verify-images.ts`).
+
+- **Which images.** Every service of the root Compose file that Mynt's hosting starts: one that isn't behind a profile, built from its Dockerfile or pulled when it names an image. Without a Compose file, the root `Dockerfile`. A service behind a profile (the starter's `mobile`) is named as not scanned. An app with neither file ships no image, and the check passes saying so.
+- **Built from the verified source.** The build context is a fresh extraction of the hash-checked package, the same files the app's own machine gets.
+- **SBOM, then scan.** `syft` writes a CycloneDX SBOM of each built image, kept beside the source's. `grype` scans that SBOM, so the scan and the SBOM describe the same image.
+- **What fails.** A high or critical vulnerability with a fixed version, in something the app's Dockerfile can put right: a system package (upgrade it), a package the image installs, or the runtime the image is built on (a newer base image). So does an image that doesn't build or has no SBOM.
+- **What warns.** Each of these is listed by id in the check's detail:
+  - a high or critical vulnerability with no fixed version yet;
+  - one in a library compiled into a program that came with the base image (a Go or Rust executable its publisher built), which only a newer build of that image can fix;
+  - a base image named by tag without a digest.
+- **What it doesn't cover.** Mynt's hosting builds the images again on the app's own machine, from the same verified commit. The images scanned are builds of the same source and Dockerfiles, not the deployed bytes; they aren't pushed to a registry or signed. Base images pinned by digest and a committed lockfile are what keep the two builds the same, and the starter has both.
+- **What it costs.** The image builds, the SBOMs and the scan run with the other checks, so their machine time counts toward the build's cap. No model is involved. The scanner downloads its vulnerability database on every build; it took 3.6 GB of the sandbox's disk when this was written (November 2026).
+- **Without docker.** If the verification sandbox has no docker, nothing can be built. Mynt then scans the base images the Dockerfiles name, read from their registries, and the check is a warning at best: what each Dockerfile adds is covered only by `dependency_audit` and the source's SBOM.
+
+The starter's Dockerfiles pin their base images by digest, apply Alpine's security updates in the shipped stage, and leave npm out of the image that runs the api. To move a base image, change its tag and its digest together.
+
 ### The independent audit
 
 With `BUILD_AUDIT=maxwell`, a separate, audit-only Claude Code run (`core/workspaces/build-audit/`) executes the Maxwell workflows in `BUILD_AUDIT_WORKFLOWS` on its own copy of the source.
 
 - **Its copy.** The copy is a fresh extraction of the hash-checked archive, made read-only, that Mynt's checks never touched. Mynt hashes every file of that copy before the audit and again after it, keeping the first hash itself. Git's own `.git` folders and `node_modules` aren't source and are left out. A file changed, added or deleted blocks the build and is named.
+- **The pipeline's record.** An app Mynt builds has no pipeline files of its own: its pipeline is Mynt's verification, which an auditor reading only the source can't see. So before the audit starts, Mynt writes `job/pipeline-evidence.json` into the auditor's job folder (`core/src/pipeline-evidence.ts`), from its own files in the verification sandbox. It lists every check Mynt ran, with its tool and version, the command, the bar it holds a build to, its result and when it ran; every image Mynt built, with its base images, scan counts, each high or critical vulnerability by id, and the path of its SBOM; what the scan left out; and how the images reach production. Nothing in it comes from the coding agent, and it states results only: a warning is listed as a warning. The auditor's workspace tells it what the file is and to register the pipeline in Maxwell as the file records it. A production code review, which runs later in a sandbox of its own, gets no such file: the checks did not run there.
 - **The tool.** Maxwell is fetched from `BUILD_MAXWELL_REPO` at the commit in `BUILD_MAXWELL_COMMIT`. The default is a commit pinned in `core/src/builds.ts`, the last one whose own checks pass; an empty value takes the default branch. Before any workflow runs, the audit's script (`scripts/audit.mjs` in the workspace) installs Maxwell and runs Maxwell's own checks. A commit that fails them blocks the build at once, before anything is spent on a workflow, and `next_step` tells a Mynt admin to pin a working commit.
 - **How a workflow runs.** The auditor registers the application in Maxwell. The script then launches each workflow through Maxwell's own headless launcher, in the background, with Mynt's pinned Claude Code, the audit's model and what is left of its budget, and with Maxwell's folder marked trusted so Claude Code honours Maxwell's own permission rules. It watches each run. A run that makes no model call in the two minutes after its launch, or none for eleven minutes later on (longer than any one command a Maxwell agent may run), is ended as stuck. A run still going at the time limit is ended there, and the workflows after it aren't started.
 - **The report.** The script rewrites the report from Maxwell's ledger every few seconds, so findings appear as Maxwell records them and an audit that is cut short still reports what it found. Each workflow that didn't finish is listed with why: `time`, `budget`, `tool`, `refused`, `stalled` or `failed`. The report is marked `complete` only when every configured workflow finished. It counts only when it exists, says `complete: true`, has counts, and lists every configured workflow under `workflows_run`. A missing or partial report never counts as a pass.
@@ -187,7 +215,7 @@ With `BUILD_AUDIT=maxwell`, a separate, audit-only Claude Code run (`core/worksp
 - **Out of time or budget.** An audit out of time or budget is ended. The build is `blocked` saying which, what the audit had covered and any critical or high finding so far, and `next_step` names the setting a Mynt admin must change. It isn't run again: a second attempt would end the same way.
 - **A refused review.** When the model provider's safeguards refuse the security review, in the auditor's own session or in one of Maxwell's runs, the build is `blocked` saying so, with the request id. It isn't run again, and no prompt is reworded to get past it. `next_step` gives a Mynt admin the choices: the provider's approval for security work, another model (`BUILD_AUDIT_MODEL`), or leaving the refused workflow out of `BUILD_AUDIT_WORKFLOWS`.
 - **One more attempt.** An audit that ends without a complete report for another reason (the auditor ended its turn early, its run broke off, or a workflow's run failed or got stuck) runs once more, if the source is untouched and at least as much of the budget is left as the first attempt spent. Two such ends block the build.
-- **Which workflows.** The default is `probe-cicd-env`, which examines CI/CD pipeline definitions. An app scaffolded from Mynt's starter has none, so for it the workflow finishes with nothing to examine, and the report's summary says so; a build on a connected repository that carries pipeline files gets them examined. Maxwell's secure code review, `execute-scr`, is not in the default, because it doesn't fit a per-build limit: it reviews each trust boundary and attack class with a separate agent, one after another, then refutes and verifies each candidate, and writes to its ledger only after that. Counted from its workflow script at the pinned commit with stand-in agents, an app with three boundaries and four attack classes each takes 31 agent runs with no finding and 67 with one candidate per unit, 16 to 52 of them before the first ledger write. Mynt has not measured a complete run of it in a build. To run it per build anyway, add it to `BUILD_AUDIT_WORKFLOWS` and raise `BUILD_AUDIT_MINUTES` and `BUILD_AUDIT_CAP_USD` to match. Mynt's own checks (static scan, secrets, dependency audit, SBOM) run on every build either way.
+- **Which workflows.** The default is `probe-cicd-env`, which examines how an application is built and released: pipeline definitions, Dockerfiles, package manifests, and the gates, image scans and SBOMs it can find evidence of. An app scaffolded from Mynt's starter has no pipeline files, so what it examines is the app's Dockerfiles and manifests and the pipeline record Mynt gives it; a build on a connected repository that carries pipeline files gets them examined too. Maxwell's secure code review, `execute-scr`, is not in the default, because it doesn't fit a per-build limit: it reviews each trust boundary and attack class with a separate agent, one after another, then refutes and verifies each candidate, and writes to its ledger only after that. Counted from its workflow script at the pinned commit with stand-in agents, an app with three boundaries and four attack classes each takes 31 agent runs with no finding and 67 with one candidate per unit, 16 to 52 of them before the first ledger write. Mynt has not measured a complete run of it in a build. To run it per build anyway, add it to `BUILD_AUDIT_WORKFLOWS` and raise `BUILD_AUDIT_MINUTES` and `BUILD_AUDIT_CAP_USD` to match. Mynt's own checks (static scan, secrets, dependency audit, SBOM, image scan) run on every build either way.
 
 ### The production code review
 
@@ -377,12 +405,13 @@ Mynt runs the agent's runner with `MYNT_AGENT_HOLD=1` and `MYNT_AGENT_IDLE_MS`, 
 
 ### Continuing a build
 
-`start_build` with `continue_from: <build_id>` starts from the branch an earlier finished build of yours pushed, on the same app and repository.
+`start_build` with `continue_from: <build_id>` starts from an earlier finished build of yours.
 
-- Mynt must have confirmed that push: the build has a verified commit, or Mynt opened its pull request.
-- If the earlier build shipped, the new one starts at its verified commit.
+- **A build that shipped** continues from the branch it pushed, on the same app and repository. Mynt must have confirmed that push: the build has a verified commit, or Mynt opened its pull request. The new build starts at the verified commit.
+- **A build that Mynt blocked or failed** has no verified branch, and without a repository it pushed nothing at all. When verification ends a build that way, Mynt reads back the source package it verified, checks it against the SHA-256 it recorded, and keeps it for 7 days (`core/src/build-sources.ts`; packages over 24 MB aren't kept). The build's timeline says until when. The new build starts with that package unpacked in its sandbox, with its local git history, and its agents are told what stopped the earlier build. It needs no repository; with one, it pushes its own branch there.
+- A build that kept no source and has no verified branch is refused, saying so: start a new build without `continue_from`.
 
-Use it after a session ends, or to change a shipped app.
+Use it after a session ends, to change a shipped app, or to fix what the checks or the audit found without building the app again from nothing.
 
 ### App kinds
 

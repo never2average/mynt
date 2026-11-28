@@ -23,5 +23,6 @@ The endpoint's only authentication is `Mynt-Signature`. It needs no Mynt app key
 npm install
 npm run build
 npm test        # the signature and schema tests
+npm run audit   # the dependency gate (high or critical advisories fail); Mynt runs it on every build too
 docker compose up --build
 ```

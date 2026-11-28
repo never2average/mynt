@@ -18606,7 +18606,7 @@
             ]
           },
           "continue_from": {
-            "description": "An earlier build of yours whose pushed branch this one starts from (same app and repository)",
+            "description": "An earlier build of yours to start from: the branch it pushed (same app and repository), or, for a build that verification blocked or failed, the source Mynt kept of it",
             "type": "string"
           },
           "kind": {

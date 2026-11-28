@@ -255,7 +255,7 @@ There are eight agent workspace folders under `core/workspaces/`:
 
 | Folder | The agent | What Mynt checks afterwards | Code |
 |---|---|---|---|
-| `coding-build/` | The coding team | In a fresh sandbox with no secrets: tests, lint, types, `gitleaks`, a dependency audit, a `syft` software bill of materials, disclosures, and a re-hash of the source. Mynt opens the pull request | `core/src/builds.ts`, `core/src/verify-script.ts` |
+| `coding-build/` | The coding team | In a fresh sandbox with no secrets: tests, lint, types, `gitleaks`, a dependency audit, a `syft` software bill of materials, a `grype` scan of the images it builds, disclosures, and a re-hash of the source. Mynt opens the pull request | `core/src/builds.ts`, `core/src/verify-script.ts` |
 | `build-audit/` | The independent security audit of a build, and the production code review of a build before Production | The audit runs only with `BUILD_AUDIT=maxwell`; critical or high findings block the build. The review is asked for per build; Mynt reads its report, and only a complete one with no critical or high finding passes the production check | `core/src/builds.ts`, `core/src/production-reviews.ts` |
 | `product-desk/` | The product desk | Mynt runs the agent's model code itself, in a clean sandbox, and keeps only its own numbers | `core/src/desk.ts`, `core/src/desk-runner.ts` |
 | `algorithm-explorer/` | Algorithm explorers | Mynt scores every kept variant on a holdout only it sees | `core/src/explore.ts`, `core/src/explore-score.ts`, `core/src/explore-data.ts` |

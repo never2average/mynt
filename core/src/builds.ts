@@ -21,6 +21,8 @@ import { APPROVED, PENDING, REJECTED, approvalColumns, connectionApproval, reapp
 import { GoogleServiceAccount } from "./google-auth.js";
 import { generateSdk, SDK_LANGUAGES, type SdkProduct } from "./sdk.js";
 import { VERIFY_APP, VERIFY_AUDIT_SRC, VERIFY_DIR, VERIFY_SCRIPT } from "./verify-script.js";
+import { writePipelineEvidence } from "./pipeline-evidence.js";
+import { BUILD_SOURCES_DDL, KEPT_SOURCE_DAYS, keepSource, keptSource, restoreSource } from "./build-sources.js";
 import { SOLANA_TOOLCHAIN, SOLANA_TOOLCHAIN_SCRIPT, SOLANA_VERIFY_SCRIPT, toolchainRecord, type ToolchainRecord } from "./solana/toolchain.js";
 import { loadCrateAllowlist } from "./solana/vuln-db.js";
 import { SOLANA_ENV_WIPE_COMMAND, SolanaBuildEnv, ENV_FILES, type SolanaEnvSnapshot } from "./build-env.js";
@@ -341,6 +343,7 @@ const TABLES = `
     data jsonb NOT NULL DEFAULT '{}'
   );
   CREATE INDEX IF NOT EXISTS build_events_build_idx ON financial_products.build_events (build_id, at);
+${BUILD_SOURCES_DDL}
 ${APP_REPOSITORIES_DDL}
   -- The coding agent's activity (its messages, commands and edits), summarised by Mynt as the build runs and kept
   -- after the sandbox goes. seq orders it within the build and is the cursor developers page with.
@@ -1050,25 +1053,35 @@ export class BuildService {
     opts: { goal: string; app_id?: string; repository?: string; cap_usd?: number; solana?: boolean; mode?: "once" | "session"; continue_from?: string; kind?: string },
   ) {
     if (opts.kind) requireAppKind(opts.kind);
-    // Continuing an earlier build: the agents start from the branch it pushed, on the same app and repository.
+    // Continuing an earlier build: the agents start from the branch it pushed, on the same app and repository, or
+    // (a build that ended blocked or failed, with no verified branch) from the source Mynt kept of it.
     let base: Build | null = null;
+    let fromSource = false;
     if (opts.continue_from) {
       const prev = await this.get(opts.continue_from);
       if (!prev || !(await canSeeBuild(this.store, developer, prev))) throw new Error(`No build of yours with id '${opts.continue_from}' to continue from`);
       if (!TERMINAL.includes(prev.status)) throw new Error(`Build ${prev.id} is still ${prev.status}: steer it, or stop it before continuing from it`);
-      // Only a build whose push Mynt confirmed: it verified the pushed commit (commit_sha) and opened its pull request.
-      if (!prev.repository || !prev.branch || !(prev.commit_sha || prev.pr_url)) throw new Error(`Build ${prev.id} pushed no verified branch, so there's nothing to continue from`);
+      // A build whose push Mynt confirmed (it verified the pushed commit, commit_sha, and opened its pull request)
+      // continues from that branch. One that didn't ship has no such branch: it continues from its packaged source,
+      // which Mynt keeps for a while when verification blocks or fails a build (build-sources.ts).
+      const verified = !!prev.repository && !!prev.branch && !!(prev.commit_sha || prev.pr_url);
+      fromSource = !verified && !!(await keptSource(this.db, prev.id));
+      if (!verified && !fromSource)
+        throw new Error(
+          `Build ${prev.id} pushed no verified branch, and Mynt isn't keeping its source (kept for ${KEPT_SOURCE_DAYS} days when verification blocks or fails a build), so there's nothing to continue from: start a new build without continue_from`,
+        );
       if (opts.app_id && prev.app_id && opts.app_id !== prev.app_id) throw new Error(`Build ${prev.id} is for another app`);
       // The app moved to the developer's own repository since: that build's branch is in the managed one.
       const now = prev.app_id ? await this.appRepository(prev.app_id) : null;
-      const moved = (opts.repository && opts.repository.toLowerCase() !== prev.repository) || (now && !now.managed && now.repository !== prev.repository);
-      if (moved && (await this.managedRepository(prev.repository)))
+      // A branch lives in one repository. A kept source doesn't: it carries on wherever this build pushes.
+      const moved = verified && ((opts.repository && opts.repository.toLowerCase() !== prev.repository) || (now && !now.managed && now.repository !== prev.repository));
+      if (moved && (await this.managedRepository(prev.repository!)))
         throw new Error(
           `Build ${prev.id} is in the app's previous managed repository (${prev.repository}); push its branch (${prev.branch}) to your own repository first (get_app_repository gives a clone credential), then start the build there`,
         );
-      if (opts.repository && opts.repository.toLowerCase() !== prev.repository) throw new Error(`Build ${prev.id} pushed to ${prev.repository}, not ${opts.repository}`);
+      if (verified && opts.repository && opts.repository.toLowerCase() !== prev.repository) throw new Error(`Build ${prev.id} pushed to ${prev.repository}, not ${opts.repository}`);
       base = prev;
-      opts = { ...opts, app_id: opts.app_id ?? prev.app_id ?? undefined, repository: prev.repository, solana: opts.solana ?? (prev.solana || undefined) };
+      opts = { ...opts, app_id: opts.app_id ?? prev.app_id ?? undefined, repository: verified ? prev.repository! : (opts.repository ?? prev.repository ?? undefined), solana: opts.solana ?? (prev.solana || undefined) };
     }
     const cap = Math.min(opts.cap_usd ?? this.config.capUsd, this.config.capUsd);
     // A session finishes itself while SESSION_FINISH_RESERVE_USD is still left for shipping: a cap no bigger than that
@@ -1120,10 +1133,11 @@ export class BuildService {
     await this.db.query(
       `INSERT INTO financial_products.build_runs (id, developer_id, app_id, goal, repository, status, cap_usd, solana, mode, continued_from, base_branch, base_commit, kind)
        VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7, $8, $9, $10, $11, $12)`,
-      [id, developer.id, opts.app_id ?? null, opts.goal, opts.repository?.toLowerCase() ?? null, cap, solana, mode, base?.id ?? null, base?.branch ?? null, base?.commit_sha ?? null, opts.kind ?? null],
+      [id, developer.id, opts.app_id ?? null, opts.goal, opts.repository?.toLowerCase() ?? null, cap, solana, mode, base?.id ?? null, fromSource ? null : (base?.branch ?? null), fromSource ? null : (base?.commit_sha ?? null), opts.kind ?? null],
     );
     const what = mode === "session" ? "Session build" : "Build";
-    await this.event(id, "queued", `${what} queued with a US$${cap} cap${base ? `, continuing from ${base.branch}` : ""}`, base ? { continued_from: base.id } : {});
+    const from = !base ? "" : fromSource ? `, continuing from the source Mynt kept of build ${base.id}` : `, continuing from ${base.branch}`;
+    await this.event(id, "queued", `${what} queued with a US$${cap} cap${from}`, base ? { continued_from: base.id, ...(fromSource ? { from: "kept_source" } : {}) } : {});
     return (await this.get(id))!;
   }
 
@@ -1609,6 +1623,11 @@ export class BuildService {
       const contract = await this.serviceContract(b);
       if (contract) jobFiles[contract.path] = JSON.stringify(contract.contract, null, 2);
       if (b.solana) await this.installSolana(b.sandbox_id!, b.solana_env?.build);
+      // Continuing a build that had no verified branch: the source Mynt kept of it, unpacked where the agents work.
+      if (b.continued_from && !b.base_branch) {
+        const kept = await restoreSource(this.db, sandboxes, { build_id: b.continued_from, sandbox_id: b.sandbox_id!, dest: WORKSPACE, work: "/home/user" });
+        await this.event(b.id, "provisioning", `The source Mynt kept of build ${b.continued_from} is unpacked in the sandbox`, { source_sha256: kept.sha256 });
+      }
       const session = b.mode === "session";
       const idleMs = Math.max(60_000, Math.floor(this.config.sessionIdleMs ?? SESSION_IDLE_MS));
       const processId = await this.startAgent(b, b.sandbox_id!, {
@@ -1847,6 +1866,9 @@ export class BuildService {
       const tree = copy.stdout.match(/^audit-copy ([0-9a-f]{64})$/m)?.[1];
       if (copy.exitCode !== 0 || !tree) throw new Error(`Couldn't prepare the auditor's copy of the source: ${(copy.stderr || copy.stdout).slice(0, 300)}`);
       const audit_state: AuditState = { attempt: 1, started_at: new Date().toISOString(), tree_sha256: tree, sandbox_base_usd: machineUsd, model_usd_before: 0 };
+      // Mynt's own record of the pipeline this source just went through (each check's tool, version, bar and result;
+      // each image it built, scanned and listed), put in the auditor's job folder as evidence (pipeline-evidence.ts).
+      await writePipelineEvidence(sandboxes, vid, { build_id: b.id, source_sha256: b.source_sha256, solana_check: b.solana_check as Check | null });
       const processId = await this.launchAudit(b, vid, 1, audit.capUsd);
       await this.update(b.id, { verify_step: "audit", verify_prompt_id: processId, audit_state });
       await this.verifyStep(b.id, `Checks finished; independent Maxwell audit started (${audit.workflows.join(", ")}; up to ${audit.minutes} min)`, {
@@ -2065,6 +2087,11 @@ export class BuildService {
     await this.update(b.id, { maxwell: v.maxwell ?? null, readiness: checks });
     const end = async (status: BuildStatus, error: string, data: unknown = {}, next_step: string | null = null) => {
       await this.retireKey(b);
+      // It didn't ship, so no branch of it is verified: Mynt keeps the source package it verified, for continue_from.
+      if (b.sandbox_id && b.source_sha256) {
+        const k = await keepSource(this.db, sandboxes, { build_id: b.id, sandbox_id: b.sandbox_id, path: `${OUT}/app.tgz`, sha256: b.source_sha256 });
+        if (k.kept) await this.event(b.id, "verifying", `Mynt kept this build's source until ${k.kept.kept_until.slice(0, 10)}: a new build with continue_from starts from it`, { source_sha256: k.kept.sha256, kept_until: k.kept.kept_until });
+      }
       await this.update(b.id, { status, error, next_step });
       await this.event(b.id, status, error, data);
     };
@@ -2168,7 +2195,8 @@ export class BuildService {
         mode: b.mode,
         // Mynt's own repository for this app: it starts with only a README.
         managed_repository: this.isManaged(b.repository),
-        base: b.base_branch ? { branch: b.base_branch, commit_sha: b.base_commit, build_id: b.continued_from } : null,
+        // Or, for an earlier build with no verified branch, its kept source, which Mynt unpacks before the agents start.
+        base: b.base_branch ? { branch: b.base_branch, commit_sha: b.base_commit, build_id: b.continued_from } : b.continued_from ? { source: "~/workspace/app", build_id: b.continued_from, why_it_stopped: (await this.get(b.continued_from))?.error ?? null } : null,
       },
       goal: b.goal,
       // The app kind to start from: CLAUDE.md has the agent read templates/kinds/<kind>.json and scaffold with --kind.
@@ -2754,7 +2782,10 @@ export function registerCodingAgentTools(server: McpServer, store: Store, user: 
           .describe(
             "once (default): the agent builds and ships in one go. session: it does your first request, then stays open for your next ones (steer_build), keeping its context, until you call finish_build or it has been idle 15 minutes; then it ships and Mynt verifies it as usual. Idle time counts against the cap",
           ),
-        continue_from: z.string().optional().describe("An earlier build of yours whose pushed branch this one starts from (same app and repository)"),
+        continue_from: z
+          .string()
+          .optional()
+          .describe("An earlier build of yours to start from: the branch it pushed (same app and repository), or, for a build that verification blocked or failed, the source Mynt kept of it"),
         kind: z.string().optional().describe("An app kind to start from (list_app_kinds): the agent scaffolds the starter app with that kind's screens"),
       },
     },
