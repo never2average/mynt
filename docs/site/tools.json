@@ -22,7 +22,7 @@
       "id": "builds",
       "title": "Builds",
       "summary": "Coding-agent builds that Mynt verifies outside the agent's sandbox, and the repositories they push to.",
-      "tools": 23
+      "tools": 27
     },
     {
       "id": "hosting",
@@ -88,7 +88,7 @@
       "id": "admin",
       "title": "Admin & governance",
       "summary": "Regions and the regulatory model, categories, take rates, invitations, oversight and operations.",
-      "tools": 64
+      "tools": 65
     }
   ],
   "roles": [
@@ -122,7 +122,7 @@
     {
       "role": "developer",
       "summary": "the builder role, under its other name: builds apps (keys, webhooks, SDKs, journeys, GTM campaigns) with coding agents Mynt verifies and hosts, and composes and publishes products too. The same tools as innovator. Also a consumer.",
-      "tools": 266,
+      "tools": 270,
       "get_started": [
         {
           "tool": "list_buildable_products",
@@ -149,7 +149,7 @@
     {
       "role": "innovator",
       "summary": "the builder role: composes, tests, publishes and versions financial products from regulated primitives, decides who may build on them, and builds apps on them. Needn't be licensed: a licence provider can sponsor a product under its licences. The same tools as developer. Also a consumer.",
-      "tools": 266,
+      "tools": 270,
       "get_started": [
         {
           "tool": "create_entity",
@@ -257,7 +257,7 @@
     {
       "role": "admin",
       "summary": "runs Mynt itself: regions, the regulatory model, product categories, service types, take rates, invites and oversight. Also holds the builder, vendor and licence-provider roles (except the licence-provider tools that act as a member of the firm itself), but not the liquidity-provider role.",
-      "tools": 445,
+      "tools": 450,
       "get_started": [
         {
           "tool": "define_region",
@@ -7657,7 +7657,7 @@
     {
       "name": "deploy_app",
       "title": "Host an app",
-      "description": "Developer: run one of your apps on its own VM from a build Mynt verified (build_id from your coding-agent builds). The VM fetches exactly that commit, builds it and runs it; each Compose service listens on the port its mynt.port label names and is served publicly over HTTPS. Mynt gives the app a dedicated key (live once the app is in Production and published, else sandbox), added at the edge to its calls to Mynt and never stored on the VM. Deploying again with a newer build replaces it. Any member of the app's workspace deploys it in Idea and Staging. In Production only the workspace's owners and admins do, and a build goes online only if it passes the production checks that are about the build, read for that build: it is a build of this app that Mynt verified, its independent audit passed, it has no open critical or high audit findings and, when the app moves value, a Mynt admin signed off that very build (ask first with request_promotion_signoff). Otherwise it is refused with the failing checks, in get_promotion_checks' words, and the build online stays as it is. A service (create_service) differs: only an owner or admin of its workspace, at the firm that offers it, puts a build online; it needs direct hosting; and while a build of it serves subscribers, a newer build goes online beside it, with a signing secret of its own, and takes over only after Mynt's conformance test passes on it (and, in Production, the other production checks). If it fails it is removed and the serving build, its offering and its listing are unchanged.",
+      "description": "Developer: run one of your apps on its own VM from a build Mynt verified (build_id from your coding-agent builds). The VM fetches exactly that commit, builds it and runs it; each Compose service listens on the port its mynt.port label names and is served publicly over HTTPS. Mynt gives the app a dedicated key (live once the app is in Production and published, else sandbox), added at the edge to its calls to Mynt and never stored on the VM. Deploying again with a newer build replaces it. Any member of the app's workspace deploys it in Idea and Staging. In Production only the workspace's owners and admins do, and a build goes online only if it passes the production checks that are about the build, read for that build: it is a build of this app that Mynt verified, its independent audit passed, it has no open critical or high audit findings, its own production code review is complete with no critical or high finding (ask first with request_production_review; an older build's review doesn't count) and, when the app moves value, a Mynt admin signed off that very build (ask first with request_promotion_signoff). Otherwise it is refused with the failing checks, in get_promotion_checks' words, and the build online stays as it is. A service (create_service) differs: only an owner or admin of its workspace, at the firm that offers it, puts a build online; it needs direct hosting; and while a build of it serves subscribers, a newer build goes online beside it, with a signing secret of its own, and takes over only after Mynt's conformance test passes on it (and, in Production, the other production checks). If it fails it is removed and the serving build, its offering and its listing are unchanged.",
       "area": "hosting",
       "roles": [
         "developer",
@@ -9044,6 +9044,31 @@
       }
     },
     {
+      "name": "get_production_review",
+      "title": "A production code review",
+      "description": "Developer (any member of the app's workspace; Mynt admins for any): one production code review: its build and commit, status (queued, running, complete, incomplete, refused, failed or stopped), findings by severity with each finding's title, file and workflow (as recorded so far while it runs), coverage (the workflows that finished, and those that didn't with why), Mynt's measured cost and time (null when not measured, never 0), the limits it ran with, the reason and next step when it isn't complete, and any exception a Mynt admin recorded for its build.",
+      "area": "builds",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "get_program",
       "title": "One Solana program",
       "description": "Developer: a program in full: its status (and any deploy or upgrade in progress), every version Mynt deployed with its build and hash, and its latest events.",
@@ -9072,7 +9097,7 @@
     {
       "name": "get_promotion_checks",
       "title": "What an app needs to move up a stage",
-      "description": "Developer (any member of the app's workspace): the checks for promoting an app one step, idea → staging or staging → production, computed by Mynt from its own records, never from what the app or an agent reports. staging: the latest build passed Mynt's verification in a clean sandbox, its independent audit passed (or wasn't required), and it runs (healthy on Mynt's hosting if deployed there). production: all of that, running on Mynt's hosting from that very verified build, target states set and every product licensed (a licence in force covering its action) in each, a signed program agreement in force with the licence provider sponsoring each product where the app serves (program_agreements, with each product and sponsor in coverage), every webhook verified, no open critical or high audit findings, the mainnet program gate passed when the app has Solana programs, and a Mynt admin's sign-off for this very build when the app moves value (which then also needs the independent audit). Each check is pass, fail, warn or pending (Mynt can't tell yet: blocks like a fail), with a fix where there is one. can_promote: every check passes, or warns where the warning is advisory (any staging check; in production only build_verified, audit_passed and audit_findings). Production gates real money: live keys, live runtime calls and publishing are for production apps only, so they come after promotion, not before.",
+      "description": "Developer (any member of the app's workspace): the checks for promoting an app one step, idea → staging or staging → production, computed by Mynt from its own records, never from what the app or an agent reports. staging: the latest build passed Mynt's verification in a clean sandbox, its independent audit passed (or wasn't required), and it runs (healthy on Mynt's hosting if deployed there). production: all of that, running on Mynt's hosting from that very verified build, target states set and every product licensed (a licence in force covering its action) in each, a signed program agreement in force with the licence provider sponsoring each product where the app serves (program_agreements, with each product and sponsor in coverage), every webhook verified, no open critical or high audit findings, Mynt's production code review of that very build complete with no critical or high finding (production_code_review: ask for it with request_production_review; a review that didn't finish never passes, and a Mynt admin's recorded exception for the build shows as 'Waived by a Mynt admin: …'), the mainnet program gate passed when the app has Solana programs, and a Mynt admin's sign-off for this very build when the app moves value (which then also needs the independent audit). Each check is pass, fail, warn or pending (Mynt can't tell yet: blocks like a fail), with a fix where there is one. can_promote: every check passes, or warns where the warning is advisory (any staging check; in production only build_verified, audit_passed and audit_findings, and production_code_review for a build that was online in Production before reviews were required). Production gates real money: live keys, live runtime calls and publishing are for production apps only, so they come after promotion, not before.",
       "area": "workspaces",
       "roles": [
         "developer",
@@ -11759,6 +11784,45 @@
         "required": [
           "id"
         ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "list_production_reviews",
+      "title": "Production code reviews",
+      "description": "Developer (any member of the app's workspace; Mynt admins see every workspace's): production code reviews, newest first, for one app or service (app_id) or for every app you can see, optionally by status. Each has its build, status, findings by severity, coverage, cost, time, who started it and when. Also: the exceptions Mynt admins recorded (waivers, each for one build, with its reason), the limits a review asked for now would run with (how long it may take, what it may cost at most), whether reviews can run on this deployment and, for one app, the verified builds a review can be asked for, whether you may ask, and what its workspace has used of its monthly limits.",
+      "area": "builds",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "read",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "app_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "complete",
+              "incomplete",
+              "refused",
+              "failed",
+              "stopped"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          }
+        },
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
     },
@@ -14937,6 +15001,35 @@
       }
     },
     {
+      "name": "request_production_review",
+      "title": "Request a production code review",
+      "description": "Developer (an owner or admin of the app's workspace; Mynt admins for any app): ask Mynt for the full agent code review a build needs before it goes to Production. It reviews ONE verified build of an app or service (build_id; default: the latest build that passed Mynt's verification), exactly the commit that build pushed, in a clean sandbox, with Mynt's secure code review workflows (PRODUCTION_REVIEW_WORKFLOWS, default execute-scr). It is long: up to PRODUCTION_REVIEW_MINUTES (default 180) and PRODUCTION_REVIEW_CAP_USD (default 60) of Mynt's own budget, not the workspace's build budget; list_production_reviews gives the limits in force. So a workspace's own people start at most PRODUCTION_REVIEW_WORKSPACE_MONTHLY reviews (default 4) and PRODUCTION_REVIEW_WORKSPACE_MONTHLY_USD (default 200) per calendar month; one review per app runs at a time, and a build that already has a complete review isn't reviewed again. Returns the review, queued; follow it with get_production_review. Mynt reads the review tool's own ledger and decides: the reviewer never grades its work, and a review that ends without a complete report (out of time or budget, refused by the model provider, a broken tool) doesn't pass and isn't run again by itself; its reason says what to do.",
+      "area": "builds",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "app_id": {
+            "type": "string"
+          },
+          "build_id": {
+            "description": "A verified build of this app. Default: its latest verified build",
+            "type": "string"
+          }
+        },
+        "required": [
+          "app_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "request_promotion_signoff",
       "title": "Ask a Mynt admin to sign off a production promotion",
       "description": "Developer (the workspace's owners and admins): when get_promotion_checks says needs_admin_signoff, ask Mynt's admins to sign off the app's latest verified build for production. The sign-off is for that build only: a newer verified build needs a new one. Asking again for the same build returns the open request. In Staging the build must be the one deployed. For an app already in Production that moves value, ask before deploying a newer build: deploy_app puts it online only once it is signed off.",
@@ -17225,7 +17318,13 @@
               "DESK_MONTHLY_CAP_USD",
               "REVIEW_CASE_CAP_USD",
               "REVIEW_MONTHLY_CAP_USD",
-              "BENCHMARK_CAP_USD"
+              "BENCHMARK_CAP_USD",
+              "PRODUCTION_REVIEW_WORKFLOWS",
+              "PRODUCTION_REVIEW_MODEL",
+              "PRODUCTION_REVIEW_MINUTES",
+              "PRODUCTION_REVIEW_CAP_USD",
+              "PRODUCTION_REVIEW_WORKSPACE_MONTHLY",
+              "PRODUCTION_REVIEW_WORKSPACE_MONTHLY_USD"
             ]
           },
           "value": {
@@ -18718,6 +18817,31 @@
         },
         "required": [
           "job_id"
+        ],
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "stop_production_review",
+      "title": "Stop a production code review",
+      "description": "Developer (an owner or admin of the app's workspace; Mynt admins for any): stop a review that is queued or running. Its sandbox is ended; what it had found and spent so far is kept. A stopped review doesn't pass the production check, and one that had started still counts towards the workspace's monthly reviews.",
+      "area": "builds",
+      "roles": [
+        "developer",
+        "innovator",
+        "admin"
+      ],
+      "access": "destructive",
+      "access_from": "annotation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
         ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
@@ -20845,6 +20969,39 @@
             "type": "boolean"
           }
         },
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "waive_production_review",
+      "title": "Record an exception to the production code review",
+      "description": "Admin: record that one verified build of an app or service may go to Production without a complete production code review, with the reason (for example: the model provider's safeguards refuse the security review, with the request id). For that build only; a newer build needs its own review or its own exception. Never for findings: refused when the build's review recorded a critical or high finding, or already passed. Not for an app of a workspace you're a member of. Recorded in the audit trail and shown as it is, with your name and the reason, on the app's promotion checks ('Waived by a Mynt admin: …') and beside its reviews.",
+      "area": "admin",
+      "roles": [
+        "admin"
+      ],
+      "access": "write",
+      "access_from": "name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "app_id": {
+            "type": "string"
+          },
+          "build_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 1000
+          }
+        },
+        "required": [
+          "app_id",
+          "build_id",
+          "reason"
+        ],
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
     },
