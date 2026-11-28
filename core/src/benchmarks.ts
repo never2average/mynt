@@ -138,6 +138,8 @@ const TABLES = `
   -- reserved. That figure is never a cost.
   ALTER TABLE ${T}.benchmark_results ADD COLUMN IF NOT EXISTS sandbox_started boolean;
   ALTER TABLE ${T}.benchmark_results ADD COLUMN IF NOT EXISTS reserved_usd numeric;
+  -- The model backend the run's agent ran on ("default": the one every agent uses), beside its model.
+  ALTER TABLE ${T}.benchmark_runs ADD COLUMN IF NOT EXISTS backend text;
   -- Tasks scored before those columns: the cap counted their whole budget when nothing was measured.
   UPDATE ${T}.benchmark_results SET reserved_usd = cap_usd
    WHERE reserved_usd IS NULL AND sandbox_started IS NULL AND cost_usd IS NULL AND cap_usd IS NOT NULL
@@ -199,6 +201,8 @@ export interface Adapter {
   // What a real run of this agent needs, in words (shown before the first run).
   needs: string[];
   model(): string | null;
+  // The model backend the agent runs on, where its role can be set to another than the one every agent uses.
+  backend?(): string | null;
   // Why a run can't start here; null when it can.
   unavailable(): Promise<string | null>;
   // The most one task may spend, and what Mynt may spend on top of it (kept free in the run's cap).
@@ -882,8 +886,12 @@ export class BenchmarkService {
           ? "Nothing else: Mynt lays each sample over the coding agents' starter program in a sandbox of its own, runs static analysis, then the auditor. No program is registered, and no mainnet review is opened."
           : "Nothing else: Mynt builds each sample with its verifiable Solana build in a sandbox of its own, the red team attacks the bytes on a local validator, and Mynt re-runs its proofs itself. No program is registered or deployed anywhere.",
       ],
-      model: () => config?.gateModel ?? null,
-      unavailable: async () => (gate() && config ? null : "the mainnet program gate isn't set up on this Mynt, so its agents have nothing to run in"),
+      // The red team runs on whichever model backend its role is set to (RED_TEAM_BACKEND), with that backend's model.
+      // (Null while that backend's model isn't set: never the default backend's model under another backend's name.)
+      model: () => (audit || !gate() ? (config?.gateModel ?? null) : gate()!.redTeamRunsOn().model),
+      backend: () => (audit ? "default" : (gate()?.redTeamRunsOn().backend ?? "default")),
+      // A red team set to a second backend whose key, model or token prices aren't set can't run: said here.
+      unavailable: async () => (gate() && config ? (audit ? null : gate()!.redTeamMissing()) : "the mainnet program gate isn't set up on this Mynt, so its agents have nothing to run in"),
       maxTaskUsd: () => (config ? (audit ? config.auditCapUsd : config.redTeamCapUsd) : 0),
       // The agent's model spend is held at the task's cap by the agent proxy; Mynt's own sandboxes around it (the
       // sample's preparation, static analysis, the proofs' re-run) are time-limited, and this much is kept for them.
@@ -956,6 +964,9 @@ export class BenchmarkService {
           failed_check = failure_class !== "agent" ? failure_class : (checks.find((c) => c.status === "fail")?.name ?? (audit ? "audit_failed" : "red_team_failed"));
         }
         const cost = Number(r.cost_usd ?? 0);
+        // Model calls the proxy couldn't price: the sample's cost isn't known, so none is given (the run's cap then
+        // counts the task's whole budget, reserved).
+        const unpriced = r.reserved_usd !== null && r.reserved_usd !== undefined;
         return {
           passed,
           failure_class,
@@ -964,9 +975,13 @@ export class BenchmarkService {
           checks,
           observed,
           // The gate keeps one figure per review, and only once a sandbox or the meter has reported.
-          cost_usd: cost > 0 ? cents(cost) : null,
+          cost_usd: cost > 0 && !unpriced ? cents(cost) : null,
           cost_parts: null,
-          cost_note: cost > 0 ? "The gate records one figure per review: the agent's model spend and every sandbox's time together" : "Not measured: neither the sandbox host nor the agent's meter reported a cost for this sample",
+          cost_note: unpriced
+            ? "Not measured: some of the agent's model calls couldn't be priced (no token price was set for its model backend, or an answer carried no usage)"
+            : cost > 0
+              ? "The gate records one figure per review: the agent's model spend and every sandbox's time together"
+              : "Not measured: neither the sandbox host nor the agent's meter reported a cost for this sample",
           started_at: iso(r.created_at),
           finished_at: iso(r.updated_at),
           ...(isQuotaExhausted(error) ? { stop_run: QUOTA_MESSAGE } : {}),
@@ -1008,6 +1023,7 @@ export class BenchmarkService {
         tasks: set.tasks.length,
         workspaces: set.workspaces,
         model: a.model(),
+        backend: a.external ? null : (a.backend?.() ?? "default"),
         max_task_usd: a.maxTaskUsd() || null,
         ready: !whyNot,
         why_not: whyNot ? `${whyNot[0].toUpperCase()}${whyNot.slice(1)}` : null,
@@ -1051,8 +1067,8 @@ export class BenchmarkService {
       throw e.code === "23505" ? refuse("another benchmark run is still going (it was started at the same moment); one runs at a time, so stop it or let it finish") : e;
     };
     await this.db.query(
-      `INSERT INTO ${T}.benchmark_runs (id, agent, task_set, task_set_version, task_set_sha256, label, status, cap_usd, model, workspace_revisions, source_commit, options, started_by)
-       VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8, $9, $10, $11, $12)`,
+      `INSERT INTO ${T}.benchmark_runs (id, agent, task_set, task_set_version, task_set_sha256, label, status, cap_usd, model, workspace_revisions, source_commit, options, started_by, backend)
+       VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, $8, $9, $10, $11, $12, $13)`,
       [
         id,
         o.agent,
@@ -1066,6 +1082,7 @@ export class BenchmarkService {
         sourceCommit(),
         JSON.stringify({ ...(o.task_ids?.length ? { task_ids: o.task_ids } : {}), ...(o.host_restored ? { host_restored: true } : {}) }),
         admin.id,
+        adapter.external ? null : (adapter.backend?.() ?? "default"),
       ],
     ).catch(taken);
     for (const [n, t] of tasks.entries()) await this.db.query(`INSERT INTO ${T}.benchmark_results (id, run_id, task_id, position, status) VALUES ($1, $2, $3, $4, 'pending')`, [randomUUID(), id, t.id, n]);
@@ -1232,6 +1249,8 @@ export class BenchmarkService {
       // What the cap has counted. Not the run's cost: see measured_usd and reserved_usd, added where a run is read.
       charged_usd: cents(Number(r.charged_usd)),
       model: (r.model as string | null) ?? null,
+      // The model backend it ran on ("default": the one every agent uses); null for a run from before this was kept.
+      backend: (r.backend as string | null) ?? null,
       workspace_revisions: (r.workspace_revisions as Record<string, string>) ?? {},
       source_commit: (r.source_commit as string | null) ?? null,
       source_commit_note: r.source_commit ? null : "Not recorded: the server wasn't running from a git checkout",
@@ -1401,7 +1420,7 @@ export function registerBenchmarkTools(server: McpServer, store: Store, admin: U
     {
       title: "A benchmark run's scoreboard",
       description:
-        "Admin: one benchmark run: the agent, task set, model and the content hash of each agent workspace folder it ran with, its cap and what the cap has counted (what was measured, and apart from it what was only reserved for a task whose cost couldn't be measured after work ran: never shown as money spent; a task that never got a sandbox counts nothing), why it stopped if it did, its scoreboard, and every task with its outcome, the check that failed, whether the failure was the agent's or the infrastructure's, each of Mynt's checks, cost and duration.",
+        "Admin: one benchmark run: the agent, task set, model, the model backend it ran on and the content hash of each agent workspace folder it ran with, its cap and what the cap has counted (what was measured, and apart from it what was only reserved for a task whose cost couldn't be measured after work ran: never shown as money spent; a task that never got a sandbox counts nothing), why it stopped if it did, its scoreboard, and every task with its outcome, the check that failed, whether the failure was the agent's or the infrastructure's, each of Mynt's checks, cost and duration.",
       inputSchema: { run_id: z.string().min(1) },
       annotations: { readOnlyHint: true },
     },

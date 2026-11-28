@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a221b1-556e-7b13-a72f-3c0806cf7ad5"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `stand-in-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"error","message":"This request was declined by the provider's safety policy."}
+{"type":"turn.failed","error":{"message":"This request was declined by the provider's safety policy."}}

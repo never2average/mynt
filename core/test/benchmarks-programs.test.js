@@ -287,6 +287,60 @@ test("program red team: Mynt builds the sample, the red team gets only bytes and
   for (const table of ["solana_programs", "solana_mainnet_reviews", "solana_program_artifacts"]) assert.equal(await w.count(table), 0, table);
 });
 
+// The red team's settings are read from the server's environment where it sets them: set for one test, then put back.
+const withEnv = async (vars, fn) => {
+  const before = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, vars);
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(before)) v === undefined ? delete process.env[k] : (process.env[k] = v);
+  }
+};
+
+test("program red team on a second model backend: readiness says what is missing, a run records the backend and model, and spend that couldn't be measured is reserved", async () => {
+  const { AgentMeter } = await import("../dist/agent-meter.js");
+  const { CODEX_CLI_VERSION } = await import("../dist/model-backends/codex-cli.js");
+  const play = { mynt_program: { report: { findings: [], summary: "held up", attacks_tried: ["wrong signer: rejected"] } } };
+  // Moved to the second backend with nothing else set: the red team's set can't start, and says why; the audit's can.
+  await withEnv({ RED_TEAM_BACKEND: "responses" }, async () => {
+    const w = await world(play);
+    const agents = Object.fromEntries((await w.benchmarks.agents()).map((a) => [a.agent, a]));
+    const red = agents["program-red-team"];
+    assert.deepEqual([red.ready, red.can_start, red.backend, red.model], [false, false, "responses", null]);
+    for (const named of ["RED_TEAM_BACKEND is responses", "RESPONSES_BACKEND_API_KEY, in Platform settings → Key vault", "RED_TEAM_MODEL isn't set", "RED_TEAM_INPUT_USD_PER_MTOK and RED_TEAM_OUTPUT_USD_PER_MTOK aren't set"]) assert.ok(red.why_not.includes(named), `${named}: ${red.why_not}`);
+    assert.deepEqual([agents["program-audit"].ready, agents["program-audit"].backend], [true, "default"]);
+    await assert.rejects(w.benchmarks.start(w.admin, { agent: "program-red-team", cap_usd: 25 }), /This run can't start: the red team is set to run on a second model backend .* RED_TEAM_MODEL isn't set/);
+  });
+
+  await withEnv({ RED_TEAM_BACKEND: "responses", RED_TEAM_MODEL: "standin-model-1", RED_TEAM_INPUT_USD_PER_MTOK: "2", RED_TEAM_OUTPUT_USD_PER_MTOK: "10", RESPONSES_BACKEND_API_KEY: "sk-standin-provider-key-0123456789abcdef" }, async () => {
+    const w = await world(play);
+    w.benchmarks.gate.meter = await AgentMeter.open(w.db);
+    const red = (await w.benchmarks.agents()).find((a) => a.agent === "program-red-team");
+    assert.deepEqual([red.ready, red.why_not, red.backend, red.model], [true, null, "responses", "standin-model-1"]);
+    const started = await w.benchmarks.start(w.admin, { agent: "program-red-team", cap_usd: 25, task_ids: ["good-starter-ledger"] });
+    assert.deepEqual([started.run.backend, started.run.model], ["responses", "standin-model-1"], "the run records what it ran on");
+    // Up to the red team's launch; then one of its answers carried no usage, as Mynt's proxy would record it.
+    let review;
+    for (let i = 0; i < 60 && !review; i++) {
+      await w.benchmarks.tick();
+      review = (await w.pg.query(`SELECT id FROM ${T}.bench_solana_mainnet_reviews WHERE step = 'red_team'`)).rows[0];
+    }
+    assert.ok(review, "the red team was launched");
+    const launch = w.sandboxes.launched.find((l) => l.role === "program-red-team");
+    assert.deepEqual([launch.config.model, launch.config.version], ["standin-model-1", CODEX_CLI_VERSION]);
+    assert.ok(launch.files.includes(`${RED_JOB.replace(/\/job$/, "")}/AGENTS.md`), "the second backend's CLI gets its instructions");
+    await w.benchmarks.gate.meter.addUnmeasured(`program-red-team:${review.id}`, null);
+    const done = await w.drive(started.run.id);
+    const t = byId(done)["good-starter-ledger"];
+    assert.equal(t.status, "passed", JSON.stringify(t));
+    assert.equal(t.cost_usd, null, "a cost nobody could measure is not shown as one");
+    assert.match(t.cost_note, /^Not measured: some of the agent's model calls couldn't be priced/);
+    assert.equal(t.reserved_usd, t.cap_usd, "the run's cap counts the task's whole budget, reserved");
+    assert.equal(done.run.backend, "responses");
+  });
+});
+
 test("a sample Mynt can't prepare, or whose build declares another address, is the harness's failure and never the agent's", async () => {
   const w = await world({ mynt_program: { prep: "error" }, unsigned_authority: { declared_id: "11111111111111111111111111111111" } });
   const started = await w.benchmarks.start(w.admin, { agent: "program-red-team", cap_usd: 25, task_ids: ["good-starter-ledger", "bad-unsigned-authority"] });

@@ -8280,7 +8280,7 @@
     {
       "name": "get_benchmark_run",
       "title": "A benchmark run's scoreboard",
-      "description": "Admin: one benchmark run: the agent, task set, model and the content hash of each agent workspace folder it ran with, its cap and what the cap has counted (what was measured, and apart from it what was only reserved for a task whose cost couldn't be measured after work ran: never shown as money spent; a task that never got a sandbox counts nothing), why it stopped if it did, its scoreboard, and every task with its outcome, the check that failed, whether the failure was the agent's or the infrastructure's, each of Mynt's checks, cost and duration.",
+      "description": "Admin: one benchmark run: the agent, task set, model, the model backend it ran on and the content hash of each agent workspace folder it ran with, its cap and what the cap has counted (what was measured, and apart from it what was only reserved for a task whose cost couldn't be measured after work ran: never shown as money spent; a task that never got a sandbox counts nothing), why it stopped if it did, its scoreboard, and every task with its outcome, the check that failed, whether the failure was the agent's or the infrastructure's, each of Mynt's checks, cost and duration.",
       "area": "admin",
       "roles": [
         "admin"
@@ -8764,7 +8764,7 @@
     {
       "name": "get_platform_settings",
       "title": "Operational settings",
-      "description": "Admin: the operational settings this server runs with that aren't secrets (build, audit, desk, review, exploration and benchmark budgets and limits, the build audit, the hosted VM hour's price): each one's value in effect, its default, where the value comes from (the server's environment, which wins; what an admin set in Mynt; or Mynt's default), how a new value is checked, and what it's for. Change one with set_platform_setting.",
+      "description": "Admin: the operational settings this server runs with that aren't secrets (build, audit, desk, review, exploration and benchmark budgets and limits, the build audit, the hosted VM hour's price, and the model backend the mainnet gate's red team runs on with its model and token prices): each one's value in effect, its default, where the value comes from (the server's environment, which wins; what an admin set in Mynt; or Mynt's default), how a new value is checked, and what it's for. Change one with set_platform_setting.",
       "area": "admin",
       "roles": [
         "admin"
@@ -14517,6 +14517,7 @@
               "BOAT_API_KEY",
               "HOSTING_DO_TOKEN",
               "ANTHROPIC_API_KEY",
+              "RESPONSES_BACKEND_API_KEY",
               "CLERK_SECRET_KEY",
               "CLERK_WEBHOOK_SECRET",
               "GITHUB_APP_PRIVATE_KEY",
@@ -17261,6 +17262,7 @@
               "BOAT_API_KEY",
               "HOSTING_DO_TOKEN",
               "ANTHROPIC_API_KEY",
+              "RESPONSES_BACKEND_API_KEY",
               "CLERK_SECRET_KEY",
               "CLERK_WEBHOOK_SECRET",
               "GITHUB_APP_PRIVATE_KEY",
@@ -17319,6 +17321,12 @@
               "REVIEW_CASE_CAP_USD",
               "REVIEW_MONTHLY_CAP_USD",
               "BENCHMARK_CAP_USD",
+              "RED_TEAM_BACKEND",
+              "RED_TEAM_MODEL",
+              "RED_TEAM_INPUT_USD_PER_MTOK",
+              "RED_TEAM_OUTPUT_USD_PER_MTOK",
+              "RED_TEAM_CACHED_INPUT_USD_PER_MTOK",
+              "RED_TEAM_ACCESS_PROGRAM",
               "PRODUCTION_REVIEW_WORKFLOWS",
               "PRODUCTION_REVIEW_MODEL",
               "PRODUCTION_REVIEW_MINUTES",

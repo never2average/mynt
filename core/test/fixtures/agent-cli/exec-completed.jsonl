@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a221b1-1afe-7ab0-9bf8-e0d4e0c5e667"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `stand-in-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'echo standin-ran > ran.txt && cat ran.txt'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'echo standin-ran > ran.txt && cat ran.txt'","aggregated_output":"standin-ran\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Report written."}}
+{"type":"turn.completed","usage":{"input_tokens":240,"cached_input_tokens":40,"cache_write_input_tokens":0,"output_tokens":60,"reasoning_output_tokens":20}}
