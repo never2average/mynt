@@ -21,6 +21,7 @@ import { SignedCopyLinks, SigningSheet } from "@/components/agreement-esign"
 import { EndSubscriptionSheet } from "@/components/end-subscription-sheet"
 import { marketplaceHref } from "@/lib/marketplace"
 import { StageMark, StatusDot } from "@/components/promotion-view"
+import { ProductionReviewsSection } from "@/components/production-reviews"
 import { RiskRegisterSection, SignalSection } from "@/components/risk-register"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -679,6 +680,7 @@ export function SecurityView({ data, appId = "", onChanged, signals = true }: { 
           <Quiet>{data.checksReason ?? "No build checks to show."}</Quiet>
         )}
       </Section>
+      <ProductionReviewsSection appId={appId} data={data.reviews} noun={signals ? "app" : "service"} onChanged={onChanged} />
       <Section id="app-security-events" title="Security events">
         <Events events={data.events} reason={data.eventsReason} empty={signals ? "No security events for this app." : "No security events for this service."} />
         <ViewAll href="/audits?tab=security" />

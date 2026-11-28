@@ -90,6 +90,7 @@ import { registerBenchmarkTools } from "./benchmarks.js";
 import { registerAppRemovalTools } from "./app-removal.js";
 import { registerModuleTools } from "./modules.js";
 import { effectiveStages, registerPromotionAdminTools, registerPromotionTools } from "./promotions.js";
+import { registerProductionReviewAdminTools, registerProductionReviewTools } from "./production-reviews.js";
 import { registerAttentionTools } from "./attention.js";
 import { isProduction, NOT_PRODUCTION } from "./promotion-schema.js";
 
@@ -152,6 +153,9 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerWorkspacePnlTools(server, store, user!);
     // Promotion between stages (promotions.ts) and what needs attention in a workspace (attention.ts).
     registerPromotionTools(server, store, user!);
+    // The full code review a build needs before Production (production-reviews.ts): asked by the workspace's owners
+    // and admins, read by its members; Mynt admins ask, stop and read across workspaces.
+    if (ctx.productionReviews) registerProductionReviewTools(server, user!, ctx.productionReviews, { admin: has("admin") });
     registerAttentionTools(server, store, user!);
     registerBuildTools(server, store, user!);
     registerJourneyTools(server, store, user!);
@@ -290,6 +294,7 @@ export function createServer(store: Store, user: User | null = null, ctx: AdminC
     registerFirmCheckAdminTools(server, store, user!);
     if (!has("vendor")) registerRampAdapterTools(server, store, user!, { admin: true, vendors: ctx.vendors });
     if (ctx.builds) registerCodingAgentAdminTools(server, ctx.builds);
+    if (ctx.productionReviews) registerProductionReviewAdminTools(server, user!, ctx.productionReviews);
     if (ctx.solana) registerSolanaAdminTools(server, store, user!, ctx.solana);
     registerAppRemovalTools(server, store, user!, ctx.solana ?? null);
     if (ctx.bd) registerBdAdminTools(server, ctx.bd, (action, target, details = {}) => store.audit(user!.id, action, target, details));

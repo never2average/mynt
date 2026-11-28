@@ -149,6 +149,7 @@ Workspaces, agreements and risk:
 
 - Workspaces: `list_workspaces`, `create_workspace`, `rename_workspace`, `list_workspace_members`, `invite_to_workspace`, `revoke_workspace_invite`, `change_member_role`, `remove_workspace_member`, `leave_workspace`, `relink_workspace_org`, `archive_workspace`, `unarchive_workspace` (see [Workspaces](workspaces-and-sign-in.md#workspaces))
 - App stages: `get_promotion_checks`, `promote_app`, `demote_app`, `set_app_target_states`, `request_promotion_signoff`, `get_workspace_attention` (see [Stages and promotion](workspaces-and-sign-in.md#stages-and-promotion))
+- Production code reviews: `request_production_review`, `get_production_review`, `list_production_reviews`, `stop_production_review` (see [The production code review](apps-and-builds.md#the-production-code-review))
 - Agreements: `propose_app_agreement`, `update_agreement_scopes`, `respond_to_app_agreement`, `sign_app_agreement`, `terminate_app_agreement`, `list_app_agreements`, `get_agreement_signing_link`, `download_agreement_document` (see [App agreements](agreements.md#app-agreements))
 - Customers: `get_app_customers`, `set_app_target_segments` (see [Target customers](agreements.md#target-customers))
 - Oversight audits: `list_agreement_audits`, `get_agreement_audit`, `submit_agreement_audit_evidence`, `respond_to_agreement_audit_finding` (see [Oversight audits](agreements.md#oversight-audits))
@@ -207,6 +208,7 @@ A Mynt admin (`admin`) runs Mynt itself, from inside Mynt: regions, product type
 - Who may sign in: `list_whitelist`, `invite_user`, `revoke_user` (see [Invite-only sign-in](workspaces-and-sign-in.md#invite-only-sign-in))
 - Firms: `register_firm`, `add_entity_member`, `remove_entity_member`, `recover_firm_member`, `run_firm_checks`, `get_regulated_firm_onboarding` (see [Firms and licence review](platform-admin.md#firms-and-licence-review))
 - Oversight: `audit_log`, where each entry carries its `class`, `list_all_campaigns`, `admin_pause_campaign`, `admin_set_product_status` (see [Oversight](platform-admin.md#oversight))
+- Production code reviews, across workspaces: `list_production_reviews`, `get_production_review`, `request_production_review`, `stop_production_review`, and the exception for one build, `waive_production_review` (see [The production code review](apps-and-builds.md#the-production-code-review))
 - Take rates: `define_take_rate`, `list_take_rates` (see [Take rates](platform-admin.md#take-rates))
 - Any workspace's members, by its owners' rules: `admin_invite_workspace_member`, `admin_change_workspace_member_role`, `admin_remove_workspace_member`, `admin_revoke_workspace_invite` (see [Members and invitations](workspaces-and-sign-in.md#members-and-invitations))
 - Risk registers: `admin_list_risks`, and Mynt's own with `add_risk`, `update_risk` and `list_risks` on the `platform` subject, and the tools under one risk (`get_risk` reads any register's risk for an admin) (see [Risk](risk.md))

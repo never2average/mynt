@@ -461,6 +461,41 @@ type AuditRun = { attempt: number; result: string | null; exit_code: number | nu
 export type AuditState = { attempt: number; started_at: string; tree_sha256: string; sandbox_base_usd: number; model_usd_before: number };
 export const AUDIT_ATTEMPTS = 2;
 
+// Where the auditor's report is written and read back (Mynt reads it; the auditor's script writes it).
+export const AUDIT_REPORT_FILE = `${VERIFY_DIR}/maxwell.json`;
+// What the auditor is started with: Mynt's build-audit workspace as its working folder and its job file. The same
+// for a build's audit and for a production code review (production-reviews.ts), which differ only in the workflows,
+// the limits and the model the job names.
+export function auditorJob(
+  config: Pick<BuildConfig, "maxwellRepo" | "maxwellCommit">,
+  o: { workflows: string[]; minutes: number; budgetUsd: number; model: string; attempt: number; attempts: number },
+) {
+  return {
+    prompt: "Audit the application described in job/audit.json, following CLAUDE.md and its skills.",
+    workspace: "build-audit",
+    budgetUsd: o.budgetUsd,
+    jobFiles: {
+      "job/audit.json": JSON.stringify(
+        {
+          app_dir: VERIFY_AUDIT_SRC,
+          maxwell_repo: config.maxwellRepo,
+          maxwell_commit: config.maxwellCommit ?? "",
+          output: AUDIT_REPORT_FILE,
+          workflows: o.workflows,
+          minutes: o.minutes,
+          // What this attempt may spend, Maxwell's own runs included (they go through the same token), and on what.
+          budget_usd: Math.floor(o.budgetUsd * 100) / 100,
+          model: o.model,
+          attempt: o.attempt,
+          attempts: o.attempts,
+        },
+        null,
+        2,
+      ),
+    },
+  };
+}
+
 const hashToken = (t: string) => createHash("sha256").update(t).digest("hex");
 // The agent's activity log is read up to ACTIVITY_CHUNK bytes at a time, a few chunks a tick (more once the agent has
 // exited, to read it to the end), and each build keeps its latest ACTIVITY_KEEP entries.
@@ -599,30 +634,7 @@ export class BuildService {
   // The auditor in the verification sandbox, with its job file (attempt 2 is told why it's running again).
   private async launchAudit(b: Build, vid: string, attempt: number, budgetUsd: number) {
     const { audit } = this.config;
-    return this.startAuditor(b, vid, {
-      prompt: "Audit the application described in job/audit.json, following CLAUDE.md and its skills.",
-      workspace: "build-audit",
-      budgetUsd,
-      jobFiles: {
-        "job/audit.json": JSON.stringify(
-          {
-            app_dir: VERIFY_AUDIT_SRC,
-            maxwell_repo: this.config.maxwellRepo,
-            maxwell_commit: this.config.maxwellCommit ?? "",
-            output: `${VERIFY_DIR}/maxwell.json`,
-            workflows: audit.workflows,
-            minutes: audit.minutes,
-            // What this attempt may spend, Maxwell's own runs included (they go through the same token), and on what.
-            budget_usd: Math.floor(budgetUsd * 100) / 100,
-            model: audit.model,
-            attempt,
-            attempts: AUDIT_ATTEMPTS,
-          },
-          null,
-          2,
-        ),
-      },
-    });
+    return this.startAuditor(b, vid, auditorJob(this.config, { workflows: audit.workflows, minutes: audit.minutes, budgetUsd, model: audit.model, attempt, attempts: AUDIT_ATTEMPTS }));
   }
 
   private async metered(id: string) {

@@ -60,3 +60,14 @@ export async function inProduction(store, appId) {
     [appId],
   );
 }
+
+// A complete production code review of one build, with no finding, as the review service records it
+// (production-reviews.ts). Tests that are about something else give their verified builds one, because a build goes to
+// Production only with its own complete review.
+export async function reviewedForProduction(db, { appId, buildId, userId = null }) {
+  await db.query(
+    `INSERT INTO financial_products.production_reviews (id, app_id, build_id, status, workflows, minutes, cap_usd, model, requested_by, report, cost_usd, started_at, finished_at)
+     VALUES (gen_random_uuid(), $1, $2, 'complete', '{execute-scr}', 180, 60, 'claude-sonnet-5-5', $3, $4, 21.5, now() - interval '70 minutes', now())`,
+    [appId, buildId, userId, JSON.stringify({ complete: true, counts: { critical: 0, high: 0, medium: 0, low: 0 }, findings: [], workflows_run: ["execute-scr"], skipped: [] })],
+  );
+}

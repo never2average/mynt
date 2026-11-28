@@ -47,6 +47,7 @@ import { ComponentSchema, PartyBindingSchema, productRegime, validateComposition
 import { ENTITY_STATUSES } from "./store.js";
 import type { SolanaService } from "./solana/service.js";
 import type { MainnetGateService } from "./solana/mainnet-gate.js";
+import type { ProductionReviewService } from "./production-reviews.js";
 import type { ProductHealthService } from "./product-health.js";
 import { auditForAdmin, type CovenantService } from "./covenants.js";
 import { auditClass } from "./audit-classes.js";
@@ -71,6 +72,7 @@ export interface AdminContext {
   modules?: ModuleRegistry | null; // developers' published modules
   solana?: SolanaService | null; // developers' Solana programs: registry, deployer, signer, indexer
   gate?: MainnetGateService | null; // the mainnet program gate every mainnet deploy and upgrade passes
+  productionReviews?: ProductionReviewService | null; // the full code review a build needs before Production
   productHealth?: ProductHealthService | null; // each product's on-chain financial-health record
   covenants?: CovenantService | null; // licence providers' rules on the products they sponsor
   treasury?: TreasuryService | null; // pools' on-chain treasuries (devnet): registry, deposit approvals, indexer

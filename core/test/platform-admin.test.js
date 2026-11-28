@@ -136,5 +136,5 @@ test("operational settings: the admin's read still lists the nine settings first
   const admin = await connect("Ada", ["admin"]);
   const got = (await call(admin.client, "get_platform_settings")).data;
   assert.deepEqual(got.settings.slice(0, 9).map((s) => s.key), ["BUILD_CAP_USD", "BUILD_MONTHLY_CAP_USD", "BUILD_AUDIT", "BUILD_AUDIT_MODEL", "BUILD_AUDIT_CAP_USD", "BUILD_AUDIT_MINUTES", "BUILD_AUDIT_WORKFLOWS", "EXPLORE_CAP_USD", "FREESTYLE_USD_PER_HOUR"]);
-  assert.equal(got.settings.length, 22); // the sixteen, and the six that choose the red team's model backend
+  assert.equal(got.settings.length, 28); // the sixteen, the six that choose the red team's model backend, and the production code review's six
 });

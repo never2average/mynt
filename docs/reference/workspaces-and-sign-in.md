@@ -230,8 +230,13 @@ Production needs the staging checks, with these differences and additions.
 | `program_agreements` | A signed program agreement is in force today with the licence provider sponsoring each product the app uses, covering that product. See [Production needs program agreements](agreements.md#production-needs-program-agreements) |
 | `webhooks` | Each webhook is on, its secret is held by a current member, and its last delivery did not fail. Pending until a delivery has reached it, for example from a sandbox hand-off |
 | `audit_findings` | The newest audited build has no critical or high findings, even one newer than the verified build. With no independent audit there are none to read: a warning, or a failure when the app needs sign-off |
+| `production_code_review` | Mynt's full code review of the verified build is `complete` with no critical or high finding. Pending while it runs. Any other end (incomplete, refused, failed, stopped) fails, with the review's reason and what to do. Passes as "Waived by a Mynt admin: <reason>" when a Mynt admin recorded an exception for that build. See [The production code review](apps-and-builds.md#the-production-code-review) |
 | `program_gate` | When the app has Solana programs or its verified build carries some: each is on mainnet, deployed through the program gate, with no open vulnerability flag. Pending while a review runs |
 | `admin_signoff` | Only when `needs_admin_signoff`: a Mynt admin approved this build |
+
+The production code review's critical and high findings also fail `audit_findings`, whether or not the review finished.
+
+**Apps already in Production.** An app that was in Production before code reviews were required is not taken offline. For the build it has online, `production_code_review` only warns ("went online before production code reviews were required"), and `get_workspace_attention` doesn't flag it. The check applies in full to its next promotion and to the next build put online (see [Who puts a build online](apps-and-builds.md#who-puts-a-build-online)).
 
 ### Promoting and demoting
 

@@ -55,8 +55,11 @@ export const APP_REMOVAL_STEPS: { table: string; where: string; list?: string }[
   { table: "solana_program_artifacts", where: `t.build_id IN ${BUILDS}` },
   { table: "build_activity", where: `t.build_id IN ${BUILDS}` },
   { table: "build_events", where: `t.build_id IN ${BUILDS}` },
-  // What each build's agents spent on models (the meter's run key).
-  { table: "agent_spend", where: `t.run_key IN (SELECT 'build:' || id::text FROM ${T}.build_runs WHERE app_id = $1)` },
+  // What each build's agents, and each production code review's, spent on models (the meter's run key).
+  {
+    table: "agent_spend",
+    where: `t.run_key IN (SELECT 'build:' || id::text FROM ${T}.build_runs WHERE app_id = $1) OR t.run_key IN (SELECT 'production-review:' || id::text FROM ${T}.production_reviews WHERE app_id = $1)`,
+  },
   { table: "build_runs", where: "t.app_id = $1", list: "id" },
   // What its machines cost over time (usage-meter.ts), with its builds' own costs above.
   { table: "usage_samples", where: "t.app_id = $1" },
@@ -72,6 +75,10 @@ export const APP_REMOVAL_STEPS: { table: string; where: string; list?: string }[
   ...["risk_links", "risk_controls", "risk_factors", "risk_treatments"].map((table) => ({ table, where: `t.risk_id IN (SELECT id FROM ${T}.risk_register WHERE subject_type = 'app' AND subject_id = $1::text)` })),
   { table: "risk_register", where: "t.subject_type = 'app' AND t.subject_id = $1::text" },
   { table: "promotion_signoffs", where: "t.app_id = $1", list: "id" },
+  // Its builds' production code reviews and any exception recorded for one (production-reviews.ts). Each stays in
+  // the audit trail.
+  { table: "production_review_waivers", where: "t.app_id = $1" },
+  { table: "production_reviews", where: "t.app_id = $1", list: "id" },
   { table: "app_promotions", where: "t.app_id = $1" },
   { table: "apps", where: "t.id = $1", list: "id" },
 ];
@@ -194,6 +201,11 @@ export async function planAppRemoval(q: Q, appId: string): Promise<RemovalPlan> 
     else if (b.box_sandbox_id && b.box_until && new Date(b.box_until).getTime() > Date.now())
       refusals.push(`Build ${b.id} has a reopened sandbox open until ${new Date(b.box_until).toISOString()}: close it first (close_sandbox)`);
   }
+
+  // A production code review in progress has a sandbox running: stopped first, so nothing is left behind.
+  if (present.has("production_reviews"))
+    for (const r of (await q.query(`SELECT id, status FROM ${T}.production_reviews WHERE app_id = $1 AND status IN ('queued', 'running')`, [app.id])).rows as { id: string; status: string }[])
+      refusals.push(`Production code review ${r.id} is still ${r.status}: stop it first (stop_production_review)`);
 
   for (const l of LIVE) {
     const n = await count(q, present, l.table, l.where, app.id);

@@ -35,7 +35,7 @@ const ALL = [
 const SPONSOR = "11111111-1111-4111-8111-111111111111";
 // Security & risk before Mynt has risk registers: the register and every signal say so.
 const NOT_HERE = { available: false as const, reason: "Risk registers come with Mynt's next update." };
-const NO_RISK = { register: NOT_HERE, signals: { fraud: NOT_HERE, vendors: NOT_HERE, conduct: NOT_HERE, products: NOT_HERE } };
+const NO_RISK = { register: NOT_HERE, signals: { fraud: NOT_HERE, vendors: NOT_HERE, conduct: NOT_HERE, products: NOT_HERE }, reviews: NOT_HERE };
 const AGREEMENTS = {
   app: { id: APP, name: "Cards" },
   can_manage: true,

@@ -194,9 +194,18 @@ describe("who gets in", () => {
 describe("the allow-list", () => {
   it("admin tools are their own list: never callable through the studio's, and strict", () => {
     // A risk's own tools (its detail: factors, treatment tasks, controls, links) are on both lists too, each taking the risk's id and its own fields.
+    const REVIEWS = ["list_production_reviews", "get_production_review", "stop_production_review"];
     const RISK_DETAIL = ["get_risk", "add_risk_factor", "update_risk_factor", "remove_risk_factor", "add_risk_treatment", "update_risk_treatment", "add_risk_control", "update_risk_control", "retire_risk_control", "link_risk", "unlink_risk"];
-    for (const t of Object.keys(ADMIN_TOOLS)) if (!["list_vendor_offerings", "list_service_types", "get_vendor_onboarding", "list_risks", "add_risk", "update_risk", ...RISK_DETAIL].includes(t)) expect(Object.keys(STUDIO_TOOLS)).not.toContain(t);
+    for (const t of Object.keys(ADMIN_TOOLS)) if (!["list_vendor_offerings", "list_service_types", "get_vendor_onboarding", "list_risks", "add_risk", "update_risk", ...RISK_DETAIL, ...REVIEWS].includes(t)) expect(Object.keys(STUDIO_TOOLS)).not.toContain(t);
     for (const t of RISK_DETAIL) expect(Object.keys(STUDIO_TOOLS), t).toContain(t);
+    // Production code reviews are read and stopped from both: the studio's list is for one app, the admin area's is
+    // across workspaces. Recording an exception is the admin area's only.
+    for (const t of REVIEWS) expect(Object.keys(STUDIO_TOOLS), t).toContain(t);
+    expect(parseStudioCall("list_production_reviews", {})).toHaveProperty("error");
+    expect(parseAdminCall("list_production_reviews", {})).toHaveProperty("tool");
+    expect(parseAdminCall("list_production_reviews", { app_id: FIRM })).toHaveProperty("error");
+    expect(Object.keys(STUDIO_TOOLS)).not.toContain("waive_production_review");
+    expect(Object.keys(ADMIN_TOOLS)).not.toContain("request_production_review");
     // The risk tools are on both lists: the studio's take an app's or a product's register, the admin area's only Mynt's own.
     expect(parseStudioCall("list_risks", { subject_type: "platform", subject_id: "mynt" })).toHaveProperty("error");
     expect(parseAdminCall("list_risks", { subject_type: "platform", subject_id: "mynt" })).toHaveProperty("tool");

@@ -78,6 +78,7 @@ afterEach(() => cleanup());
 const REGISTER = registerFrom(LIST, [{ userId: OWNER, name: "Ines" }])!;
 const SECURITY: AppSecurity = {
   available: true,
+  reviews: { available: false, reason: "Production code reviews come with Mynt's next update." },
   register: REGISTER,
   signals: signalsFrom(LIST),
   events: [],

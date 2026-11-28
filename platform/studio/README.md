@@ -120,7 +120,7 @@ The platform admin is for Mynt admins, across all workspaces and firms. What its
 | Workspaces | `/platform/workspaces` | `components/admin-workspaces.tsx` | `/api/admin/workspaces`, `/api/admin/workspaces/<id>`, `POST /api/admin/workspaces/<id>/members` |
 | Regulated firms | `/platform/firms` (tabs `?tab=firms`, `?tab=licences`) | `components/admin-firms.tsx`, `components/admin-licences.tsx` (the Licences tab, and each firm's licence review) | `/api/admin/firms`, `/api/admin/firms/<id>`, `/api/admin/firms/<id>/status`, `POST /api/admin/firms/<id>/members`, `/api/admin/licences`, `/api/admin/licences/<id>` |
 | Vendors | `/platform/vendors` | `components/admin-vendors.tsx` | `/api/admin/vendors`, `/api/admin/vendors/service-types`, `/api/admin/vendors/offerings/<id>` |
-| Audit trails | `/platform/audit` | `components/admin-audit.tsx`, `lib/admin-audit.ts` | `GET /api/admin/audit?limit=` (1 to 500) |
+| Audit trails | `/platform/audit` (Audit log; Production reviews at `?tab=reviews`) | `components/admin-audit.tsx`, `lib/admin-audit.ts`, `components/admin-production-reviews.tsx`, `lib/production-reviews.ts` | `GET /api/admin/audit?limit=` (1 to 500); `GET` and `POST /api/admin/production-reviews`, `GET /api/admin/production-reviews/<id>` |
 | Risk models | `/platform/risk-models` | `components/admin-risk-models.tsx`, `lib/risk-models.ts` | `GET` and `POST /api/admin/risk-models`, `GET` and `POST /api/admin/risk-models/<id>` |
 | Risk register | `/platform/risk-register` | `components/admin-risk-register.tsx`, `components/risk-register.tsx`, `lib/admin-risks.ts` | `GET /api/admin/risks?area=<area>`, `POST /api/admin/risks` |
 | Platform settings | `/platform/settings` (`?tab=keys`, `operational`, `esign`, `risk-grading`) | `components/admin-settings.tsx`, `components/admin-key-vault.tsx`, `components/admin-operational-settings.tsx`, `components/esign-settings-view.tsx`, `components/admin-risk-grading.tsx`, `lib/platform-settings.ts` | `/api/admin/keys`, `/api/admin/settings`, `/api/admin/esign`, `/api/admin/risk-grading` |
@@ -232,7 +232,7 @@ Starting a build takes a lock per user and app (130 seconds, longer than listing
 | Tab | Reads |
 |---|---|
 | Products, Agreements, Customers | `list_app_agreements` and `get_app_customers` for this app, and the production check from `get_promotion_checks` |
-| Security & risk | `list_risks` for the app, Mynt's build checks for the next stage, and `list_workspace_audit` with `class: "security"` |
+| Security & risk | `list_risks` for the app, Mynt's build checks for the next stage, `list_production_reviews` for the app (Request production review and Stop review post to `app/api/apps/[appId]/production-reviews`; `components/production-reviews.tsx`, `lib/production-reviews.ts`), and `list_workspace_audit` with `class: "security"` |
 | P&L | `get_workspace_pnl` with the app's id |
 | SDK | `get_product_sdk`, for each product of the app |
 | Activity | `list_builds` and the app's audit events |

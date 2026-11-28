@@ -1,6 +1,8 @@
 "use client"
 
-// Admin → Audit trails (/platform/audit): Mynt's audit log across every workspace and firm (audit_log, lib/admin-audit.ts).
+// Admin → Audit trails (/platform/audit): two tabs. Audit log: Mynt's audit log across every workspace and firm
+// (audit_log, lib/admin-audit.ts). Production reviews (?tab=reviews): every workspace's production code reviews
+// (components/admin-production-reviews.tsx). The audit log:
 // The list convention: full-width search, one Filters popover (action, class, actor, workspace, firm, target type),
 // the date range with its quick choices (past-looking), labelled Import (disabled, with why) and Export CSV, over a
 // full-height table paged 25 rows at a time. A row opens /platform/audit/<id>: its metadata card, then Details (the
@@ -9,6 +11,8 @@
 import { useCallback, useMemo, useState } from "react"
 
 import { AdminDetail, AdminList, AdminNotReady, AdminTable, useAdminData } from "@/components/admin-kit"
+import { ProductionReviewsTab } from "@/components/admin-production-reviews"
+import { Tab, TabList } from "@/components/ui/tabs"
 import { DateRangeFilter } from "@/components/filter-controls"
 import { downloadCsv } from "@/components/licences-view"
 import { usePaged } from "@/components/list-layout"
@@ -20,6 +24,8 @@ import {
   AUDIT_CSV_HEAD,
   auditCsvRow,
   auditFacetOptions,
+  AUDIT_VIEW_LABELS,
+  AUDIT_VIEWS,
   classLabel,
   detailsShort,
   filterAudit,
@@ -30,6 +36,7 @@ import {
   whenWords,
   type AuditEntry,
   type AuditFilters,
+  type AuditView,
 } from "@/lib/admin-audit"
 
 export type AuditData = { entries: AuditEntry[]; limit: number }
@@ -148,7 +155,31 @@ export function AuditDetailView({ entry, related, onBack, onOpen, initialTab = "
   )
 }
 
-export function AuditTab({ id, onOpen, onBack }: { id: string | null; onOpen: (id: string) => void; onBack: () => void }) {
+/** The section's tab bar: the audit log, and every workspace's production code reviews. */
+export function AuditViewTabs({ view, onView }: { view: AuditView; onView: (v: AuditView) => void }) {
+  return (
+    <TabList aria-label="Audit trails">
+      {AUDIT_VIEWS.map((v) => (
+        <Tab key={v} selected={view === v} onClick={() => onView(v)} data-audit-view={v}>
+          {AUDIT_VIEW_LABELS[v]}
+        </Tab>
+      ))}
+    </TabList>
+  )
+}
+
+// Audit trails: two tabs, the tab in the address (?tab=reviews). A row's page (/platform/audit/<id>) has no tab bar:
+// it has Back.
+export function AuditTab({ id, onOpen, onBack, view = "log", onView = () => undefined }: { id: string | null; onOpen: (id: string) => void; onBack: () => void; view?: AuditView; onView?: (v: AuditView) => void }) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3" data-admin-audit data-view={view}>
+      {!id && <AuditViewTabs view={view} onView={onView} />}
+      {view === "reviews" ? <ProductionReviewsTab id={id} onOpen={onOpen} onBack={onBack} /> : <AuditLogTab id={id} onOpen={onOpen} onBack={onBack} />}
+    </div>
+  )
+}
+
+function AuditLogTab({ id, onOpen, onBack }: { id: string | null; onOpen: (id: string) => void; onBack: () => void }) {
   const pick = useCallback((b: Record<string, unknown>) => (Array.isArray(b.entries) ? ({ entries: b.entries as AuditEntry[], limit: Number(b.limit ?? b.entries.length) } as AuditData) : undefined), [])
   const { state } = useAdminData("/api/admin/audit", pick)
   if (state.kind !== "ready") return <AdminNotReady state={state} what={id ? "This audit entry" : "Audit trails"} />
