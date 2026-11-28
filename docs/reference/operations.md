@@ -496,7 +496,7 @@ Identifiers that go with a vault key but aren't secret stay in the environment t
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_SLUG` | Builds push branches and open pull requests | [Build settings](apps-and-builds.md#build-settings) |
 | `BUILD_MANAGED_REPO_OWNER` | Managed repositories | [Setting up managed repositories](apps-and-builds.md#setting-up-managed-repositories) |
 | `BUILD_CAP_USD`, `BUILD_MONTHLY_CAP_USD`, `BUILD_WORKSPACE_MONTHLY_CAP_USD`, `FREESTYLE_USD_PER_HOUR` | Spend caps for builds | [Spend](apps-and-builds.md#spend) |
-| `BUILD_AUDIT`, `BUILD_AUDIT_MODEL`, `BUILD_AUDIT_CAP_USD`, `BUILD_AUDIT_MINUTES`, `BUILD_AUDIT_WORKFLOWS`, `BUILD_MAXWELL_REPO` | The optional independent security audit of a build, and where its tool is fetched from | [The independent audit](apps-and-builds.md#the-independent-audit) |
+| `BUILD_AUDIT`, `BUILD_AUDIT_MODEL`, `BUILD_AUDIT_CAP_USD`, `BUILD_AUDIT_MINUTES`, `BUILD_AUDIT_WORKFLOWS`, `BUILD_MAXWELL_REPO`, `BUILD_MAXWELL_COMMIT` | The optional independent security audit of a build, and where its tool is fetched from, at which commit | [The independent audit](apps-and-builds.md#the-independent-audit) |
 | `BUILD_SANDBOX_TYPE`, `BUILD_SANDBOX_TTL_SECONDS`, `BUILD_SESSION_IDLE_MS`, `MYNT_AGENT_HOLD`, `MYNT_AGENT_IDLE_MS` | The build's agent sandbox and session builds | [Session builds](apps-and-builds.md#session-builds) |
 | `MYNT_AGENT_SETTLE_MS`, `MYNT_AGENT_BACKGROUND_MAX_MS` | How long the agent runner waits for an agent's background work | This table |
 | `MYNT_TRANSIENT_GRACE_MS` | How long a transient error (a provider briefly down) may last before it fails the work | This table |

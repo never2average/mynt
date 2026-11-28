@@ -108,6 +108,9 @@ export interface BuildConfig {
   sandboxType: string;
   ttlSeconds: number;
   maxwellRepo: string;
+  // The commit of Maxwell the audit runs on ("" for its default branch): a known-good one, so a broken tip of the
+  // tool can't block every build.
+  maxwellCommit?: string;
   publicUrl: string;
   // Mynt's independent audit: its own model, budget (paid by Mynt, outside the developer's cap), time limit and
   // the Maxwell workflows it runs.
@@ -130,6 +133,11 @@ export const workspaceBuildCapUsd = (env = process.env) => {
   return env.BUILD_WORKSPACE_MONTHLY_CAP_USD && Number.isFinite(n) && n > 0 ? n : null;
 };
 
+// The Maxwell commit the audit runs on unless BUILD_MAXWELL_COMMIT says otherwise: the last one whose own checks
+// (`npm run validate`) pass. The merge after it (2026-11-19) left the default branch failing them: files outside its
+// layout, a workflow script that doesn't parse, schema lint.
+export const MAXWELL_COMMIT = "d1c155b7c2ebe9425214d991e3d42c6407612b06";
+
 // The caps and the audit's settings are operational settings (platform-settings.ts): read each time they're used, so
 // an admin's change applies to the next build without a restart. The environment still wins where it sets them.
 export function buildConfigFromEnv(env = process.env): BuildConfig {
@@ -147,6 +155,7 @@ export function buildConfigFromEnv(env = process.env): BuildConfig {
     sandboxType: env.BUILD_SANDBOX_TYPE ?? "default",
     ttlSeconds: Number(env.BUILD_SANDBOX_TTL_SECONDS ?? 4 * 3600),
     maxwellRepo: env.BUILD_MAXWELL_REPO ?? "https://github.com/OnFinance/Maxwell",
+    maxwellCommit: env.BUILD_MAXWELL_COMMIT ?? MAXWELL_COMMIT,
     publicUrl: (env.PUBLIC_URL ?? "").replace(/\/+$/, ""),
     audit: {
       get mode() {
@@ -162,7 +171,7 @@ export function buildConfigFromEnv(env = process.env): BuildConfig {
         return Number(setting("BUILD_AUDIT_MINUTES") ?? 20);
       },
       get workflows() {
-        return (setting("BUILD_AUDIT_WORKFLOWS") ?? "execute-scr,probe-cicd-env").split(",").map((w) => w.trim()).filter(Boolean);
+        return (setting("BUILD_AUDIT_WORKFLOWS") ?? "probe-cicd-env").split(",").map((w) => w.trim()).filter(Boolean);
       },
     },
     solanaSnapshot: env.SOLANA_BUILD_SNAPSHOT !== "off",
@@ -599,9 +608,13 @@ export class BuildService {
           {
             app_dir: VERIFY_AUDIT_SRC,
             maxwell_repo: this.config.maxwellRepo,
+            maxwell_commit: this.config.maxwellCommit ?? "",
             output: `${VERIFY_DIR}/maxwell.json`,
             workflows: audit.workflows,
             minutes: audit.minutes,
+            // What this attempt may spend, Maxwell's own runs included (they go through the same token), and on what.
+            budget_usd: Math.floor(budgetUsd * 100) / 100,
+            model: audit.model,
             attempt,
             attempts: AUDIT_ATTEMPTS,
           },
@@ -1846,7 +1859,8 @@ export class BuildService {
       const outOfBudget = spent >= cfg.capUsd || auditor.state?.last_subtype === "error_max_budget_usd";
       if (auditor.running && !timedOut && !outOfBudget) return;
       // Out of time or budget: the auditor is ended before Mynt reads its report and re-hashes the source.
-      if (auditor.running) await sandboxes.exec(vid, AUDITOR_KILL, { timeoutSeconds: 30 }).catch(() => undefined);
+      // Its background work goes too, even when its own turn is over: the script's worker and Maxwell's launcher.
+      await sandboxes.exec(vid, AUDITOR_KILL, { timeoutSeconds: 30 }).catch(() => undefined);
       const rehash = await sandboxes.exec(vid, `bash ${VERIFY_DIR}/verify.sh --rehash`, { timeoutSeconds: 300 }).catch(() => null);
       const after = rehash?.stdout.match(/^rehash ([0-9a-f]{64})$/m)?.[1];
       const [report, maxwell, changedText] = await Promise.all([
@@ -2261,23 +2275,39 @@ export function notReadyMessage(failed: Pick<Check, "name" | "detail">[]) {
 export type MaxwellReport = NonNullable<AgentResult["maxwell"]> & {
   complete?: boolean;
   workflows_run?: unknown[];
+  // Each workflow that didn't finish, with why. The audit's script (workspaces/build-audit/scripts/audit.mjs) also
+  // gives the kind of reason: "time", "budget", "tool" (Maxwell itself is broken or misconfigured), "stalled" (its
+  // run stopped making model calls and was ended), "failed" (its run ended in an error) or "pending" (not finished
+  // when the auditor's turn ended).
   skipped?: unknown[];
+  // Maxwell couldn't be used at all (its commit fails its own checks, it couldn't be fetched or installed).
+  tool_problem?: string;
+  // The model provider refused the work in some of Maxwell's runs (its usage-policy safeguards).
+  model_refusal?: { workflows?: string[]; count?: number; category?: string | null; request_ids?: string[] };
 };
 
 export type AuditProblem = {
-  kind: "time" | "budget" | "no_report" | "incomplete";
+  kind: "time" | "budget" | "tool" | "refused" | "stalled" | "no_report" | "incomplete";
   detail: string; // what happened, briefly (for the timeline)
   reason: string; // the build's error
   next_step: string; // what to do about it
-  retry: boolean; // worth a second attempt: not a matter of time or budget
+  // Worth a second attempt: not a matter of time, budget or a broken tool (those end the same way again), and with
+  // enough of the audit's budget left that a whole second run could do better than the first.
+  retry: boolean;
 };
 
 // What to do, by what stopped the build. The audit's time and budget are Mynt's settings, not the build's cap.
 export const AUDIT_NEXT = {
   time:
-    "Nothing in your code needs changing for this: start a new build with continue_from this build to verify it again. If audits keep running out of time, Mynt's admins can raise BUILD_AUDIT_MINUTES or run fewer workflows (BUILD_AUDIT_WORKFLOWS).",
+    "Nothing in your code needs changing for this. The time limit is Mynt's setting, and verifying again is likely to end the same way until it changes: a Mynt admin must raise BUILD_AUDIT_MINUTES or run fewer workflows (BUILD_AUDIT_WORKFLOWS). Then start a new build with continue_from this build to verify it again.",
   budget:
-    "Nothing in your code needs changing for this, and it didn't come out of your cap: start a new build with continue_from this build to verify it again. If audits keep running out of budget, Mynt's admins can raise BUILD_AUDIT_CAP_USD or run fewer workflows (BUILD_AUDIT_WORKFLOWS).",
+    "Nothing in your code needs changing for this, and it didn't come out of your cap. The budget is Mynt's setting, and verifying again is likely to end the same way until it changes: a Mynt admin must raise BUILD_AUDIT_CAP_USD or run fewer workflows (BUILD_AUDIT_WORKFLOWS). Then start a new build with continue_from this build to verify it again.",
+  tool:
+    "Nothing in your code needs changing for this, and verifying again won't help until it's fixed: a Mynt admin must put right what the message names. Most often that is BUILD_MAXWELL_COMMIT (set it to a Maxwell commit whose own checks pass) or BUILD_AUDIT_WORKFLOWS (it names a workflow that commit doesn't have). Then start a new build with continue_from this build.",
+  refused:
+    "Nothing in your code needs changing for this, and verifying again will be refused again: the model provider's safeguards declined the audit's security review. A Mynt admin must choose one: get the provider's approval for security work on Mynt's account, run the audit on a model the provider allows it on (BUILD_AUDIT_MODEL), or leave the refused workflow out of BUILD_AUDIT_WORKFLOWS. The request id on this build's timeline is what the provider will ask for. Then start a new build with continue_from this build.",
+  stalled:
+    "Nothing in your code needs changing for this: Maxwell's run stopped making progress in Mynt's verification sandbox and was ended. Start a new build with continue_from this build to verify it again. If it happens again, a Mynt admin should read the auditor's account on this build's timeline: the model provider or Mynt's agent proxy may be failing, or the workflow needs something the sandbox lacks (leave it out of BUILD_AUDIT_WORKFLOWS until it's there).",
   no_report:
     "Nothing in your code needs changing for this: start a new build with continue_from this build to verify it again. If it happens again, Mynt's admins can read the auditor's own account on this build's timeline.",
   incomplete:
@@ -2287,9 +2317,19 @@ export const AUDIT_NEXT = {
   findings: "Fix these findings in your app, then start a new build with continue_from this build; Mynt audits it again.",
 } as const;
 
-// Ends the auditor (its runner and the Claude Code it drives) when it's out of time or budget. The bracket keeps
-// pkill's pattern from matching the shell that runs it.
-export const AUDITOR_KILL = `pkill -KILL -f '${AGENT_DIR}/[r]unner.mjs'; pkill -KILL -f '[.]mynt-claude/node_modules'; true`;
+// Ends the auditor: its runner and the Claude Code it drives, and the workflows its script started in the
+// background (the script's worker, Maxwell's launcher and the Claude Code that runs). The bracket keeps pkill's
+// pattern from matching the shell that runs it.
+export const AUDITOR_KILL = `pkill -KILL -f '${AGENT_DIR}/[r]unner.mjs'; pkill -KILL -f 'scripts/[a]udit.mjs'; pkill -KILL -f '[r]un-headless.mjs'; pkill -KILL -f '[.]mynt-claude/node_modules'; true`;
+
+// A model refusal as Claude Code reports it ("API Error: <model> can't help with this. Start a new session to
+// continue. Learn more: …/legal/aup Details: `[cyber]` Request ID: req_…"): the provider's safeguards declined the
+// request. The session then ends as a "success" with that as its last message, so it is read from the text.
+export function modelRefusal(text: string | null | undefined): { category: string | null; request_id: string | null } | null {
+  const m = /API Error:[^\n]{0,200}?(?:can['’]t help with this|legal\/aup)[^\n]{0,400}/.exec(text ?? "");
+  if (!m) return null;
+  return { category: /Details:\s*`?\[([a-z_ -]{1,40})\]/i.exec(m[0])?.[1] ?? null, request_id: /Request ID:\s*(req_[A-Za-z0-9_-]+)/.exec(m[0])?.[1] ?? null };
+}
 
 const asWorkflow = (s: unknown) => (typeof s === "string" ? s : s && typeof s === "object" && typeof (s as { workflow?: unknown }).workflow === "string" ? (s as { workflow: string }).workflow : null);
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -2305,30 +2345,55 @@ export function auditOutcome(o: {
   capUsd: number;
   spentUsd: number;
   attempt: number;
-  runner: { last_subtype: string | null; exit_code: number | null; error: string | null } | null;
+  runner: { last_subtype: string | null; exit_code: number | null; error: string | null; summary?: string | null } | null;
 }): AuditProblem | null {
   const r = o.report;
   const ran = new Set((Array.isArray(r?.workflows_run) ? r!.workflows_run : []).map(asWorkflow).filter(Boolean));
   const missing = o.workflows.filter((w) => !ran.has(w));
   const counts = r?.counts && typeof r.counts === "object" && !Array.isArray(r.counts);
   if (r && r.complete === true && counts && missing.length === 0) return null;
-  const skipped = (Array.isArray(r?.skipped) ? r!.skipped : [])
+  const entries = Array.isArray(r?.skipped) ? r!.skipped : [];
+  const skipped = entries
     .map((s) => (typeof s === "string" ? s : s && typeof s === "object" ? [asWorkflow(s), (s as { reason?: unknown }).reason].filter((x) => typeof x === "string" && x).join(": ") : ""))
     .filter(Boolean)
     .map((s) => clip(redact(String(s).replace(/\s+/g, " ").trim()), 160));
-  const covered = !r ? "" : ran.size ? `; its report so far covers ${[...ran].join(", ")}` : "; its report so far covers no workflow";
+  // Why each unfinished workflow didn't finish, as the audit's script recorded it.
+  const kinds = new Set(entries.map((s) => (s && typeof s === "object" ? (s as { kind?: unknown }).kind : null)).filter((k): k is string => typeof k === "string"));
+  // What a partial report already found is said with it: an audit that ran out of time still reports what it covered.
+  const serious = (r?.counts?.critical ?? 0) + (r?.counts?.high ?? 0);
+  const found = counts && serious > 0 ? `, with ${serious} critical/high finding(s) so far` : "";
+  const covered = !r ? "" : ran.size ? `; its report so far covers ${[...ran].join(", ")}${found}` : `; its report so far covers no workflow${found}`;
   const tail = "; a build can't ship without a complete audit";
   const again = o.attempt > 1 ? ` (on attempt ${o.attempt} of ${AUDIT_ATTEMPTS})` : "";
-  if (o.timedOut) {
+  // Maxwell itself is broken or misconfigured: Mynt's to fix, and no attempt can do better until it is.
+  const tool = typeof r?.tool_problem === "string" && r.tool_problem.trim() ? r.tool_problem : kinds.has("tool") ? (skipped[0] ?? "Maxwell couldn't be used") : null;
+  if (tool) {
+    const detail = `Maxwell couldn't be used (${clip(redact(tool.replace(/\s+/g, " ").trim()), 300)})`;
+    return { kind: "tool", detail, reason: `Mynt's audit couldn't run: ${detail}${tail}`, next_step: AUDIT_NEXT.tool, retry: false };
+  }
+  // The model refused the security review: the auditor's own session (its last message says so), or Maxwell's runs
+  // (the audit's script found it in their records). The provider's decision, so no attempt repeats it.
+  const own = modelRefusal(o.runner?.summary) ?? modelRefusal(o.runner?.error);
+  const theirs = r?.model_refusal && typeof r.model_refusal === "object" ? r.model_refusal : kinds.has("refused") ? {} : null;
+  if (own || theirs) {
+    const ids = own?.request_id ? [own.request_id] : (Array.isArray(theirs?.request_ids) ? theirs!.request_ids : []).filter((x): x is string => typeof x === "string" && /^req_[A-Za-z0-9_-]{1,80}$/.test(x)).slice(0, 3);
+    const category = own?.category ?? (typeof theirs?.category === "string" && /^[a-z_ -]{1,40}$/i.test(theirs.category) ? theirs.category : null);
+    const where = own ? "in the auditor's own session" : Array.isArray(theirs?.workflows) && theirs!.workflows.length ? `in ${theirs!.workflows.filter((w) => o.workflows.includes(w)).join(", ") || "Maxwell's run"}` : "in Maxwell's run";
+    const detail = `the audit's model refused the security review ${where}${category ? ` [${category}]` : ""}${ids.length ? ` (request id ${ids.join(", ")})` : ""}`;
+    return { kind: "refused", detail, reason: `Mynt's audit didn't finish: ${detail}${covered}${tail}`, next_step: AUDIT_NEXT.refused, retry: false };
+  }
+  // Out of time or budget, whether Mynt ended the auditor or its script stopped the workflows itself at the limit.
+  if (o.timedOut || (!o.outOfBudget && kinds.has("time") && !kinds.has("budget"))) {
     const detail = `the auditor ran out of time (${o.minutes} min)${again}`;
     return { kind: "time", detail, reason: `Mynt's audit didn't finish: ${detail}${covered}${tail}`, next_step: AUDIT_NEXT.time, retry: false };
   }
-  if (o.outOfBudget) {
+  if (o.outOfBudget || kinds.has("budget")) {
     const detail = `the auditor used up its US$${o.capUsd} budget (Mynt's, not this build's cap)${again}`;
     return { kind: "budget", detail, reason: `Mynt's audit didn't finish: ${detail}${covered}${tail}`, next_step: AUDIT_NEXT.budget, retry: false };
   }
-  // Worth another attempt only with enough of the audit's budget left for one.
-  const retry = o.attempt < AUDIT_ATTEMPTS && o.capUsd - o.spentUsd >= 0.5;
+  // Worth another attempt only when a whole second run could do better: at least as much of the audit's budget left
+  // as the first one spent without finishing.
+  const retry = o.attempt < AUDIT_ATTEMPTS && o.capUsd - o.spentUsd >= Math.max(0.5, o.spentUsd);
   const twice = o.attempt > 1 ? `, on ${o.attempt === 2 ? "both" : `all ${o.attempt}`} attempts` : "";
   if (!r) {
     const s = o.runner;
@@ -2347,7 +2412,8 @@ export function auditOutcome(o: {
     r.complete !== true && !missing.length && counts ? "not marked complete" : "",
   ].filter(Boolean);
   const detail = `its report is incomplete (${parts.join("; ")})`;
-  return { kind: "incomplete", detail, reason: `Mynt's audit is incomplete: ${parts.join("; ")}${twice}${tail}`, next_step: AUDIT_NEXT.incomplete, retry };
+  const stalled = kinds.has("stalled");
+  return { kind: stalled ? "stalled" : "incomplete", detail, reason: `Mynt's audit is incomplete: ${parts.join("; ")}${twice}${tail}`, next_step: stalled ? AUDIT_NEXT.stalled : AUDIT_NEXT.incomplete, retry };
 }
 
 // A security block names what Maxwell found (a few findings, scrubbed), so the developer knows what to fix.

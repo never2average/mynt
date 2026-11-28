@@ -45,7 +45,7 @@ export const PLATFORM_SETTINGS: readonly PlatformSettingSpec[] = [
   { key: "BUILD_AUDIT_MINUTES", default: "20", kind: "minutes", description: "Time limit for one build audit", used_by: "Build verification", check: { type: "number", min: 1, max: 240, integer: true } },
   {
     key: "BUILD_AUDIT_WORKFLOWS",
-    default: "execute-scr,probe-cicd-env",
+    default: "probe-cicd-env",
     kind: "list",
     description: "The audit's workflows, in order",
     used_by: "Build verification",

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { PGlite } from "@electric-sql/pglite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { BuildService, buildConfigFromEnv } from "../dist/builds.js";
+import { AUDITOR_KILL, BuildService, MAXWELL_COMMIT, auditOutcome, buildConfigFromEnv, modelRefusal } from "../dist/builds.js";
 import { workspaceFiles } from "../dist/agent-host.js";
 import { redact } from "../dist/boxes.js";
 import { createServer } from "../dist/server.js";
@@ -185,7 +185,7 @@ async function setup({ sandboxes = fakeSandboxHost(), config = {}, managed = nul
   const db = { query: (s, p) => (refuse?.(s, p) ? Promise.reject(new Error("refused by the test")) : pg.query(s, p)), exec: (s) => pg.exec(s), close: () => pg.close() };
   const store = await Store.open(db, CATALOG);
   const repos = fakeRepos();
-  const builds = await BuildService.open(db, store, sandboxes, repos, { ...buildConfigFromEnv({ BUILD_AUDIT: "maxwell" }), publicUrl: "https://mynt.example.com", agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, ...config });
+  const builds = await BuildService.open(db, store, sandboxes, repos, { ...buildConfigFromEnv({ BUILD_AUDIT: "maxwell", BUILD_AUDIT_WORKFLOWS: "execute-scr,probe-cicd-env" }), publicUrl: "https://mynt.example.com", agentBackend: { kind: "anthropic", apiKey: "sk-ant-test" }, ...config });
   builds.managedHost = managed;
   const as = async (name, roles) => (await store.createUser(name, roles)).user;
   const connect = async (user) => {
@@ -305,12 +305,19 @@ test("a build is verified by Mynt in a clean sandbox, then Mynt opens the PR", a
     // The auditor reads its own read-only copy of the verified source, not the folder Mynt's checks ran in.
     app_dir: "/home/user/audit-src",
     maxwell_repo: "https://github.com/OnFinance/Maxwell",
+    // A known-good commit of the tool, not whatever its default branch holds today.
+    maxwell_commit: MAXWELL_COMMIT,
     output: `${V}/maxwell.json`,
     workflows: ["execute-scr", "probe-cicd-env"],
     minutes: 20,
+    // What the audit's script may spend on Maxwell's own runs, and the model they are sent to.
+    budget_usd: 5,
+    model: "claude-sonnet-5-5",
     attempt: 1,
     attempts: 2,
   });
+  assert.match(MAXWELL_COMMIT, /^[0-9a-f]{40}$/);
+  assert.match(verifier.files.get(`${AUDIT}/scripts/audit.mjs`), /run-headless\.mjs/, "the script that launches and watches the workflows is in the auditor's workspace");
   assert.ok(verifier.commands.some((c) => c.command === `bash ${V}/verify.sh --audit-copy ${SHA}`), "the copy is made from the hash-checked archive");
   assert.equal(sandboxes.agentConfig(vid).cwd, AUDIT);
   // Mynt's audit runs on its own model and budget, not the developer's: the coding agent's runs on the deployment's.
@@ -2389,6 +2396,108 @@ test("a report that isn't complete never counts as a pass", async () => {
     assert.match(b.error, pattern);
     assert.match(b.next_step, /BUILD_AUDIT_WORKFLOWS/);
   }
+});
+
+test("an audit that can't finish for a reason of Mynt's isn't run twice, and the build says what an admin must do", async () => {
+  const stopped = (workflow, kind, reason) => ({ workflow, kind, reason });
+  const partial = { ...cleanAudit, complete: false, workflows_run: [], written_by: "scripts/audit.mjs" };
+  for (const [maxwell, error, next] of [
+    // The build of 2026-11-28: the workflow was still going at the limit, the next one never started. It ran twice then.
+    [
+      { ...partial, skipped: [stopped("execute-scr", "time", "stopped at the 20-minute limit after running 14 min (9 agent run(s) so far)"), stopped("probe-cicd-env", "time", "not started: 0 min of the 20-minute limit was left")] },
+      "Mynt's audit didn't finish: the auditor ran out of time (20 min); its report so far covers no workflow; a build can't ship without a complete audit",
+      /a Mynt admin must raise BUILD_AUDIT_MINUTES or run fewer workflows \(BUILD_AUDIT_WORKFLOWS\)/,
+    ],
+    // Out of time with findings already in the ledger: they are said, and kept on the build.
+    [
+      { ...partial, workflows_run: ["probe-cicd-env"], counts: { critical: 0, high: 1, medium: 0, low: 0 }, findings: [{ severity: "high", title: "Unpinned base image", file: "web/Dockerfile", workflow: "execute-scr" }], skipped: [stopped("execute-scr", "time", "stopped at the 20-minute limit")] },
+      "Mynt's audit didn't finish: the auditor ran out of time (20 min); its report so far covers probe-cicd-env, with 1 critical/high finding(s) so far; a build can't ship without a complete audit",
+      /BUILD_AUDIT_MINUTES/,
+    ],
+    [
+      { ...partial, workflows_run: ["probe-cicd-env"], skipped: [stopped("execute-scr", "budget", "stopped at its US$4.25 share of the audit's budget")] },
+      "Mynt's audit didn't finish: the auditor used up its US$5 budget (Mynt's, not this build's cap); its report so far covers probe-cicd-env; a build can't ship without a complete audit",
+      /a Mynt admin must raise BUILD_AUDIT_CAP_USD or run fewer workflows/,
+    ],
+    // The tool itself is broken at the commit fetched: nothing ran, and no second attempt could do better.
+    [
+      { ...partial, tool_problem: "Maxwell's own checks (npm run validate) fail at commit 1f843c2: validate FAILED: validate:layout, validate:workflows. Pin a commit that passes them with BUILD_MAXWELL_COMMIT", skipped: [stopped("execute-scr", "tool", "not started"), stopped("probe-cicd-env", "tool", "not started")] },
+      "Mynt's audit couldn't run: Maxwell couldn't be used (Maxwell's own checks (npm run validate) fail at commit 1f843c2: validate FAILED: validate:layout, validate:workflows. Pin a commit that passes them with BUILD_MAXWELL_COMMIT); a build can't ship without a complete audit",
+      /verifying again won't help until it's fixed: a Mynt admin must put right what the message names. Most often that is BUILD_MAXWELL_COMMIT/,
+    ],
+  ]) {
+    const ctx = await setup();
+    const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+    const r = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please" }, verification: { maxwell } });
+    assert.equal(r.build.status, "blocked", "blocked at once");
+    assert.equal(r.build.error, error);
+    assert.match(r.build.next_step, next);
+    assert.match(r.build.next_step, /Nothing in your code needs changing/);
+    const verifier = ctx.sandboxes.sandboxes.get(r.vid);
+    assert.equal(verifier.commands.filter((c) => c.command.includes("runner.mjs ")).length, 1, "no second attempt");
+    assert.deepEqual((await ctx.builds.get(r.started.id)).maxwell.counts, maxwell.counts, "what it found so far is kept on the build");
+    // Whatever the auditor's script left running in the background is ended before its report is read.
+    assert.ok(verifier.commands.some((c) => c.command === AUDITOR_KILL));
+  }
+  assert.match(AUDITOR_KILL, /scripts\/\[a\]udit\.mjs/);
+  assert.match(AUDITOR_KILL, /\[r\]un-headless\.mjs/);
+});
+
+test("a model that refuses the security review is said plainly, with the request id, and never tried again", async () => {
+  const said = "API Error: Opus 4.8 can't help with this. Start a new session to continue. Learn more: https://example.test/legal/aup Details: `[cyber]` Request ID: req_vrtx_011AbC";
+  assert.deepEqual(modelRefusal(said), { category: "cyber", request_id: "req_vrtx_011AbC" });
+  assert.equal(modelRefusal("Audit finished; no API errors."), null);
+  const base = { workflows: ["execute-scr", "probe-cicd-env"], timedOut: false, outOfBudget: false, minutes: 20, capUsd: 5, spentUsd: 0.2, attempt: 1 };
+  // The auditor's own session was refused: Claude Code ends "success" with the refusal as its last message, no report.
+  let p = auditOutcome({ ...base, report: null, runner: { last_subtype: "success", exit_code: 0, error: null, summary: said } });
+  assert.deepEqual([p.kind, p.retry], ["refused", false]);
+  assert.equal(p.reason, "Mynt's audit didn't finish: the audit's model refused the security review in the auditor's own session [cyber] (request id req_vrtx_011AbC); a build can't ship without a complete audit");
+  assert.match(p.next_step, /will be refused again.*provider's approval for security work.*BUILD_AUDIT_MODEL.*BUILD_AUDIT_WORKFLOWS/);
+  // Maxwell's run was refused: the audit's script found it in that run's records and says where.
+  const report = {
+    complete: false,
+    counts: { critical: 0, high: 0, medium: 0, low: 0 },
+    workflows_run: ["probe-cicd-env"],
+    skipped: [{ workflow: "execute-scr", kind: "refused", reason: "the audit's model refused the security review: 3 refused request(s) [cyber], request id req_vrtx_9 (Maxwell's run didn't complete: 3 agents failed)" }],
+    model_refusal: { workflows: ["execute-scr"], count: 3, category: "cyber", request_ids: ["req_vrtx_9", "not an id; rm -rf"] },
+  };
+  p = auditOutcome({ ...base, report, runner: { last_subtype: "success", exit_code: 0, error: null, summary: "FINISHED" } });
+  assert.deepEqual([p.kind, p.retry], ["refused", false]);
+  assert.equal(p.reason, "Mynt's audit didn't finish: the audit's model refused the security review in execute-scr [cyber] (request id req_vrtx_9); its report so far covers probe-cicd-env; a build can't ship without a complete audit");
+
+  // In a build: blocked at once, one attempt, the kind kept on the timeline for whoever reads it.
+  const ctx = await setup();
+  const dev = await ctx.connect(await ctx.as("Dev", ["developer"]));
+  const r = await runBuild(ctx, { dev, startArgs: { goal: "Build a savings page please" }, verification: { maxwell: { ...report, findings: [], summary: "" } } });
+  assert.equal(r.build.status, "blocked");
+  assert.match(r.build.error, /the audit's model refused the security review in execute-scr \[cyber\] \(request id req_vrtx_9\)/);
+  assert.match(r.build.next_step, /Nothing in your code needs changing/);
+  assert.equal(ctx.sandboxes.sandboxes.get(r.vid).commands.filter((c) => c.command.includes("runner.mjs ")).length, 1, "no second attempt");
+  assert.equal(r.build.timeline.at(-1).data.audit_problem, "refused");
+});
+
+test("a second attempt runs only when it could do better than the first", () => {
+  const base = { workflows: ["probe-cicd-env"], timedOut: false, outOfBudget: false, minutes: 20, capUsd: 5, spentUsd: 0.4, attempt: 1, runner: { last_subtype: "success", exit_code: 0, error: null } };
+  const stuck = { complete: false, counts: { critical: 0, high: 0 }, workflows_run: [], skipped: [{ workflow: "probe-cicd-env", kind: "stalled", reason: "stopped as stuck: Maxwell's Claude Code run made no model call in the 121 s after it was launched" }] };
+  // A run that got stuck early, with most of the budget left: once more.
+  let p = auditOutcome({ ...base, report: stuck });
+  assert.deepEqual([p.kind, p.retry], ["stalled", true]);
+  assert.match(p.reason, /^Mynt's audit is incomplete: probe-cicd-env not run; skipped: probe-cicd-env: stopped as stuck/);
+  assert.match(p.next_step, /stopped making progress in Mynt's verification sandbox/);
+  // The same end after most of the budget went on it: a second run would have less than the first and end the same way.
+  assert.equal(auditOutcome({ ...base, report: stuck, spentUsd: 3 }).retry, false);
+  assert.equal(auditOutcome({ ...base, report: null, spentUsd: 3 }).retry, false, "no report either");
+  assert.equal(auditOutcome({ ...base, report: null, spentUsd: 2.5 }).retry, true, "as much left as was spent");
+  assert.equal(auditOutcome({ ...base, report: stuck, attempt: 2 }).retry, false, "never a third");
+  // Time, budget and a broken tool are never worth a second attempt, whatever is left.
+  for (const kind of ["time", "budget", "tool"]) {
+    p = auditOutcome({ ...base, report: { ...stuck, skipped: [{ workflow: "probe-cicd-env", kind, reason: "…" }] } });
+    assert.deepEqual([p.kind, p.retry], [kind, false]);
+  }
+  // A workflow whose run failed, or that was still going when the auditor ended its turn: once more.
+  for (const kind of ["failed", "pending"]) assert.deepEqual(((x) => [x.kind, x.retry])(auditOutcome({ ...base, report: { ...stuck, skipped: [{ workflow: "probe-cicd-env", kind, reason: "…" }] } })), ["incomplete", true]);
+  // Complete is complete.
+  assert.equal(auditOutcome({ ...base, report: { complete: true, counts: { critical: 0, high: 0 }, workflows_run: ["probe-cicd-env"], skipped: [] } }), null);
 });
 
 test("an audit that changed the source isn't tried again", async () => {

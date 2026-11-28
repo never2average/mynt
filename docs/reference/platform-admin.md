@@ -695,7 +695,7 @@ The settings that aren't secrets (`core/src/platform-settings.ts`), one row each
 | `BUILD_AUDIT_MODEL` | `claude-sonnet-5-5` | A model id |
 | `BUILD_AUDIT_CAP_USD` | 5 | A number from 0.5 to 200 |
 | `BUILD_AUDIT_MINUTES` | 20 | A whole number from 1 to 240 |
-| `BUILD_AUDIT_WORKFLOWS` | `execute-scr,probe-cicd-env` | Workflow names separated by commas |
+| `BUILD_AUDIT_WORKFLOWS` | `probe-cicd-env` | Workflow names separated by commas |
 | `EXPLORE_CAP_USD` | 20 | A number from 0.5 to 500 |
 | `FREESTYLE_USD_PER_HOUR` | 0.2 | A number from 0 to 50 |
 | `EXPLORE_MAX_ITERATIONS` | 25 | A whole number from 1 to 500 |
