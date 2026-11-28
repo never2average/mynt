@@ -182,6 +182,6 @@ test("with nothing stored, the environment is read exactly as before", async () 
   const c = buildConfigFromEnv({ BUILD_CAP_USD: "7", BUILD_MONTHLY_CAP_USD: "70", BUILD_AUDIT: "maxwell", BUILD_AUDIT_MODEL: "m-1", BUILD_AUDIT_CAP_USD: "2", BUILD_AUDIT_MINUTES: "9", BUILD_AUDIT_WORKFLOWS: "a-b, c-d" });
   assert.deepEqual([c.capUsd, c.monthlyCapUsd, c.audit.mode, c.audit.model, c.audit.capUsd, c.audit.minutes, c.audit.workflows], [7, 70, "maxwell", "m-1", 2, 9, ["a-b", "c-d"]]);
   const d = buildConfigFromEnv({});
-  assert.deepEqual([d.capUsd, d.monthlyCapUsd, d.audit.mode, d.audit.model, d.audit.capUsd, d.audit.minutes, d.audit.workflows], [10, 100, "none", "claude-sonnet-5-5", 5, 20, ["execute-scr", "probe-cicd-env"]]);
+  assert.deepEqual([d.capUsd, d.monthlyCapUsd, d.audit.mode, d.audit.model, d.audit.capUsd, d.audit.minutes, d.audit.workflows], [10, 100, "none", "claude-sonnet-5-5", 5, 20, ["probe-cicd-env"]]);
   assert.equal(exploreConfigFromEnv({ sandboxType: "default" }, { EXPLORE_CAP_USD: "33" }).capUsd, 33);
 });

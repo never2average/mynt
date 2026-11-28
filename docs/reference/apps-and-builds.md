@@ -171,19 +171,23 @@ The agent doesn't grade its own work. When it finishes, Mynt verifies the build 
 
 While Mynt verifies, the build's `phase_message` is the step it is on: the checks, the audit and its time limit. Once a build ends, `phase_message` is the reason it ended (as `error`), so whoever shows the phase shows why.
 
-A build that didn't ship also has `next_step`: what to do about it. That is either to fix the named findings or checks and continue from the build, or to verify again. It also names the `BUILD_AUDIT_*` setting a Mynt admin can change when audits keep running out of time or budget.
+A build that didn't ship also has `next_step`: what to do about it. That is either to fix the named findings or checks and continue from the build, or to verify again. When the reason is Mynt's own (the audit ran out of time or budget, or Maxwell itself is broken), it names the setting a Mynt admin must change: `BUILD_AUDIT_MINUTES`, `BUILD_AUDIT_CAP_USD`, `BUILD_AUDIT_WORKFLOWS` or `BUILD_MAXWELL_COMMIT`.
 
 ### The independent audit
 
-With `BUILD_AUDIT=maxwell`, a separate, audit-only Claude Code run (`core/workspaces/build-audit/`) executes the Maxwell static workflows (`BUILD_AUDIT_WORKFLOWS`) on its own copy of the source.
+With `BUILD_AUDIT=maxwell`, a separate, audit-only Claude Code run (`core/workspaces/build-audit/`) executes the Maxwell workflows in `BUILD_AUDIT_WORKFLOWS` on its own copy of the source.
 
 - **Its copy.** The copy is a fresh extraction of the hash-checked archive, made read-only, that Mynt's checks never touched. Mynt hashes every file of that copy before the audit and again after it, keeping the first hash itself. Git's own `.git` folders and `node_modules` aren't source and are left out. A file changed, added or deleted blocks the build and is named.
-- **The report.** The auditor writes its report as it goes and marks it `complete` in its last write. It counts only when it exists, says `complete: true`, has counts, and lists every configured workflow under `workflows_run`. A missing or partial report never counts as a pass.
+- **The tool.** Maxwell is fetched from `BUILD_MAXWELL_REPO` at the commit in `BUILD_MAXWELL_COMMIT`. The default is a commit pinned in `core/src/builds.ts`, the last one whose own checks pass; an empty value takes the default branch. Before any workflow runs, the audit's script (`scripts/audit.mjs` in the workspace) installs Maxwell and runs Maxwell's own checks. A commit that fails them blocks the build at once, before anything is spent on a workflow, and `next_step` tells a Mynt admin to pin a working commit.
+- **How a workflow runs.** The auditor registers the application in Maxwell. The script then launches each workflow through Maxwell's own headless launcher, in the background, with Mynt's pinned Claude Code, the audit's model and what is left of its budget, and with Maxwell's folder marked trusted so Claude Code honours Maxwell's own permission rules. It watches each run. A run that makes no model call in the two minutes after its launch, or none for eleven minutes later on (longer than any one command a Maxwell agent may run), is ended as stuck. A run still going at the time limit is ended there, and the workflows after it aren't started.
+- **The report.** The script rewrites the report from Maxwell's ledger every few seconds, so findings appear as Maxwell records them and an audit that is cut short still reports what it found. Each workflow that didn't finish is listed with why: `time`, `budget`, `tool`, `refused`, `stalled` or `failed`. The report is marked `complete` only when every configured workflow finished. It counts only when it exists, says `complete: true`, has counts, and lists every configured workflow under `workflows_run`. A missing or partial report never counts as a pass.
 - **Time.** The audit has `BUILD_AUDIT_MINUTES` per attempt.
-- **Budget.** It has `BUILD_AUDIT_CAP_USD` of model spend over all its attempts, on `BUILD_AUDIT_MODEL`, paid by Mynt. Its token has its own meter key, which the proxy refuses once the budget is spent.
+- **Budget.** It has `BUILD_AUDIT_CAP_USD` of model spend over all its attempts, on `BUILD_AUDIT_MODEL`, paid by Mynt. Maxwell's own runs spend from it too, through the same token. The token has its own meter key, which the proxy refuses once the budget is spent.
 - **Machine time.** From the audit's start the sandboxes' machine time is the audit's too. The build's cap counts machine time only up to then, so an audit can't push a build over its cap.
-- **Out of time or budget.** An auditor out of time or budget is ended, and the build is `blocked` saying which.
-- **One more attempt.** An auditor that ends without a complete report for any other reason (it ended its turn early, or its run broke off) runs once more, with what's left of the budget, if the source is untouched. Two such ends block the build.
+- **Out of time or budget.** An audit out of time or budget is ended. The build is `blocked` saying which, what the audit had covered and any critical or high finding so far, and `next_step` names the setting a Mynt admin must change. It isn't run again: a second attempt would end the same way.
+- **A refused review.** When the model provider's safeguards refuse the security review, in the auditor's own session or in one of Maxwell's runs, the build is `blocked` saying so, with the request id. It isn't run again, and no prompt is reworded to get past it. `next_step` gives a Mynt admin the choices: the provider's approval for security work, another model (`BUILD_AUDIT_MODEL`), or leaving the refused workflow out of `BUILD_AUDIT_WORKFLOWS`.
+- **One more attempt.** An audit that ends without a complete report for another reason (the auditor ended its turn early, its run broke off, or a workflow's run failed or got stuck) runs once more, if the source is untouched and at least as much of the budget is left as the first attempt spent. Two such ends block the build.
+- **Which workflows.** The default is `probe-cicd-env`, which examines CI/CD pipeline definitions. An app scaffolded from Mynt's starter has none, so for it the workflow finishes with nothing to examine, and the report's summary says so; a build on a connected repository that carries pipeline files gets them examined. Maxwell's secure code review, `execute-scr`, is not in the default, because it doesn't fit a per-build limit: it reviews each trust boundary and attack class with a separate agent, one after another, then refutes and verifies each candidate, and writes to its ledger only after that. Counted from its workflow script at the pinned commit with stand-in agents, an app with three boundaries and four attack classes each takes 31 agent runs with no finding and 67 with one candidate per unit, 16 to 52 of them before the first ledger write. Mynt has not measured a complete run of it in a build. To run it per build anyway, add it to `BUILD_AUDIT_WORKFLOWS` and raise `BUILD_AUDIT_MINUTES` and `BUILD_AUDIT_CAP_USD` to match. Mynt's own checks (static scan, secrets, dependency audit, SBOM) run on every build either way.
 
 ### Tracking a build
 
@@ -449,7 +453,8 @@ Pushing to repositories is disabled without `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE
 | `BUILD_AUDIT_MODEL` | `claude-sonnet-5-5` |
 | `BUILD_AUDIT_CAP_USD` | 5 |
 | `BUILD_AUDIT_MINUTES` | 20 |
-| `BUILD_AUDIT_WORKFLOWS` | `execute-scr,probe-cicd-env` |
+| `BUILD_AUDIT_WORKFLOWS` | `probe-cicd-env` |
+| `BUILD_MAXWELL_COMMIT` | The Maxwell commit pinned in `core/src/builds.ts` |
 | `FREESTYLE_USD_PER_HOUR` | 0.2 |
 
 ## Repositories
