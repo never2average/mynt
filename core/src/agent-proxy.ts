@@ -2,6 +2,9 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import type { AgentBackend } from "./agent-host.js";
 import { priceUsage, UsageReader, type AgentMeter } from "./agent-meter.js";
+import { BACKEND_KEY, BACKEND_PROXY_PATH, type RunBackend } from "./model-backends/index.js";
+import { responsesProxy } from "./model-backends/openai-api.js";
+import { platformSecret } from "./platform-keys.js";
 
 // Claude Code in a build sandbox reaches the model only through here, authenticated by its build's
 // token, which works only while that build is running. Mynt adds its own credentials and streams the
@@ -9,6 +12,8 @@ import { priceUsage, UsageReader, type AgentMeter } from "./agent-meter.js";
 //   - Anthropic API: ANTHROPIC_BASE_URL=<public>/agent, token as the bearer; /agent/v1/messages[...]
 //   - Vertex AI: ANTHROPIC_VERTEX_BASE_URL=<public>/agent/t/<token>/v1 with Claude Code's Google auth
 //     skipped; Mynt pins the project and region, and signs with its service account.
+// A run whose agent role is set to a second model backend (model-backends/) is served under that backend's own path
+// by its adapter, with its own key: its token works there and nowhere else, and no other token works there.
 
 const ANTHROPIC_PATHS = new Set(["/v1/messages", "/v1/messages/count_tokens"]);
 const VERTEX_PATH = /^\/v1\/projects\/[^/]+\/locations\/[^/]+\/publishers\/anthropic\/models\/(claude-[a-z0-9.@-]+|count-tokens):(rawPredict|streamRawPredict)$/;
@@ -37,6 +42,8 @@ export interface AgentRun {
   key: string;
   capUsd: number;
   model?: string; // every request on this run goes to this model, whatever it asks for (a cheaper tier for an audit)
+  // Set when the run's agent role runs on a second model backend: the token then works only on that backend's path.
+  backend?: RunBackend;
 }
 
 export interface ProxyOptions {
@@ -46,10 +53,14 @@ export interface ProxyOptions {
   // model the deployment doesn't serve would otherwise fail outright).
   model?: string;
   models?: string[];
+  // A second backend's API key as it is now (default: the platform key, the environment's else the key vault's).
+  backendKey?: (name: string) => string | null;
 }
 
 // `resolve` finds the live run behind a token (or null when it isn't live).
 export async function agentProxy(backend: AgentBackend | null, resolve: (token: string) => Promise<AgentRun | null>, req: IncomingMessage, res: ServerResponse, url: URL, opts: ProxyOptions = {}) {
+  if (url.pathname === BACKEND_PROXY_PATH.responses || url.pathname.startsWith(`${BACKEND_PROXY_PATH.responses}/`))
+    return responsesProxy(resolve, req, res, url, { meter: opts.meter, apiKey: () => (opts.backendKey ?? platformSecret)(BACKEND_KEY.responses) });
   if (!backend) return reply(res, 503, "Builds aren't enabled");
   if (req.method !== "POST") return reply(res, 404, "Not found");
 
@@ -80,6 +91,7 @@ export async function agentProxy(backend: AgentBackend | null, resolve: (token: 
   }
   const run = token ? await resolve(token) : null;
   if (!run) return reply(res, 401, "This agent token isn't active");
+  if (run.backend) return reply(res, 403, "This agent token isn't for this model backend");
   if (run.model && backend.kind === "vertex") {
     model = run.model;
     upstream = `https://${vertexHost(backend.region)}/v1/projects/${backend.projectId}/locations/${backend.region}/publishers/anthropic/models/${model}:${vertexAction}`;

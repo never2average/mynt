@@ -145,7 +145,7 @@ test("the registry: every type has what the page shows; the keys that stay on th
   }
   // Read where they're used, so a change applies at once; the rest are captured when the server starts.
   const live = PLATFORM_KEY_TYPES.filter((t) => !t.needs_restart).map((t) => t.key).sort();
-  assert.deepEqual(live, ["CLERK_WEBHOOK_SECRET", "MYNT_PSEUDONYM_SECRET", "SIGNWELL_API_KEY", "SIGNWELL_WEBHOOK_ID"]);
+  assert.deepEqual(live, ["CLERK_WEBHOOK_SECRET", "MYNT_PSEUDONYM_SECRET", "RESPONSES_BACKEND_API_KEY", "SIGNWELL_API_KEY", "SIGNWELL_WEBHOOK_ID"]);
   const restart = PLATFORM_KEY_TYPES.filter((t) => t.needs_restart).map((t) => t.key).sort();
   assert.deepEqual(restart, ["ANTHROPIC_API_KEY", "BOAT_API_KEY", "CLERK_SECRET_KEY", "FREESTYLE_API_KEY", "GITHUB_APP_PRIVATE_KEY", "HOSTING_DO_TOKEN", "SOLANA_RPC_URL_DEVNET", "SOLANA_RPC_URL_MAINNET", "TURNKEY_API_PRIVATE_KEY"]);
   // What can't live in the database it's needed to open, or is read before the vault is.

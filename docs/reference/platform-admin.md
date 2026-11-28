@@ -664,6 +664,7 @@ The table's columns are Key, Used by, Source (Key vault, Server environment or N
 | `BOAT_API_KEY` | The agent sandbox provider's key | Agent sandboxes | After a restart |
 | `HOSTING_DO_TOKEN` | The VM hosting provider's token | Hosting | After a restart |
 | `ANTHROPIC_API_KEY` | The model provider's key | Every agent, through the agent proxy | After a restart |
+| `RESPONSES_BACKEND_API_KEY` | The second model provider's key (OpenAI's API), for an agent whose role is set to run there. Never sent to a sandbox | The mainnet program gate's red team, through the agent proxy ([its model backend](solana-programs.md#the-red-teams-model-backend)) | At once |
 | `CLERK_SECRET_KEY` | The sign-in provider's secret key. Studio and the chat keep their own copy in their own settings | Sign-in and workspaces | After a restart |
 | `GITHUB_APP_PRIVATE_KEY` | The GitHub App's private key (a PEM block) | Builds, the product desk and hosting | After a restart |
 | `SOLANA_RPC_URL_DEVNET`, `SOLANA_RPC_URL_MAINNET` | The Solana RPC addresses, which carry a provider's key | Solana programs, treasuries and product health | After a restart |
@@ -705,6 +706,14 @@ The settings that aren't secrets (`core/src/platform-settings.ts`), one row each
 | `REVIEW_CASE_CAP_USD` | 3 | A number from 0.5 to 200 |
 | `REVIEW_MONTHLY_CAP_USD` | 60 | A number from 1 to 50000 |
 | `BENCHMARK_CAP_USD` | 25 | A number from 1 to 2000 |
+| `RED_TEAM_BACKEND` | `default` | `default` or `responses` |
+| `RED_TEAM_MODEL` | Not set | A model id |
+| `RED_TEAM_INPUT_USD_PER_MTOK` | Not set | A number from 0.0001 to 10000 |
+| `RED_TEAM_OUTPUT_USD_PER_MTOK` | Not set | A number from 0.0001 to 10000 |
+| `RED_TEAM_CACHED_INPUT_USD_PER_MTOK` | Not set | A number from 0.0001 to 10000 |
+| `RED_TEAM_ACCESS_PROGRAM` | Not set | A programme's name: lower-case letters, digits and underscores |
+
+The six `RED_TEAM_` settings choose [the red team's model backend](solana-programs.md#the-red-teams-model-backend). A setting with no default shows "Not set" until an admin or the server's environment sets it.
 
 The precedence is the same as for keys: the server's environment where it sets the setting, then what an admin set in Mynt, then Mynt's default. The Source column says which. A setting the server's environment sets is a read-only row: "Set on the server; overrides what's set in Mynt".
 

@@ -221,7 +221,7 @@ Every agent but Ask AI needs a sandbox host with allowance left, the agents' mod
 | Governance desk | Nothing more |
 | Connector | Nothing more |
 | Program audit | The mainnet program gate set up on this Mynt (it is wherever sandboxes and the model backend are). Sandboxes that can run the static analysis tools |
-| Program red team | The same, and sandboxes that can run containers, for Mynt's verifiable Solana build |
+| Program red team | The same, and sandboxes that can run containers, for Mynt's verifiable Solana build. Where the red team is set to [a second model backend](solana-programs.md#the-red-teams-model-backend) (`RED_TEAM_BACKEND`), that backend's key, model and token prices: `list_benchmark_runs` says which is missing (`why_not`), and a run records the backend beside the model |
 | Ask AI | Studio's own model key, and an admin keeping the run's page open. No sandbox host |
 
 The **Task sets** tab shows each agent's needs and whether a run could start now, with the reason when it can't.
@@ -277,7 +277,7 @@ Every test uses stand-in agents: no real agent, model or sandbox is started, and
 | `benchmarks-governance.test.js` | The firm and licence cases end to end, and that no firm, licence or product is read |
 | `benchmarks-ask.test.js` | Ask AI's scorer, check by check, and a full stand-in run through the two runner tools |
 
-What no test can show, and only a real run will: that the sandbox image has what the scratch repository and the sample build need, that a real red team finishes its turn with a complete report (the first real runs ended theirs minutes in, without one; see [The red team's report](solana-programs.md#the-red-teams-report)) and can produce a proof Mynt confirms for the two exploitable samples, that a real reviewer uses the register copy in a case, and what any of it costs.
+What no test can show, and only a real run will: that the sandbox image has what the scratch repository and the sample build need, that a real red team finishes its turn with a complete report (the first real runs ended theirs minutes in, without one; see [The red team's report](solana-programs.md#the-red-teams-report)) and can produce a proof Mynt confirms for the two exploitable samples, that the second model backend's provider accepts the red team's requests under the account's approval and its CLI finishes a long turn through Mynt's proxy (see [The red team's model backend](solana-programs.md#the-red-teams-model-backend)), that a real reviewer uses the register copy in a case, and what any of it costs.
 
 ## What isn't built yet
 

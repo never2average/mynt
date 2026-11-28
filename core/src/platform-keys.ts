@@ -144,6 +144,15 @@ export const PLATFORM_KEY_TYPES: readonly PlatformKeyType[] = [
     check: shaped(/^sk-ant-[A-Za-z0-9_-]{8,}$/, "a key starting with sk-ant-"),
   },
   {
+    key: "RESPONSES_BACKEND_API_KEY",
+    label: "Second model provider key (OpenAI API)",
+    purpose: "Pays for the model calls of an agent whose role is set to run on the second model backend (the red team, with RED_TEAM_BACKEND), through Mynt's agent proxy. Never sent to a sandbox",
+    used_by: "The mainnet program gate's red team, through the agent proxy",
+    validation: "One line of 20 to 500 characters, without spaces",
+    needs_restart: false,
+    check: token(20),
+  },
+  {
     key: "CLERK_SECRET_KEY",
     label: "Sign-in provider secret key (Clerk)",
     purpose: "Checks who is signed in, and keeps the allowlist and workspaces' organizations in step. Mynt's apps (Studio, the chat) keep their own copy in their own settings",

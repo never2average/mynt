@@ -12,6 +12,7 @@ import { overdueAgreementAudits } from "./agreement-audits.js";
 import { openSlaBreaches } from "./agreement-slas.js";
 import { QUOTA_PATTERN } from "./transient.js";
 import { overdueRiskReviews } from "./risk-register.js";
+import { roleBackendMissing } from "./model-backends/index.js";
 import { overdueRiskModelValidations, unhealthyRiskModels } from "./risk-models.js";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
@@ -145,7 +146,8 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ).rows as typeof vendors.erroring_subscriptions;
   }
   // The mainnet program gate: programs a newer vulnerability database flagged, and reviews waiting for an admin.
-  const solana: { flagged_programs: unknown[]; reviews_awaiting_approval: number } = { flagged_programs: [], reviews_awaiting_approval: 0 };
+  // And a red team set to a second model backend whose key, model or token prices aren't set: no review can start.
+  const solana: { flagged_programs: unknown[]; reviews_awaiting_approval: number; red_team_backend_missing: string | null } = { flagged_programs: [], reviews_awaiting_approval: 0, red_team_backend_missing: roleBackendMissing("program-red-team") };
   if (await exists("solana_program_flags"))
     solana.flagged_programs = (await db.query("SELECT id, program_id, db_version, created_at FROM financial_products.solana_program_flags WHERE status = 'open' ORDER BY created_at LIMIT 20")).rows;
   if (await exists("solana_mainnet_reviews"))
@@ -300,6 +302,7 @@ export async function opsStatus(db: Db, opts: { hours?: number; stuckMinutes?: n
     ...(changedTreasuries ? [`treasury pools: ${changedTreasuries} treasury(ies) whose program, upgrade authority or multisig changed since registration; Mynt stopped approving deposits to them until their builders register them again (list_pools shows program_flag)`] : []),
     ...(flaggedTreasuries ? [`treasury pools: ${flaggedTreasuries} devnet treasury(ies) whose attesters changed on chain; Mynt stopped approving deposits to them until their builders register them again (list_pools shows attesters_flag)`] : []),
     ...(solana.flagged_programs.length ? [`solana: ${solana.flagged_programs.length} mainnet program(s) flagged by the vulnerability database; review with list_program_flags`] : []),
+    ...(solana.red_team_backend_missing ? [`solana: no mainnet review can start: ${solana.red_team_backend_missing}`] : []),
     ...(solana.reviews_awaiting_approval ? [`solana: ${solana.reviews_awaiting_approval} mainnet review(s) awaiting approval (list_mainnet_reviews)`] : []),
     ...(productHealth.stalled.length ? [`product health: ${productHealth.stalled.length} record(s) stalled against the chain; see list_product_health, and reanchor_product_health after a chain reset`] : []),
     ...(productHealth.overdue ? [`product health: ${productHealth.overdue} snapshot(s) past their deadline and not on chain; the RPC or the publisher's balance may be the cause`] : []),

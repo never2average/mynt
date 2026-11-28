@@ -737,6 +737,36 @@ A red team that stops without a complete, valid report for no reason of time or 
 
 The review keeps the same under `checks.red_team` (`agent.detail`, `report_problems`, `incomplete_reason`, `toolchain`, `earlier_attempts`), and the events `audit_retried` and `red_team_retried` are on its log.
 
+#### The red team's model backend
+
+Every agent runs on the deployment's model backend unless its role is set to another one. The red team's is the one role that can be (`core/src/model-backends/`): its work is attacking a program, which a model provider's safeguards decline unless the provider has approved the account for security work. A Mynt admin moves it in the platform admin's [Platform settings](platform-admin.md#platform-settings), in this order:
+
+1. **Key vault:** set `RESPONSES_BACKEND_API_KEY`, the second provider's API key (OpenAI's API, which serves the Responses API). It is used only by Mynt's agent proxy and never enters a sandbox.
+2. **Operational settings:** set `RED_TEAM_MODEL` to the model the provider's account uses for this work. Mynt names no model.
+3. Set `RED_TEAM_INPUT_USD_PER_MTOK` and `RED_TEAM_OUTPUT_USD_PER_MTOK` to what a million input and output tokens cost on that model (and `RED_TEAM_CACHED_INPUT_USD_PER_MTOK` if cached input is cheaper). Mynt guesses no price: these are what the red team's cap is metered with.
+4. If the provider approved the account under a named access programme, set `RED_TEAM_ACCESS_PROGRAM` to its name as the provider writes it. Mynt then names it on every red-team request.
+5. Last, set `RED_TEAM_BACKEND` to `responses`.
+
+| Setting | Default | What it is |
+| --- | --- | --- |
+| `RED_TEAM_BACKEND` | `default` | `default` (the backend every agent uses) or `responses` (the second provider's Responses API) |
+| `RED_TEAM_MODEL` | Not set | The model the red team runs on, on the second backend |
+| `RED_TEAM_INPUT_USD_PER_MTOK` | Not set | US dollars per million input tokens on that model |
+| `RED_TEAM_OUTPUT_USD_PER_MTOK` | Not set | US dollars per million output tokens |
+| `RED_TEAM_CACHED_INPUT_USD_PER_MTOK` | Not set | US dollars per million cached input tokens. Not set: they are metered at the input price |
+| `RED_TEAM_ACCESS_PROGRAM` | Not set | The provider's access programme to name on each request. Not set: none is named |
+
+All of them apply to the next review without a restart. The audit agent and every other agent stay on the default backend.
+
+What changes on the second backend, and what doesn't:
+
+- **The same gate.** The report's schema, Mynt's own re-run of every proof of concept, the one retry and the recorded reasons are unchanged. The review's `checks.red_team` says what it ran on (`backend`, `model`), and so does the `red_team_started` event.
+- **Fail closed.** While `RED_TEAM_BACKEND` is `responses` and the key, the model or either price isn't set, `request_mainnet_review` is refused and says which is missing. If one goes missing between the request and the red team's start, the review blocks with the same words.
+- **The agent.** The red team runs through the provider's own coding-agent CLI (Codex CLI, at a pinned version installed in the sandbox when the run starts), headless, for one turn (`core/src/model-backends/codex-cli.ts`). That CLI reads `AGENTS.md`, not `CLAUDE.md`, so Mynt writes `AGENTS.md` into the sandbox when it prepares the job: the workspace's `CLAUDE.md` word for word, under a note that lists each skill's file. The workspace folder keeps one set of instructions.
+- **The proxy.** The CLI is given Mynt's agent proxy as its only provider (`/agent/r/v1`) and the run's token as its key. The proxy (`core/src/model-backends/openai-api.ts`) swaps the token for the provider's key, sends every request to `RED_TEAM_MODEL` whatever the sandbox asked for, names only the access programme an admin set, drops tools the provider would run and bill apart from tokens (web search, code execution), and lets through one path and nothing else. A token made for this backend doesn't work on the default one, and the other way round.
+- **Metering.** Each answer's tokens are priced with the admin's prices and added to the run's ledger; once the ledger reaches the cap the proxy answers no more calls, and the review records the red team as out of budget. With no price set, the proxy sends nothing. An answer that carried no usage is counted as not measured, never as US$0: the review then shows `reserved_usd` (what was left of the red team's cap, with a note that it is a reservation and not money known to be spent), the month's budget keeps that amount, and after five such answers the run gets no more calls.
+- **Refusals.** When the provider's safeguards decline a request, the proxy records it against the run with the provider's request id. The review then blocks, says so (`checks.red_team.refusal`: the category, the request ids), and never runs a second attempt, since it would be refused too. The request id is what the provider will ask for.
+
 Trident (Ackee's Anchor fuzzer) isn't run. It fuzzes a program from its source through a hand-written harness, which would put source in front of the black-box red team and make the harness agent-written. The red team's PoCs cover the same ground against the real bytes.
 
 ### Sign-off and timelock
@@ -798,13 +828,13 @@ Both agents reach the model only through Mynt's agent proxy, which meters every 
 | --- | --- | --- |
 | `PROGRAM_AUDIT_CAP_USD` | 5 | The audit agent's cap |
 | `PROGRAM_RED_TEAM_CAP_USD` | 8 | The red team's cap |
-| `PROGRAM_GATE_MODEL` | The builds' model | The model both use |
+| `PROGRAM_GATE_MODEL` | The builds' model | The model both use, unless the red team is set to [a second backend](#the-red-teams-model-backend) with its own model |
 | `PROGRAM_ANALYSIS_MINUTES` | 45 | Time limit for static analysis |
 | `PROGRAM_AUDIT_MINUTES` | 45 | Time limit for the audit |
 | `PROGRAM_RED_TEAM_MINUTES` | 60 | Time limit for the red team |
 | `PROGRAM_GATE_MONTHLY_CAP_USD` | 100 | Caps all reviews in a month |
 
-Each review reserves its two caps from a per-month counter, updated atomically only while it stays under the monthly cap, and gives back what it didn't spend once its agents are done.
+Each review reserves its two caps from a per-month counter, updated atomically only while it stays under the monthly cap, and gives back what it didn't spend once its agents are done. It keeps what was [reserved](#the-red-teams-model-backend) for model calls whose spend couldn't be measured.
 
 A review's cost is its sandboxes' machine time plus both agents' metered spend. Mynt pays it, like the build audit.
 

@@ -57,10 +57,16 @@ const by = (data) => Object.fromEntries(data.settings.map((s) => [s.key, s]));
 test("the list: the nine settings first, then the other agents' budgets; never a secret; each with how it's checked", async () => {
   const keys = PLATFORM_SETTINGS.map((s) => s.key);
   assert.deepEqual(keys.slice(0, 9), NINE);
-  assert.deepEqual(keys.slice(9), ["EXPLORE_MAX_ITERATIONS", "EXPLORE_MAX_MINUTES", "DESK_JOB_CAP_USD", "DESK_MONTHLY_CAP_USD", "REVIEW_CASE_CAP_USD", "REVIEW_MONTHLY_CAP_USD", "BENCHMARK_CAP_USD"]);
+  assert.deepEqual(keys.slice(9), ["EXPLORE_MAX_ITERATIONS", "EXPLORE_MAX_MINUTES", "DESK_JOB_CAP_USD", "DESK_MONTHLY_CAP_USD", "REVIEW_CASE_CAP_USD", "REVIEW_MONTHLY_CAP_USD", "BENCHMARK_CAP_USD", "RED_TEAM_BACKEND", "RED_TEAM_MODEL", "RED_TEAM_INPUT_USD_PER_MTOK", "RED_TEAM_OUTPUT_USD_PER_MTOK", "RED_TEAM_CACHED_INPUT_USD_PER_MTOK", "RED_TEAM_ACCESS_PROGRAM"]);
   assert.ok(keys.every((k) => !/KEY|SECRET|TOKEN|PASSWORD|URL/.test(k)), "no secret is an operational setting");
-  // Each default passes its own check.
-  for (const s of PLATFORM_SETTINGS) assert.deepEqual(checkSetting(s.key, s.default), { ok: true, value: s.default }, s.key);
+  // Each default passes its own check. A setting Mynt has no default for (the red team's model, its token prices, its
+  // access programme) has an empty one: it is not set until an admin sets it, and an empty value is never accepted.
+  const NO_DEFAULT = ["RED_TEAM_MODEL", "RED_TEAM_INPUT_USD_PER_MTOK", "RED_TEAM_OUTPUT_USD_PER_MTOK", "RED_TEAM_CACHED_INPUT_USD_PER_MTOK", "RED_TEAM_ACCESS_PROGRAM"];
+  assert.deepEqual(PLATFORM_SETTINGS.filter((s) => s.default === "").map((s) => s.key), NO_DEFAULT);
+  for (const s of PLATFORM_SETTINGS) {
+    if (s.default === "") assert.equal(checkSetting(s.key, "").ok, false, s.key);
+    else assert.deepEqual(checkSetting(s.key, s.default), { ok: true, value: s.default }, s.key);
+  }
 
   const w = await setup({ env: { BUILD_CAP_USD: "12", BUILD_AUDIT: "something", FREESTYLE_API_KEY: "fake-secret-value", CLERK_SECRET_KEY: "fake-x" } });
   const r = await w.admin.call("get_platform_settings");
