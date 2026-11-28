@@ -2,9 +2,12 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENT_RUNNER, CLAUDE_CODE_VERSION, type AgentState } from "./agent-runner.js";
+import { BACKEND_PROXY_PATH, type SecondBackendKind } from "./model-backends/index.js";
+import { BACKEND_RUNNERS } from "./model-backends/runners.js";
 import type { SandboxHost } from "./sandbox-host.js";
 
-// Runs Claude Code (through Mynt's runner) in a sandbox. Shared by coding-agent builds and the
+// Runs an agent in a sandbox: Claude Code through Mynt's runner, or, for a run whose role is set to a second model
+// backend (model-backends/), that backend's own agent CLI through its runner. Shared by coding-agent builds and the
 // business-development agent: both reach the model only through Mynt's agent proxy with a token
 // their caller mints, and optionally reach Mynt's own MCP server with that token as their only tools.
 
@@ -92,20 +95,26 @@ export async function launchAgent(
     model?: string; // instead of the deployment's model (the proxy enforces it for the run's token)
     runnerEnv?: Record<string, string>; // the runner's own settings (MYNT_AGENT_HOLD, MYNT_AGENT_IDLE_MS), never secrets
     finishPrompt?: string; // a held session's last message, when it finishes or goes idle
+    // The second model backend this run's role is set to: its own agent CLI and runner, pointed at that backend's
+    // path on Mynt's proxy. One turn only: no held session, no steering, no MCP server.
+    backend?: SecondBackendKind;
   },
 ) {
+  const second = o.backend ? BACKEND_RUNNERS[o.backend] : null;
+  if (second && (o.mcp || o.finishPrompt)) throw new Error("An agent on a second model backend runs one turn, without Mynt's MCP server");
   const budgetUsd = Math.max(0.5, Math.floor(o.budgetUsd * 100) / 100);
   let cwd = o.cwd ?? "/home/user";
   if (o.workspace) {
     cwd = workspaceCwd(o.workspace);
-    const files = Object.fromEntries(Object.entries({ ...workspaceFiles(o.workspace), ...(o.jobFiles ?? {}) }).map(([path, content]) => [`${cwd}/${path}`, content]));
+    const own = workspaceFiles(o.workspace);
+    const files = Object.fromEntries(Object.entries({ ...own, ...(second ? second.workspaceFiles(own) : {}), ...(o.jobFiles ?? {}) }).map(([path, content]) => [`${cwd}/${path}`, content]));
     if (sandboxes.writeFiles) await sandboxes.writeFiles(sandbox, files);
     else for (const [path, content] of Object.entries(files)) await sandboxes.writeFile(sandbox, path, content);
   }
-  const run = { prompt: o.prompt, cwd, model: o.model ?? config.model, budgetUsd, version: CLAUDE_CODE_VERSION, ...(o.finishPrompt ? { finishPrompt: o.finishPrompt } : {}) };
-  await sandboxes.writeFile(sandbox, `${AGENT_DIR}/runner.mjs`, AGENT_RUNNER);
+  const run = { prompt: o.prompt, cwd, model: o.model ?? config.model, budgetUsd, version: second?.version ?? CLAUDE_CODE_VERSION, ...(o.finishPrompt ? { finishPrompt: o.finishPrompt } : {}) };
+  await sandboxes.writeFile(sandbox, `${AGENT_DIR}/runner.mjs`, second?.script ?? AGENT_RUNNER);
   await sandboxes.writeFile(sandbox, `${AGENT_DIR}/config.json`, JSON.stringify(run));
-  await sandboxes.writeFile(sandbox, `${AGENT_DIR}/auth.json`, JSON.stringify(agentAuth(config, o.token, { mcp: o.mcp })));
+  await sandboxes.writeFile(sandbox, `${AGENT_DIR}/auth.json`, JSON.stringify(second ? { token: o.token, baseUrl: `${config.publicUrl}${BACKEND_PROXY_PATH[o.backend!]}` } : agentAuth(config, o.token, { mcp: o.mcp })));
   const env = Object.entries(o.runnerEnv ?? {})
     .filter(([k, v]) => /^MYNT_AGENT_[A-Z_]+$/.test(k) && /^[\w.-]*$/.test(v))
     .map(([k, v]) => `${k}=${v} `)

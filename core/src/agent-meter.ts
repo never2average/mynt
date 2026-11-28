@@ -89,6 +89,21 @@ const TABLE = `
     calls integer NOT NULL DEFAULT 0,
     updated_at timestamptz NOT NULL DEFAULT now()
   );
+  -- Calls whose spend couldn't be measured (the backend had no price set when the answer arrived, or the answer
+  -- carried no usage), and the tokens of the ones that said. Never turned into dollars: a run with any such call
+  -- has a cost that is "not measured", and whoever budgets it counts its whole cap instead.
+  ALTER TABLE financial_products.agent_spend ADD COLUMN IF NOT EXISTS unmeasured_calls integer NOT NULL DEFAULT 0;
+  ALTER TABLE financial_products.agent_spend ADD COLUMN IF NOT EXISTS unmeasured_input_tokens bigint NOT NULL DEFAULT 0;
+  ALTER TABLE financial_products.agent_spend ADD COLUMN IF NOT EXISTS unmeasured_output_tokens bigint NOT NULL DEFAULT 0;
+  -- A model provider's refusals of a run's requests (its safeguards declined them), with the provider's request id.
+  CREATE TABLE IF NOT EXISTS financial_products.agent_refusals (
+    id bigserial PRIMARY KEY,
+    run_key text NOT NULL,
+    category text,
+    request_id text,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS agent_refusals_run_idx ON financial_products.agent_refusals (run_key, id);
 `;
 
 export class AgentMeter {
@@ -111,5 +126,32 @@ export class AgentMeter {
        ON CONFLICT (run_key) DO UPDATE SET usd = agent_spend.usd + EXCLUDED.usd, calls = agent_spend.calls + 1, updated_at = now()`,
       [runKey, usd],
     );
+  }
+
+  /** A call that was answered and whose spend couldn't be priced: counted, with its tokens where it gave them. */
+  async addUnmeasured(runKey: string, tokens: { input: number; output: number } | null) {
+    await this.db.query(
+      `INSERT INTO financial_products.agent_spend (run_key, unmeasured_calls, unmeasured_input_tokens, unmeasured_output_tokens) VALUES ($1, 1, $2, $3)
+       ON CONFLICT (run_key) DO UPDATE SET unmeasured_calls = agent_spend.unmeasured_calls + 1, unmeasured_input_tokens = agent_spend.unmeasured_input_tokens + EXCLUDED.unmeasured_input_tokens,
+         unmeasured_output_tokens = agent_spend.unmeasured_output_tokens + EXCLUDED.unmeasured_output_tokens, updated_at = now()`,
+      [runKey, Math.max(0, Math.round(tokens?.input ?? 0)), Math.max(0, Math.round(tokens?.output ?? 0))],
+    );
+  }
+
+  /** The run's calls whose spend wasn't measured; null when every call was (or it made none). */
+  async unmeasured(runKey: string): Promise<{ calls: number; input_tokens: number; output_tokens: number } | null> {
+    const r = (await this.db.query("SELECT unmeasured_calls, unmeasured_input_tokens, unmeasured_output_tokens FROM financial_products.agent_spend WHERE run_key = $1", [runKey])).rows[0] as Record<string, unknown> | undefined;
+    const calls = Number(r?.unmeasured_calls ?? 0);
+    return calls > 0 ? { calls, input_tokens: Number(r!.unmeasured_input_tokens ?? 0), output_tokens: Number(r!.unmeasured_output_tokens ?? 0) } : null;
+  }
+
+  async addRefusal(runKey: string, refusal: { category: string | null; request_id: string | null }) {
+    await this.db.query(`INSERT INTO financial_products.agent_refusals (run_key, category, request_id) VALUES ($1, $2, $3)`, [runKey, refusal.category?.slice(0, 80) ?? null, refusal.request_id?.slice(0, 200) ?? null]);
+  }
+
+  /** The provider's refusals of this run's requests, oldest first. */
+  async refusals(runKey: string): Promise<{ category: string | null; request_id: string | null; at: string }[]> {
+    const { rows } = await this.db.query("SELECT category, request_id, created_at FROM financial_products.agent_refusals WHERE run_key = $1 ORDER BY id", [runKey]);
+    return (rows as Record<string, unknown>[]).map((r) => ({ category: (r.category as string | null) ?? null, request_id: (r.request_id as string | null) ?? null, at: new Date(r.created_at as string).toISOString() }));
   }
 }

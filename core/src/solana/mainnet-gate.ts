@@ -9,6 +9,7 @@ import type { AgentRun } from "../agent-proxy.js";
 import { AGENT_DIR, agentState, launchAgent, workspaceCwd, workspaceFiles, type AgentHostConfig } from "../agent-host.js";
 import type { AgentState } from "../agent-runner.js";
 import { redact } from "../boxes.js";
+import { roleBackend, roleBackendMissing, type SecondBackendKind } from "../model-backends/index.js";
 import type { SandboxHost } from "../sandbox-host.js";
 import type { Db } from "../db.js";
 import { emitFirmEvent } from "../runtime.js";
@@ -146,6 +147,12 @@ const REVIEW_TABLES = `
   ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS agent_attempts jsonb;
   ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS budget_key text;
   ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS budget_settled boolean NOT NULL DEFAULT false;
+  -- The model backend and model the red team ran on ("default": the one every agent uses), fixed when it starts.
+  ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS red_backend text;
+  ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS red_model text;
+  -- What the review's budget counts for model calls whose spend couldn't be measured: what was left of the agent's
+  -- cap, reserved. Never a cost, and never given back to the month.
+  ALTER TABLE ${T}.solana_mainnet_reviews ADD COLUMN IF NOT EXISTS reserved_usd numeric;
   -- One open review per program, whatever races.
   CREATE UNIQUE INDEX IF NOT EXISTS solana_mainnet_reviews_open_idx ON ${T}.solana_mainnet_reviews (program) WHERE status IN ('running', 'awaiting_approval', 'approved', 'started');
   -- Every step of every review, append-only.
@@ -434,6 +441,10 @@ function noResult(o: { who: string; ending: ReturnType<typeof agentEnding>; file
   return parts.length > 1 ? `${parts[0]}: ${parts.slice(1).join("; ")}` : parts[0];
 }
 
+// What a review says of model spend that couldn't be measured.
+const RESERVED_NOTE = "Reserved, not measured: some of the red team's model calls couldn't be priced, so the budget counts what was left of its cap. It is not money known to be spent";
+const RED_ROLE = "program-red-team" as const;
+
 // One attempt of a gate agent that didn't count, as the review keeps it.
 export interface AgentAttempt {
   attempt: number;
@@ -487,6 +498,18 @@ export class MainnetGateService implements MainnetGateCheck {
   // and so (fail closed) no mainnet deploy or upgrade can happen.
   get enabled() {
     return !!this.sandboxes && !!this.config.agentBackend && !!this.config.publicUrl;
+  }
+
+  // Why the red team couldn't run on the model backend it is set to (its key, model or token prices aren't set);
+  // null when it can, or runs on the backend every agent uses.
+  redTeamMissing(): string | null {
+    return roleBackendMissing(RED_ROLE);
+  }
+
+  // The backend and model a red team started now would run on.
+  redTeamRunsOn(): { backend: "default" | SecondBackendKind; model: string | null } {
+    const second = roleBackend(RED_ROLE);
+    return second ? { backend: second.kind, model: second.model } : { backend: "default", model: this.config.gateModel };
   }
 
   private async all(sql: string, params: unknown[] = []) {
@@ -546,6 +569,9 @@ export class MainnetGateService implements MainnetGateCheck {
           : []),
       ],
       cost_usd: Number(r.cost_usd ?? 0),
+      // Counted against the budget for model calls whose spend couldn't be measured: a reservation, never a cost.
+      reserved_usd: r.reserved_usd === null || r.reserved_usd === undefined ? null : Number(r.reserved_usd),
+      reserved_note: r.reserved_usd === null || r.reserved_usd === undefined ? null : RESERVED_NOTE,
       caps_usd: { audit: Number(r.audit_cap_usd), red_team: Number(r.red_cap_usd) },
       timelock: r.action === "upgrade" ? { hours: this.config.timelockHours, executes_at: iso(r.executes_at), announced_at: iso(r.announced_at) } : null,
       decision: r.decision ? { decision: r.decision, note: r.decision_note, by: r.decided_by, at: iso(r.decided_at) } : null,
@@ -573,6 +599,8 @@ export class MainnetGateService implements MainnetGateCheck {
   async request(user: User, programId: string, buildId: string) {
     this.realOnly();
     if (!this.enabled) throw new GateError("The mainnet program gate isn't available on this Mynt (it needs sandboxes, the agents' model backend and PUBLIC_URL), so mainnet deploys can't be reviewed");
+    const redTeam = this.redTeamMissing();
+    if (redTeam) throw new GateError(`The mainnet program gate can't review programs on this Mynt yet: ${redTeam}. A Mynt admin sets these in Platform settings`);
     const p = await this.solana.get(programId);
     if (!p || !this.solana.canAct(user, p)) throw new GateError(`No program of yours with id '${programId}'`);
     if (p.cluster !== "mainnet") throw new GateError("Only mainnet programs need a review; devnet deploys have no gate");
@@ -702,6 +730,8 @@ export class MainnetGateService implements MainnetGateCheck {
   async requestSample(o: { mode: "audit" | "red_team"; name: string; program_id: string; files: Record<string, string>; ref: string; requested_by: string; cap_usd: number }) {
     if (!this.samples) throw new GateError("Samples are reviewed only by the benchmark's own gate");
     if (!this.enabled) throw new GateError("The gate's agents can't run on this Mynt (they need sandboxes, the agents' model backend and PUBLIC_URL)");
+    const redTeam = o.mode === "red_team" ? this.redTeamMissing() : null;
+    if (redTeam) throw new GateError(`The red team can't run on this Mynt yet: ${redTeam}`);
     if (!/^[a-z][a-z0-9_]{1,40}$/.test(o.name)) throw new GateError(`'${o.name}' isn't a program name`);
     if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(o.program_id)) throw new GateError("The sample declares no program address");
     const files = Object.fromEntries(Object.entries(o.files).filter(([path]) => /^[A-Za-z0-9_.\/-]+$/.test(path) && !path.split("/").includes("..") && !path.startsWith("/")));
@@ -749,10 +779,10 @@ export class MainnetGateService implements MainnetGateCheck {
   // Once a review's agents are done (or it ends): what it reserved but didn't spend goes back to the month.
   private async settle(id: string) {
     const r = await this.one(
-      `UPDATE ${T}.solana_mainnet_reviews SET budget_settled = true WHERE id = $1 AND budget_settled = false AND budget_key IS NOT NULL RETURNING budget_key, audit_cap_usd, red_cap_usd, cost_usd`,
+      `UPDATE ${T}.solana_mainnet_reviews SET budget_settled = true WHERE id = $1 AND budget_settled = false AND budget_key IS NOT NULL RETURNING budget_key, audit_cap_usd, red_cap_usd, cost_usd, reserved_usd`,
       [id],
     );
-    if (r) await this.release(r.budget_key as string, Math.max(0, Number(r.audit_cap_usd) + Number(r.red_cap_usd) - Number(r.cost_usd)));
+    if (r) await this.release(r.budget_key as string, Math.max(0, Number(r.audit_cap_usd) + Number(r.red_cap_usd) - Number(r.cost_usd) - Number(r.reserved_usd ?? 0)));
   }
 
   // ---- decisions ----
@@ -926,8 +956,15 @@ export class MainnetGateService implements MainnetGateCheck {
     const h = hash(token);
     const a = await this.one(`SELECT id, audit_cap_usd FROM ${T}.solana_mainnet_reviews WHERE audit_token_hash = $1 AND status = 'running'`, [h]);
     if (a) return { key: `program-audit:${a.id}`, capUsd: Number(a.audit_cap_usd), model: this.config.gateModel };
-    const r = await this.one(`SELECT id, red_cap_usd FROM ${T}.solana_mainnet_reviews WHERE red_token_hash = $1 AND status = 'running'`, [h]);
-    return r ? { key: `program-red-team:${r.id}`, capUsd: Number(r.red_cap_usd), model: this.config.gateModel } : null;
+    const r = await this.one(`SELECT id, red_cap_usd, red_backend, red_model FROM ${T}.solana_mainnet_reviews WHERE red_token_hash = $1 AND status = 'running'`, [h]);
+    if (!r) return null;
+    const run = { key: `program-red-team:${r.id}`, capUsd: Number(r.red_cap_usd) };
+    if (!r.red_backend || r.red_backend === "default") return { ...run, model: this.config.gateModel };
+    // On a second backend: the model it started on, at the prices and under the access programme set now. If the
+    // role has since been moved off that backend, no price is given and the proxy sends nothing.
+    const now = roleBackend(RED_ROLE);
+    const same = now?.kind === r.red_backend ? now : null;
+    return { ...run, model: (r.red_model as string | null) ?? undefined, backend: { kind: r.red_backend as SecondBackendKind, price: same?.price ?? null, accessProgram: same?.accessProgram ?? null } };
   }
 
   // ---- the worker ----
@@ -1001,8 +1038,15 @@ export class MainnetGateService implements MainnetGateCheck {
     const sandboxes = this.sandboxes!;
     let c = 0;
     for (const id of [r.analysis_sandbox_id, r.red_sandbox_id, r.confirm_sandbox_id]) if (id) c += await sandboxes.costDollars(id as string).catch(() => 0);
-    if (this.meter) c += (await this.meter.spent(`program-audit:${r.id}`)) + (await this.meter.spent(`program-red-team:${r.id}`));
-    if (c !== Number(r.cost_usd)) await this.update(r.id as string, { cost_usd: c });
+    let reserved: number | null = null;
+    if (this.meter) {
+      const red = await this.meter.spent(`program-red-team:${r.id}`);
+      c += (await this.meter.spent(`program-audit:${r.id}`)) + red;
+      // Calls the proxy couldn't price: the budget counts what was left of the red team's cap. Never 0, never a cost.
+      if (await this.meter.unmeasured(`program-red-team:${r.id}`)) reserved = Math.max(0, Number(r.red_cap_usd) - red);
+    }
+    const before = r.reserved_usd === null || r.reserved_usd === undefined ? null : Number(r.reserved_usd);
+    if (c !== Number(r.cost_usd) || reserved !== before) await this.update(r.id as string, { cost_usd: c, reserved_usd: reserved });
     return c;
   }
 
@@ -1126,7 +1170,9 @@ export class MainnetGateService implements MainnetGateCheck {
       prompt: "Attack the Solana program described in job/target.json, following CLAUDE.md and its skills. Write job/report.json and a runnable proof of concept for every finding, and run scripts/check_report.py until it passes.",
       budgetUsd: o.budgetUsd,
       token,
-      model: this.config.gateModel,
+      // The backend and model fixed when the red team first started (a second attempt runs on the same ones).
+      model: (r.red_model as string | null) ?? this.config.gateModel,
+      ...(r.red_backend && r.red_backend !== "default" ? { backend: r.red_backend as SecondBackendKind } : {}),
       workspace: RED_WS,
       jobFiles: {
         "job/idl.json": JSON.stringify(this.agentIdl(r, m), null, 1),
@@ -1340,9 +1386,15 @@ export class MainnetGateService implements MainnetGateCheck {
       // The install's exit code is kept beside its log: the red team's wait script reads it, and so does Mynt when
       // the red team stops without a report.
       await sandboxes.exec(sb, `bash ${TOOLCHAIN_INSTALLER} > ${TOOLCHAIN_LOG} 2>&1; echo $? > ${TOOLCHAIN_EXIT}`, { detached: true });
-      const pid = await this.startRedTeam(r, { attempt: 1, budgetUsd: Number(r.red_cap_usd), minutes: this.config.redTeamMinutes, previous: null });
+      // Which model backend it runs on is decided here, once, and kept on the review. One that has lost its key,
+      // model or prices since the review was requested blocks: there is no red team to run.
+      const missing = this.redTeamMissing();
+      if (missing) return this.block(r, `No red-team result (${missing}); a mainnet program can't pass without one`);
+      const on = this.redTeamRunsOn();
+      await this.update(id, { red_backend: on.backend, red_model: on.model });
+      const pid = await this.startRedTeam({ ...r, red_backend: on.backend, red_model: on.model }, { attempt: 1, budgetUsd: Number(r.red_cap_usd), minutes: this.config.redTeamMinutes, previous: null });
       await this.update(id, { step: "red_team", red_process_id: pid, red_started_at: new Date(), step_started_at: new Date(), phase_message: "The red team is attacking the program on a local validator" });
-      await this.log(id, null, "red_team_started", { model: this.config.gateModel, cap_usd: Number(r.red_cap_usd) });
+      await this.log(id, null, "red_team_started", { backend: on.backend, model: on.model, cap_usd: Number(r.red_cap_usd) });
       return;
     }
 
@@ -1370,6 +1422,11 @@ export class MainnetGateService implements MainnetGateCheck {
           notes.push(`the Solana toolchain's install failed (exit ${exit.slice(0, 8)}${log.trim() ? `: ${oneLine(log.trim().split("\n").pop()!, 200)}` : ""})`);
         }
       }
+      // The model provider's safeguards declined the red team's requests (the proxy records each, with the
+      // provider's request id): said as that, and never tried again, since a second attempt would be refused too.
+      const refusals = !finished && this.meter ? await this.meter.refusals(`program-red-team:${id}`) : [];
+      const refusal = refusals.length ? { category: refusals[refusals.length - 1].category, request_ids: [...new Set(refusals.map((x) => x.request_id).filter((x): x is string => !!x))].slice(-3), count: refusals.length } : null;
+      if (refusal) notes.push(`the model provider's safeguards refused the red team's work${refusal.category ? ` [${oneLine(refusal.category, 60)}]` : ""}${refusal.request_ids.length ? ` (request id ${refusal.request_ids.join(", ")})` : ""}`);
       const why = (attempt: number, lastMessage: string | null) =>
         noResult({
           who: "the red team",
@@ -1382,7 +1439,7 @@ export class MainnetGateService implements MainnetGateCheck {
         });
       const detail = finished ? null : why(earlier.length + 1, agent.state?.summary ?? null);
       if (detail) {
-        const next = await this.again(r, "red_team", { retry: ending.retry, capUsd: Number(r.red_cap_usd), limitMinutes: this.config.redTeamMinutes, costUsd: agent.cost });
+        const next = await this.again(r, "red_team", { retry: ending.retry && !refusal, capUsd: Number(r.red_cap_usd), limitMinutes: this.config.redTeamMinutes, costUsd: agent.cost });
         if (next) {
           const kept = await this.setAside(r, "red_team", sb, { attempt: earlier.length + 1, result: ending.result, detail, exit_code: ending.exit_code, error: ending.error, summary: agent.state?.summary?.slice(0, 1500) ?? null, cost_usd: agent.cost });
           const pid = await this.startRedTeam(kept, { ...next, previous: why(1, null) });
@@ -1401,6 +1458,10 @@ export class MainnetGateService implements MainnetGateCheck {
       const red = {
         finished,
         attempt: earlier.length + 1,
+        // What it ran on: the model backend ("default": the one every agent uses) and the model.
+        backend: (r.red_backend as string | null) ?? "default",
+        model: (r.red_model as string | null) ?? this.config.gateModel,
+        ...(refusal ? { refusal } : {}),
         agent: { result: ending.result, summary: report?.summary ?? agent.state?.summary?.slice(0, 1500) ?? null, exit_code: ending.exit_code, error: ending.error, ...(detail ? { detail } : {}) },
         ...(detail ? { report_problems: problems, incomplete_reason: incomplete, toolchain } : {}),
         ...(earlier.length ? { earlier_attempts: earlier } : {}),

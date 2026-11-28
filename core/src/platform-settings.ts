@@ -20,14 +20,17 @@ type Check =
   | { type: "list"; item: RegExp; words: string; max: number };
 export interface PlatformSettingSpec {
   key: string;
-  default: string;
-  kind: "usd" | "usd_per_hour" | "minutes" | "count" | "text" | "list";
+  default: string; // "" where Mynt has none: the setting is not set until an admin (or the environment) sets it
+  kind: "usd" | "usd_per_hour" | "usd_per_mtok" | "minutes" | "count" | "text" | "list";
   description: string;
   used_by: string;
   check: Check;
 }
 
 const usd = (min: number, max: number): Check => ({ type: "number", min, max });
+// What a million tokens cost on a model: never 0 (a price of nothing would meter nothing).
+const perMtok: Check = { type: "number", min: 0.0001, max: 10_000 };
+const RED_TEAM = "The mainnet program gate's red team";
 // The first nine are the settings the server has always listed; the rest are the other agents' budgets and limits.
 export const PLATFORM_SETTINGS: readonly PlatformSettingSpec[] = [
   { key: "BUILD_CAP_USD", default: "10", kind: "usd", description: "Spend cap for one coding-agent build", used_by: "Coding-agent builds", check: usd(0.5, 500) },
@@ -60,6 +63,34 @@ export const PLATFORM_SETTINGS: readonly PlatformSettingSpec[] = [
   { key: "REVIEW_CASE_CAP_USD", default: "3", kind: "usd", description: "Spend cap for one governance review case", used_by: "The governance desk", check: usd(0.5, 200) },
   { key: "REVIEW_MONTHLY_CAP_USD", default: "60", kind: "usd", description: "The governance desk's budget per calendar month", used_by: "The governance desk", check: usd(1, 50_000) },
   { key: "BENCHMARK_CAP_USD", default: "25", kind: "usd", description: "The most one agent benchmark run may spend; each run is started with its own cap, never above this", used_by: "Agent benchmarks", check: usd(1, 2_000) },
+  // The red team's model backend (model-backends/): the values are that module's ROLE_BACKEND_VALUES.
+  {
+    key: "RED_TEAM_BACKEND",
+    default: "default",
+    kind: "text",
+    description: "The model backend the red team runs on: default (the one every agent uses), or responses (a second provider's Responses API, with its own key in the key vault)",
+    used_by: RED_TEAM,
+    check: { type: "enum", values: ["default", "responses"] },
+  },
+  {
+    key: "RED_TEAM_MODEL",
+    default: "",
+    kind: "text",
+    description: "The model the red team runs on when its backend isn't the default: the id the provider account uses for it. Mynt names none",
+    used_by: RED_TEAM,
+    check: { type: "text", pattern: /^[A-Za-z0-9][A-Za-z0-9.@:_-]{2,79}$/, words: "a model id: letters, digits, dots and dashes", max: 80 },
+  },
+  { key: "RED_TEAM_INPUT_USD_PER_MTOK", default: "", kind: "usd_per_mtok", description: "What a million input tokens cost on RED_TEAM_MODEL: what the red team's cap is metered with. Not set: no run starts on that backend", used_by: RED_TEAM, check: perMtok },
+  { key: "RED_TEAM_OUTPUT_USD_PER_MTOK", default: "", kind: "usd_per_mtok", description: "What a million output tokens cost on RED_TEAM_MODEL. Not set: no run starts on that backend", used_by: RED_TEAM, check: perMtok },
+  { key: "RED_TEAM_CACHED_INPUT_USD_PER_MTOK", default: "", kind: "usd_per_mtok", description: "What a million cached input tokens cost on RED_TEAM_MODEL. Not set: they are metered at the input price, never lower", used_by: RED_TEAM, check: perMtok },
+  {
+    key: "RED_TEAM_ACCESS_PROGRAM",
+    default: "",
+    kind: "text",
+    description: "The access programme the provider approved this account's security work under, named on every red-team request to the second backend. Not set: none is named",
+    used_by: RED_TEAM,
+    check: { type: "text", pattern: /^[a-z][a-z0-9_]{1,39}$/, words: "a programme's name as the provider writes it: lower-case letters, digits and underscores", max: 40 },
+  },
 ];
 const SPEC = new Map(PLATFORM_SETTINGS.map((s) => [s.key, s]));
 export const PLATFORM_SETTING_KEYS = PLATFORM_SETTINGS.map((s) => s.key) as [string, ...string[]];
@@ -215,7 +246,7 @@ export function registerPlatformSettingTools(server: McpServer, store: Store, us
     {
       title: "Operational settings",
       description:
-        "Admin: the operational settings this server runs with that aren't secrets (build, audit, desk, review, exploration and benchmark budgets and limits, the build audit, the hosted VM hour's price): each one's value in effect, its default, where the value comes from (the server's environment, which wins; what an admin set in Mynt; or Mynt's default), how a new value is checked, and what it's for. Change one with set_platform_setting.",
+        "Admin: the operational settings this server runs with that aren't secrets (build, audit, desk, review, exploration and benchmark budgets and limits, the build audit, the hosted VM hour's price, and the model backend the mainnet gate's red team runs on with its model and token prices): each one's value in effect, its default, where the value comes from (the server's environment, which wins; what an admin set in Mynt; or Mynt's default), how a new value is checked, and what it's for. Change one with set_platform_setting.",
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },

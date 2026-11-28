@@ -95,7 +95,7 @@ Locally, `mynt serve` speaks MCP over stdio for one user instead (`FINANCIAL_PRO
 
 | Path | Who calls it | Authenticates with |
 |---|---|---|
-| `/agent/*` | An agent inside its sandbox, reaching the model | A run token that dies with the run (`core/src/agent-proxy.ts`, `core/src/agent-meter.ts`) |
+| `/agent/*` | An agent inside its sandbox, reaching the model | A run token that dies with the run (`core/src/agent-proxy.ts`, `core/src/agent-meter.ts`). A role set to a second model backend is served under `/agent/r/*` by that backend's adapter (`core/src/model-backends/`), with a token that works nowhere else |
 | `POST /webhooks/clerk` | The identity provider, with organization, membership and invitation events | The provider's signature, checked with `CLERK_WEBHOOK_SECRET`. Each event id is handled once. Off when the secret isn't set |
 | `/esign/webhook` | The e-signature service | The service's own signature scheme. Each event is handled once |
 | `GET /esign/frame-origins` | Mynt Studio | None. It lists the origins signing pages may be framed from, and names no secret |
@@ -247,6 +247,7 @@ core/workspaces/<agent>/  --copied into-->  agent sandbox  --model calls-->  /ag
 - **Steering is data.** An agent's instructions, subagents, skills and scripts live in its agent workspace folder (`core/src/agent-host.ts` copies it in). No agent's instructions are in TypeScript.
 - **Sandboxes sit behind one interface.** `SandboxHost` in `core/src/sandbox-host.ts` is what the services use; a sandbox provider is an adapter in `core/src/sandbox-providers/` (`boatdev.ts`, `freestyle.ts`), picked by `sandboxesFromEnv`.
 - **No secrets in sandboxes.** The model is reached only through Mynt's proxy with a token that works while the run does. GitHub access is a one-repository installation token for an hour, delivered as a file Mynt refreshes.
+- **A model backend per agent role.** Every agent runs on the deployment's model backend unless its role is set to another one (`core/src/model-backends/`). The red team is the one role that can be: on a second backend it runs through that provider's own agent CLI, reading an `AGENTS.md` Mynt makes from the workspace's `CLAUDE.md`, behind the same proxy, token, cap and checks ([The red team's model backend](reference/solana-programs.md#the-red-teams-model-backend)).
 - **Spend is metered.** `core/src/agent-meter.ts` prices each model response; sandboxes add machine time. Per-run and monthly caps stop work that passes them. A figure that can't be measured is never shown as $0.
 - **Agents never grade their own work.** Each agent's output is checked by Mynt outside its sandbox.
 
