@@ -18,6 +18,8 @@ import { ENV_SETTING_NOTE, SETTING_CSV_HEAD, SETTING_SOURCE_LABELS, settingCsvRo
 const ROUTE = "/api/admin/settings"
 export const SETTINGS_HEAD = ["Setting", "Value", "Default", "Source", "Description", "Action"] as const
 const SOURCES: SettingSource[] = ["environment", "stored", "default"]
+// A setting Mynt has no default for (a model, a price) is empty until someone sets it: said, never shown blank.
+const shown = (value: string) => (value === "" ? "Not set" : value)
 
 /** Change setting: the new value, how it's checked, and what changes. */
 export function ChangeSettingSheet({ target, onClose, onDone, fetcher }: { target: PlatformSetting | null; onClose: () => void; onDone: () => void; fetcher?: typeof fetch }) {
@@ -53,10 +55,10 @@ export function ChangeSettingSheet({ target, onClose, onDone, fetcher }: { targe
             <dd>{target.usedBy || "Mynt's server"}</dd>
             <dt className="text-muted-foreground">Now</dt>
             <dd>
-              {target.value} ({settingSourceWords(target)})
+              {shown(target.value)} ({settingSourceWords(target)})
             </dd>
             <dt className="text-muted-foreground">Default</dt>
-            <dd>{target.default}</dd>
+            <dd>{shown(target.default)}</dd>
           </dl>
           <Field label="New value" hint={target.validation ?? undefined}>
             {target.options ? (
@@ -72,7 +74,7 @@ export function ChangeSettingSheet({ target, onClose, onDone, fetcher }: { targe
             )}
           </Field>
           <p className="text-sm" data-setting-change>
-            {changed ? `${target.key} changes from ${target.value} to ${value.trim()}.` : "Nothing changes yet."}
+            {changed ? `${target.key} changes from ${shown(target.value)} to ${value.trim()}.` : "Nothing changes yet."}
           </p>
           <div className="flex flex-wrap gap-2">
             <Button type="submit" disabled={action.busy || !changed} data-setting-submit="set">
@@ -80,7 +82,7 @@ export function ChangeSettingSheet({ target, onClose, onDone, fetcher }: { targe
             </Button>
             {target.source === "stored" && (
               <Button type="button" variant="outline" disabled={action.busy} onClick={() => send(null)} data-setting-submit="reset">
-                Reset to Mynt&apos;s default ({target.default})
+                Reset to Mynt&apos;s default ({shown(target.default)})
               </Button>
             )}
           </div>
@@ -128,9 +130,9 @@ export function OperationalSettingsView({ settings, editable = true, onChanged =
               {s.key}
             </code>,
             <span key="v" data-setting-value>
-              {s.value}
+              {shown(s.value)}
             </span>,
-            s.default,
+            shown(s.default),
             <span key="s" data-setting-source={s.source}>
               {settingSourceWords(s)}
             </span>,

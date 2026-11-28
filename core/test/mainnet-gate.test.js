@@ -784,6 +784,160 @@ test("a red team that ends its turn without a report runs once more, told why; a
   assert.match(v.blocked_reason, /^No complete red-team result \(the red team ran out of its budget\)/);
 });
 
+// ---- the red team on a second model backend (RED_TEAM_BACKEND) ----
+
+const SECOND_KEY = "sk-standin-provider-key-0123456789abcdef";
+const SECOND = { RED_TEAM_BACKEND: "responses", RED_TEAM_MODEL: "standin-model-1", RED_TEAM_INPUT_USD_PER_MTOK: "2", RED_TEAM_OUTPUT_USD_PER_MTOK: "10", RESPONSES_BACKEND_API_KEY: SECOND_KEY };
+// The red team's settings are read from the server's environment where it sets them: set for one test, then put back.
+const withEnv = async (vars, fn) => {
+  const before = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, vars);
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(before)) v === undefined ? delete process.env[k] : (process.env[k] = v);
+  }
+};
+// A review taken to the tick after the red team was launched (its run is over in these tests, its result not yet read).
+const toRedTeam = async (w) => {
+  const id = await w.mainnetProgram();
+  const b = await w.build(id);
+  const r = await w.ok(w.dev, "request_mainnet_review", { program_id: id, build_id: b.build_id });
+  for (let i = 0; i < 12 && (await w.gate.row(r.review_id)).step !== "red_team"; i++) await w.tick();
+  assert.equal((await w.gate.row(r.review_id)).step, "red_team");
+  return r.review_id;
+};
+
+test("the red team runs on the second model backend when its role is set to it: that backend's runner and proxy path, the same report contract, and the review says what it ran on", async () => {
+  const { AgentMeter } = await import("../dist/agent-meter.js");
+  const { CODEX_RUNNER, CODEX_CLI_VERSION } = await import("../dist/model-backends/codex-cli.js");
+  await withEnv(SECOND, async () => {
+    const report = { complete: true, findings: [], attacks_tried: ["wrong signer on record: rejected"], summary: "held up" };
+    // The first attempt ends its turn early; the second writes the report: the retry is the gate's, whatever the backend.
+    const w = await world({ toolchainExit: 0, redTeamRuns: [{ summary: "I will continue once the validator is up." }, { file: report, summary: "done" }] });
+    w.gate.meter = await AgentMeter.open(w.db);
+    const id = await toRedTeam(w);
+    const sb = redSandbox(w);
+    const cwd = workspaceCwd("program-red-team");
+    // What the sandbox was given: the second backend's runner, AGENTS.md made from CLAUDE.md, Mynt's proxy, the run's token.
+    assert.equal(sb.files.get(`${AGENT_DIR}/runner.mjs`), CODEX_RUNNER);
+    assert.ok(sb.files.get(`${cwd}/AGENTS.md`).endsWith(sb.files.get(`${cwd}/CLAUDE.md`)));
+    const token = w.sandboxes.tokens["program-red-team"];
+    assert.equal(JSON.parse(sb.files.get(`${AGENT_DIR}/config.json`)).model, "standin-model-1");
+    assert.equal(JSON.parse(sb.files.get(`${AGENT_DIR}/config.json`)).version, CODEX_CLI_VERSION);
+    // The token resolves to a run on that backend, at the model it started on and the prices set now.
+    const run = await w.gate.agentRun(token);
+    assert.deepEqual(run, { key: `program-red-team:${id}`, capUsd: 8, model: "standin-model-1", backend: { kind: "responses", price: { inputUsdPerMtok: 2, outputUsdPerMtok: 10, cachedInputUsdPerMtok: null }, accessProgram: null } });
+    // The auditor is untouched: the default backend, the other runner, no AGENTS.md.
+    const auditSb = [...w.sandboxes.sandboxes.values()].find((x) => x.auditJobs);
+    assert.notEqual(auditSb.files.get(`${AGENT_DIR}/runner.mjs`), CODEX_RUNNER);
+    assert.equal(auditSb.files.has(`${workspaceCwd("program-audit")}/AGENTS.md`), false);
+
+    await w.tick(8);
+    const v = await w.review(id);
+    assert.equal(v.status, "awaiting_approval", v.blocked_reason);
+    assert.equal(sb.redJobs.length, 2, "an early end runs once more, as on the default backend");
+    assert.equal(sb.files.get(`${AGENT_DIR}/runner.mjs`), CODEX_RUNNER, "the second attempt runs on the same backend");
+    assert.deepEqual(
+      { finished: v.checks.red_team.finished, attempt: v.checks.red_team.attempt, backend: v.checks.red_team.backend, model: v.checks.red_team.model },
+      { finished: true, attempt: 2, backend: "responses", model: "standin-model-1" },
+    );
+    assert.equal(v.reserved_usd, null, "every call was measured: nothing is reserved");
+    const started = (await w.db.query("SELECT detail FROM financial_products.solana_mainnet_review_log WHERE event = 'red_team_started'")).rows[0].detail;
+    assert.deepEqual(started, { backend: "responses", model: "standin-model-1", cap_usd: 8 });
+    // The provider's key is in nothing any sandbox was given, and in nothing the review shows.
+    for (const s of w.sandboxes.sandboxes.values()) for (const [path, content] of s.files) assert.equal(String(content).includes(SECOND_KEY), false, path);
+    assert.equal(JSON.stringify(v).includes(SECOND_KEY), false);
+
+    // A report the schema refuses blocks on this backend as on the other, on both attempts.
+    const bad = await world({ toolchainExit: 0, redTeamRuns: [{ file: { findings: [] }, summary: "Nothing found." }] });
+    const blocked = await redReview(bad);
+    assert.equal(blocked.status, "blocked");
+    assert.match(blocked.blocked_reason, /without a valid report\.json, on both attempts: report\.json: must have required property 'attacks_tried'/);
+    assert.equal(blocked.checks.red_team.backend, "responses");
+  });
+  // Not set: the backend every agent uses, and the review says so.
+  const w = await world();
+  const v = await redReview(w);
+  assert.equal(v.status, "awaiting_approval", v.blocked_reason);
+  assert.deepEqual({ backend: v.checks.red_team.backend, model: v.checks.red_team.model }, { backend: "default", model: "claude-opus-5-5" });
+  assert.equal(redSandbox(w).files.has(`${workspaceCwd("program-red-team")}/AGENTS.md`), false);
+});
+
+test("a refusal by the second backend's safeguards is recorded on the review with its request id and never tried again", async () => {
+  const { AgentMeter } = await import("../dist/agent-meter.js");
+  await withEnv(SECOND, async () => {
+    const w = await world({ toolchainExit: 0, redTeamRuns: [{ state: { done: true, last_subtype: "error_during_execution", exit_code: 1, error: null, cost_usd: 0, summary: "This request was declined by the provider's safety policy." } }] });
+    w.gate.meter = await AgentMeter.open(w.db);
+    const id = await toRedTeam(w);
+    // What Mynt's proxy records when the provider declines the red team's request.
+    await w.gate.meter.addRefusal(`program-red-team:${id}`, { category: "standin_policy", request_id: "req_standin_9" });
+    await w.tick(6);
+    const v = await w.review(id);
+    assert.equal(v.status, "blocked");
+    assert.equal(redSandbox(w).redJobs.length, 1, "a second attempt would be refused too: there is none");
+    assert.equal(
+      v.blocked_reason,
+      `No complete red-team result (the red team stopped with error_during_execution without a valid report.json: report.json doesn't exist; the model provider's safeguards refused the red team's work [standin_policy] (request id req_standin_9); its last message: "This request was declined by the provider's safety policy."); a mainnet program can't pass without one`,
+    );
+    assert.deepEqual(v.checks.red_team.refusal, { category: "standin_policy", request_ids: ["req_standin_9"], count: 1 });
+    assert.equal(v.checks.red_team.finished, false);
+    assert.equal(v.checks.red_team.backend, "responses");
+  });
+});
+
+test("a red team set to a second backend without its key, model or prices can't start; model calls that couldn't be measured are reserved, never shown as spent", async () => {
+  const { AgentMeter } = await import("../dist/agent-meter.js");
+  // The role is moved to the second backend, and nothing else is set: no review is taken.
+  await withEnv({ RED_TEAM_BACKEND: "responses" }, async () => {
+    const w = await world();
+    const id = await w.mainnetProgram();
+    const b = await w.build(id);
+    const refused = await w.call(w.dev, "request_mainnet_review", { program_id: id, build_id: b.build_id });
+    assert.equal(refused.isError, true);
+    const said = JSON.stringify(refused.data);
+    for (const named of ["RED_TEAM_BACKEND is responses", "RESPONSES_BACKEND_API_KEY", "RED_TEAM_MODEL isn't set", "RED_TEAM_INPUT_USD_PER_MTOK and RED_TEAM_OUTPUT_USD_PER_MTOK aren't set"]) assert.ok(said.includes(named), named);
+    assert.equal(w.gate.redTeamMissing() !== null, true);
+    assert.deepEqual(w.gate.redTeamRunsOn(), { backend: "responses", model: null });
+  });
+
+  await withEnv(SECOND, async () => {
+    // The price is removed between the request and the red team's start: blocked with the reason, nothing launched.
+    let w = await world({ toolchainExit: 0 });
+    let id = await w.mainnetProgram();
+    let b = await w.build(id);
+    let r = await w.ok(w.dev, "request_mainnet_review", { program_id: id, build_id: b.build_id });
+    delete process.env.RED_TEAM_OUTPUT_USD_PER_MTOK;
+    await w.tick(12);
+    process.env.RED_TEAM_OUTPUT_USD_PER_MTOK = SECOND.RED_TEAM_OUTPUT_USD_PER_MTOK;
+    let v = await w.review(r.review_id);
+    assert.equal(v.status, "blocked");
+    assert.match(v.blocked_reason, /^No red-team result \(the red team is set to run on a second model backend \(RED_TEAM_BACKEND is responses\), and RED_TEAM_OUTPUT_USD_PER_MTOK isn't set/);
+    assert.equal(redSandbox(w), undefined, "the red team was never launched");
+
+    // A run whose token outlives the price: the proxy is given no price, so it sends nothing.
+    w = await world({ toolchainExit: 0 });
+    w.gate.meter = await AgentMeter.open(w.db);
+    id = await toRedTeam(w);
+    const token = w.sandboxes.tokens["program-red-team"];
+    delete process.env.RED_TEAM_INPUT_USD_PER_MTOK;
+    assert.equal((await w.gate.agentRun(token)).backend.price, null);
+    process.env.RED_TEAM_INPUT_USD_PER_MTOK = SECOND.RED_TEAM_INPUT_USD_PER_MTOK;
+    // US$2 of its calls were metered, and one answer carried no usage: the rest of its US$8 cap is reserved.
+    await w.gate.meter.add(`program-red-team:${id}`, 2);
+    await w.gate.meter.addUnmeasured(`program-red-team:${id}`, null);
+    await w.tick(6);
+    v = await w.review(id);
+    assert.equal(v.status, "awaiting_approval", v.blocked_reason);
+    assert.equal(v.reserved_usd, 6);
+    assert.match(v.reserved_note, /^Reserved, not measured: .* It is not money known to be spent$/);
+    assert.ok(v.cost_usd >= 2 && v.cost_usd < 3, `the measured part only (${v.cost_usd})`);
+    // The month's budget keeps what was measured and what was reserved; only the rest of the caps went back.
+    const month = Number((await w.db.query("SELECT value FROM financial_products.solana_settings WHERE key LIKE 'gate_budget:%'")).rows[0].value);
+    assert.equal(month.toFixed(2), (v.cost_usd + 6).toFixed(2));
+  });
+});
+
 test("the program-audit agent: an early end or a run that broke off runs once more; twice blocks with the reason", async () => {
   // The run broke off before any result (the "no result" case): the second attempt writes its findings.
   let w = await world({ auditRuns: [{ state: { done: true, last_subtype: null, exit_code: 1, error: null, cost_usd: 0.2, summary: null } }, { file: { findings: [], summary: "nothing found" } }] });
