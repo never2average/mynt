@@ -15,7 +15,7 @@ import { serviceEndpoint } from "../dist/services.js";
 import { callVendor, resolveVendorUrl } from "../dist/vendor-call.js";
 import { servedAt, vendorPrefill } from "../dist/vendors.js";
 import { planAppRemoval } from "../dist/app-removal.js";
-import { CATALOG } from "./helpers.js";
+import { CATALOG, reviewedForProduction } from "./helpers.js";
 
 // Services: the third kind built on Mynt. A service is an app record of kind 'service' with its one vendor offering,
 // built and hosted like an app. These tests cover who may create one, that its endpoint is derived and never typed,
@@ -219,6 +219,9 @@ async function world() {
        VALUES ($1, $2, $3, 'build it', 'succeeded', 5, 'scoreworks/score', $4, $5, $6, $6, $6)`,
       [id, vera.user.id, appId, sha, "ab".repeat(32), new Date(clock).toISOString()],
     );
+    // Each verified build has its complete production code review: a service goes to Production, and a new build
+    // takes over there, only with one (test/production-reviews.test.js is about the review itself).
+    await reviewedForProduction(pg, { appId, buildId: id, userId: vera.user.id });
     return id;
   };
   const create = (extra = {}) => ok(vera.call, "create_service", { workspace_id: ws.id, name: "Cash-flow score", description: "Scores a customer's cash flow.", service_type: "cashflow_score", region: "US", ...extra });
@@ -851,6 +854,7 @@ test("promotion checks for a service, and moving back unlists", async () => {
     ["build_verified", "Latest build verified by Mynt", "pass"],
     ["audit_passed", "Independent audit passed", "warn"],
     ["audit_findings", production.checks[5].label, production.checks[5].status],
+    ["production_code_review", "Production code review passed", "pass"],
     ["hosting_healthy", "Healthy on Mynt's hosting", "pass"],
   ]);
   for (const absent of ["licences", "program_agreements", "webhooks", "target_states"]) assert.ok(!production.checks.some((c) => c.id === absent), `no ${absent} check on a service`);

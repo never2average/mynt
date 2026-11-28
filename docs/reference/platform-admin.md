@@ -127,7 +127,9 @@ See [Vendors and the marketplace](vendors-and-marketplace.md).
 
 ### Audit trails section
 
-Audit trails is Mynt's audit log across every workspace and firm: `audit_log`, its newest 500 entries, each with its class (`security`, `financial`, `obligations` or `workspace`).
+Audit trails has two tabs, the tab in the address: **Audit log** (the default) and **Production reviews** (`/platform/audit?tab=reviews`).
+
+The audit log is Mynt's audit log across every workspace and firm: `audit_log`, its newest 500 entries, each with its class (`security`, `financial`, `obligations` or `workspace`).
 
 `audit_log` takes no filters and no cursor. So the section searches, filters and pages those 500 in Studio, and says so when there may be more.
 
@@ -137,6 +139,15 @@ Audit trails is Mynt's audit log across every workspace and firm: `audit_log`, i
 - **A row** opens `/platform/audit/<id>`: its metadata card, then Details and Related.
   - Details shows every detail as a table. Secrets are never in the audit log, and any detail named like one is shown as "Hidden".
   - Related shows other entries about the same target, newest 50.
+
+**Production reviews** lists every workspace's [production code reviews](apps-and-builds.md#the-production-code-review), newest first (`list_production_reviews`, the newest 300). It sits here because each review, and each exception to one, is a record of what Mynt checked before a build went live.
+
+- **Filters:** status and workspace, with search by app, workspace, build or who started it.
+- **Table:** Workspace, App or service, Build, Status, Findings by severity, Coverage, Cost, Time, Started by and When. A figure Mynt didn't measure says "Not measured". A build with an exception says so in its row.
+- **Export CSV** downloads what is shown.
+- **A row** opens `/platform/audit/<review id>?tab=reviews`: its metadata card (status, findings, cost, time, limits, model, who started it, the commit, the exception if one is recorded, and the reason and next step when it isn't complete), then **Findings** and **Coverage**, each a table.
+- **Stop review** (a review in progress) opens a sheet and ends it; what it found and spent is kept.
+- **Record exception** (a review that ended without completing, with no critical or high finding) opens a sheet with a required reason of at least 20 characters. It calls `waive_production_review`: the build may then go to Production without a complete review. Mynt refuses it for an admin who is a member of the app's workspace. See [An exception for one build](apps-and-builds.md#an-exception-for-one-build).
 
 Its route is `GET /api/admin/audit`, which takes only `limit` (1 to 500).
 
@@ -705,6 +716,12 @@ The settings that aren't secrets (`core/src/platform-settings.ts`), one row each
 | `REVIEW_CASE_CAP_USD` | 3 | A number from 0.5 to 200 |
 | `REVIEW_MONTHLY_CAP_USD` | 60 | A number from 1 to 50000 |
 | `BENCHMARK_CAP_USD` | 25 | A number from 1 to 2000 |
+| `PRODUCTION_REVIEW_WORKFLOWS` | `execute-scr` | Workflow names separated by commas |
+| `PRODUCTION_REVIEW_MODEL` | `claude-sonnet-5-5` | A model id |
+| `PRODUCTION_REVIEW_MINUTES` | 180 | A whole number from 10 to 720 |
+| `PRODUCTION_REVIEW_CAP_USD` | 60 | A number from 1 to 1000 |
+| `PRODUCTION_REVIEW_WORKSPACE_MONTHLY` | 4 | A whole number from 1 to 500 |
+| `PRODUCTION_REVIEW_WORKSPACE_MONTHLY_USD` | 200 | A number from 1 to 50000 |
 
 The precedence is the same as for keys: the server's environment where it sets the setting, then what an admin set in Mynt, then Mynt's default. The Source column says which. A setting the server's environment sets is a read-only row: "Set on the server; overrides what's set in Mynt".
 

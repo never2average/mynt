@@ -13,6 +13,7 @@ import {
   type InfoTab,
   type TabData,
 } from "./app-panel";
+import { NO_REVIEWS_YET, reviewsFrom } from "./production-reviews";
 import { signalsFrom, unavailable } from "./risk-register";
 import { loadRegister, NO_REGISTER_YET } from "./risk-register-server";
 import { fromAgreementAuditList, summariesByAgreement } from "./agreement-audits";
@@ -119,6 +120,8 @@ export async function loadPanelTab(mynt: Client, app: PanelApp, tab: InfoTab): P
       if (!audit.events && !checks && !tool("list_workspace_audit") && !tool("get_promotion_checks") && !tool("list_risks")) return NOT_YET("Security and risk information comes with Mynt's next update.");
       // Without the register, the signals that come with it aren't available either: said so, each with why.
       const none = unavailable(risks.register.available ? NO_REGISTER_YET : risks.register.reason);
+      // Its production code reviews: read for this app only.
+      const reviews = tool("list_production_reviews") ? reviewsFrom(await read("list_production_reviews", { app_id: app.id })) : null;
       return {
         available: true,
         register: risks.register,
@@ -127,6 +130,7 @@ export async function loadPanelTab(mynt: Client, app: PanelApp, tab: InfoTab): P
         eventsReason: audit.reason,
         checks: checks?.checks.filter((c) => SECURITY_CHECKS.includes(c.id)) ?? [],
         checksReason: checks ? null : app.stage === "production" ? "The app is in production: there's no next stage to check it for" : "Mynt's build checks aren't available yet",
+        reviews: reviews ?? unavailable(tool("list_production_reviews") ? "Mynt didn't answer with this app's production code reviews." : NO_REVIEWS_YET),
       };
     }
     case "sdk": {

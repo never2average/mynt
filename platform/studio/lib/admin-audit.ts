@@ -175,3 +175,14 @@ export const relatedEntries = (entries: AuditEntry[], entry: AuditEntry) => entr
 
 export const AUDIT_CSV_HEAD = ["When", "Action", "Class", "Actor", "Workspace", "Firm", "Target type", "Target", "Details", "Id"]
 export const auditCsvRow = (e: AuditEntry) => [e.at, actionLabel(e.action), classLabel(e.class), actorWords(e), e.workspace?.name ?? e.workspace?.id ?? "", e.firm?.name ?? e.firm?.id ?? "", TARGET_TYPE_LABELS[e.targetType], e.target, e.details.map(([k, v]) => `${k}: ${v}`).join("; "), e.id]
+
+// ---- the section's two views ----
+//
+// Audit trails has two tabs, the tab in the address: the audit log (the default) and Production reviews
+// (?tab=reviews): every workspace's production code reviews (lib/production-reviews.ts), which belong beside the
+// audit log because each one, and each exception to one, is a record of what Mynt checked before a build went live.
+export const AUDIT_VIEWS = ["log", "reviews"] as const;
+export type AuditView = (typeof AUDIT_VIEWS)[number];
+export const AUDIT_VIEW_LABELS: Record<AuditView, string> = { log: "Audit log", reviews: "Production reviews" };
+export const auditViewOf = (v: unknown): AuditView => (v === "reviews" ? "reviews" : "log");
+export const auditHref = (view: AuditView, id?: string) => `/platform/audit${id ? `/${encodeURIComponent(id)}` : ""}${view === "reviews" ? "?tab=reviews" : ""}`;

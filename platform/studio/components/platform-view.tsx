@@ -2,7 +2,7 @@
 
 // One section of the platform admin (/platform/<section>, /platform/<section>/<id>), for Mynt's own staff: across all
 // workspaces and firms, never a workspace picked in the studio. Overview, Workspaces, Firms, Vendors, Audit
-// trails, Risk models, Risk register, Agent benchmarks and Platform settings, each its own page in the platform admin's sidebar
+// trails (the audit log, and every workspace's production code reviews: /platform/audit?tab=reviews), Risk models, Risk register, Agent benchmarks and Platform settings, each its own page in the platform admin's sidebar
 // (components/platform-shell.tsx). There is no Apps, People, Products or Licences section: people are each firm's and
 // workspace's Members, products each firm's Products tab, and licences the Regulated firms section's Licences tab
 // (/platform/firms?tab=licences) and each firm's. Each is a read view; its changes are labelled buttons
@@ -20,6 +20,7 @@ import { SettingsTab } from "@/components/admin-settings"
 import { VendorsTab } from "@/components/admin-vendors"
 import { WorkspacesTab } from "@/components/admin-workspaces"
 import { adminHref, firmsHref, firmsTabOf, type AdminTab } from "@/lib/admin"
+import { auditHref, auditViewOf } from "@/lib/admin-audit"
 import { settingsHref, settingsTabOf } from "@/lib/platform-settings"
 
 export function PlatformSection({ tab, id }: { tab: AdminTab; id: string | null }) {
@@ -33,6 +34,8 @@ export function PlatformSection({ tab, id }: { tab: AdminTab; id: string | null 
   const firmsTab = firmsTabOf(query?.get("tab"))
   // Platform settings opens on the tab its address names (/platform/settings?tab=operational), Key vault otherwise.
   const settingsTab = settingsTabOf(query?.get("tab"))
+  // Audit trails opens on the tab its address names (/platform/audit?tab=reviews), the audit log otherwise.
+  const auditView = auditViewOf(query?.get("tab"))
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto" data-admin-page data-platform-section={tab}>
       <div className="@container/main flex min-h-0 w-full flex-1 flex-col gap-4 p-4 lg:gap-5 lg:p-6">
@@ -40,7 +43,7 @@ export function PlatformSection({ tab, id }: { tab: AdminTab; id: string | null 
         {tab === "workspaces" && <WorkspacesTab id={id} onOpen={open("workspaces")} onBack={back("workspaces")} />}
         {tab === "firms" && <FirmsTab id={id} onOpen={open("firms")} onBack={back("firms")} initialTab={firmTab} tab={firmsTab} onTab={(t) => router.push(firmsHref(t))} />}
         {tab === "vendors" && <VendorsTab />}
-        {tab === "audit" && <AuditTab id={id} onOpen={open("audit")} onBack={back("audit")} />}
+        {tab === "audit" && <AuditTab id={id} view={auditView} onView={(v) => router.push(auditHref(v))} onOpen={(next) => router.push(auditHref(auditView, next))} onBack={() => router.push(auditHref(auditView))} />}
         {tab === "risk-models" && <RiskModelsTab id={id} onOpen={open("risk-models")} onBack={back("risk-models")} />}
         {tab === "risk-register" && <RiskRegisterTab id={id} onOpen={open("risk-register")} onBack={back("risk-register")} />}
         {tab === "benchmarks" && <BenchmarksTab id={id} onOpen={open("benchmarks")} onBack={back("benchmarks")} />}

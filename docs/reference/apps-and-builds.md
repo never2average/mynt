@@ -189,6 +189,84 @@ With `BUILD_AUDIT=maxwell`, a separate, audit-only Claude Code run (`core/worksp
 - **One more attempt.** An audit that ends without a complete report for another reason (the auditor ended its turn early, its run broke off, or a workflow's run failed or got stuck) runs once more, if the source is untouched and at least as much of the budget is left as the first attempt spent. Two such ends block the build.
 - **Which workflows.** The default is `probe-cicd-env`, which examines CI/CD pipeline definitions. An app scaffolded from Mynt's starter has none, so for it the workflow finishes with nothing to examine, and the report's summary says so; a build on a connected repository that carries pipeline files gets them examined. Maxwell's secure code review, `execute-scr`, is not in the default, because it doesn't fit a per-build limit: it reviews each trust boundary and attack class with a separate agent, one after another, then refutes and verifies each candidate, and writes to its ledger only after that. Counted from its workflow script at the pinned commit with stand-in agents, an app with three boundaries and four attack classes each takes 31 agent runs with no finding and 67 with one candidate per unit, 16 to 52 of them before the first ledger write. Mynt has not measured a complete run of it in a build. To run it per build anyway, add it to `BUILD_AUDIT_WORKFLOWS` and raise `BUILD_AUDIT_MINUTES` and `BUILD_AUDIT_CAP_USD` to match. Mynt's own checks (static scan, secrets, dependency audit, SBOM) run on every build either way.
 
+### The production code review
+
+Before a build of an app or service goes to Production, Mynt reviews its code in full: one production code review of that exact build, complete, with no critical or high finding.
+
+**Why it is its own step.** A build's own audit runs only the workflows that fit a per-build limit (see [The independent audit](#the-independent-audit)); by default that is `probe-cicd-env`, which for an app with no pipeline files examines almost nothing. Maxwell's secure code review, `execute-scr`, is a run of dozens of agents and doesn't fit that limit. So it runs once, before Production, on the build that will go live, with a time limit and a budget of its own.
+
+**What is reviewed.** One verified build: the commit that build pushed, which Mynt checked was exactly the verified source when the build succeeded, and which is what hosting fetches when the build goes online. A review is never for "the app": a newer build needs its own.
+
+**Who asks.**
+
+| Tool | Who | What it does |
+| --- | --- | --- |
+| `request_production_review({ app_id, build_id? })` | An owner or admin of the app's workspace; a Mynt admin for any app | Asks for a review of one verified build (default: the latest build that passed Mynt's verification). Returns the review, `queued` |
+| `get_production_review({ id })` | Every member of the app's workspace; Mynt admins | One review, with each finding, its coverage, and any exception recorded for its build |
+| `list_production_reviews({ app_id?, status? })` | Every member (their workspaces' apps); Mynt admins (every workspace) | Reviews, newest first; the exceptions recorded; the limits in force; for one app, the builds a review can be asked for and what the workspace has used this month |
+| `stop_production_review({ id })` | An owner or admin of the app's workspace; a Mynt admin | Ends a queued or running review. What it found and spent so far is kept. A stopped review doesn't pass |
+| `waive_production_review({ app_id, build_id, reason })` | Mynt admins only | Records an exception for one build. See [An exception for one build](#an-exception-for-one-build) |
+
+**Limits.** A review is Mynt's own spend, not the workspace's build budget, so it is bounded:
+
+- one review runs per app at a time, and a build that already has a complete review isn't reviewed again;
+- a workspace's own people start at most `PRODUCTION_REVIEW_WORKSPACE_MONTHLY` reviews per calendar month, and at most `PRODUCTION_REVIEW_WORKSPACE_MONTHLY_USD` of spend, counting each review in progress at its cap. A review stopped before it started doesn't count;
+- a Mynt admin's start is not refused by the workspace's limits and doesn't use them up: that is how one more is granted;
+- across Mynt, `PRODUCTION_REVIEW_CONCURRENCY` reviews (default 2) run at once; the rest wait as `queued`.
+
+**How it runs.** Through the build audit's machinery, not a second one:
+
+- a clean sandbox of its own, with no secrets. Mynt fetches the commit's archive with a short-lived token it writes to a file the script deletes before anything else runs; the token is never in a command or the sandbox's environment, and it is gone before the reviewer starts;
+- the source unpacked read-only and hashed by Mynt before and after. A changed file fails the review and is named;
+- the same reviewer, steered by `core/workspaces/build-audit/`: its script fetches Maxwell at the pinned commit (`BUILD_MAXWELL_COMMIT`), runs Maxwell's own checks, launches each workflow in `PRODUCTION_REVIEW_WORKFLOWS` through Maxwell's headless launcher, ends a run that goes quiet, and rewrites the report from Maxwell's ledger every few seconds;
+- every model call goes through Mynt's proxy on `PRODUCTION_REVIEW_MODEL`, metered under the review's own key and refused once `PRODUCTION_REVIEW_CAP_USD` is spent;
+- findings are kept as they are recorded, so `get_production_review` shows them while the review runs.
+
+The reviewer never grades its work: Mynt reads the report and decides.
+
+**The result.** Kept per review, for one app and one build:
+
+| Status | Means |
+| --- | --- |
+| `queued`, `running` | Waiting for a reviewer, or in progress |
+| `complete` | Every configured workflow finished, and the report says so |
+| `incomplete` | It ran out of time or budget, its run stalled, or it ended without a complete report |
+| `refused` | The model provider's safeguards refused the security review |
+| `failed` | The review tool is broken at its pinned commit, the source couldn't be fetched, the read-only source changed, or the sandbox failed |
+| `stopped` | Someone stopped it |
+
+With it: findings by severity and each finding (title, file, workflow), in the build audit's report shape; coverage (the workflows that finished, and those that didn't, each with why); Mynt's measured cost (the model's spend and the sandbox's machine time) and time; the limits it ran with; and, when it isn't complete, the reason and a next step. A figure Mynt didn't measure is `null`, never 0: a review that never started has no cost, and one that wrote no report has no findings.
+
+**A review that didn't finish never passes, and isn't run again by itself.** The reason says what happened and what it had covered; the next step says what to do. Out of time or budget: ask a Mynt admin to raise `PRODUCTION_REVIEW_MINUTES` or `PRODUCTION_REVIEW_CAP_USD`, then request it again. A refusal by the model provider is recorded with its request id, and no prompt is reworded to get past it: a Mynt admin gets the provider's approval for security work, changes `PRODUCTION_REVIEW_MODEL`, or records an exception.
+
+#### An exception for one build
+
+A provider-side refusal would otherwise block every promotion for good. So a Mynt admin can record an explicit exception with `waive_production_review({ app_id, build_id, reason })`:
+
+- for one verified build only. The next build needs its own review or its own exception;
+- with a reason of at least 20 characters;
+- never by a Mynt admin who is a member of the app's workspace;
+- never for findings: it is refused when the build's review recorded a critical or high finding, or already passed;
+- recorded in the audit trail (`waive_production_review`, with the admin, the build, the reason and the review it stands in for);
+- shown as it is, never as an ordinary pass: the promotion check reads "Waived by a Mynt admin: <reason> (<who>, <date>). No complete code review ran on build …", and the same is on the app's Security & risk tab and in `list_production_reviews`.
+
+#### Production review settings
+
+Operational settings: a Mynt admin changes them in the platform admin's [Operational settings](platform-admin.md#operational-settings), and a change applies to the next review asked for. A review keeps the limits it was asked with.
+
+| Setting | Default | What it is |
+| --- | --- | --- |
+| `PRODUCTION_REVIEW_WORKFLOWS` | `execute-scr` | The review's workflows, in order |
+| `PRODUCTION_REVIEW_MODEL` | `claude-sonnet-5-5` | The model it runs on |
+| `PRODUCTION_REVIEW_MINUTES` | 180 | Time limit for one review (10 to 720) |
+| `PRODUCTION_REVIEW_CAP_USD` | 60 | The most one review may spend on the model (1 to 1000) |
+| `PRODUCTION_REVIEW_WORKSPACE_MONTHLY` | 4 | Reviews one workspace's owners and admins may start per calendar month |
+| `PRODUCTION_REVIEW_WORKSPACE_MONTHLY_USD` | 200 | What one workspace's reviews may spend per calendar month |
+
+`PRODUCTION_REVIEW_CONCURRENCY` (default 2) and `PRODUCTION_REVIEW_POLL_MS` (default 15000) are read from the server's environment only.
+
+**What to expect.** `execute-scr` makes 31 agent runs for a small app with no finding and 67 with one candidate per unit, one after another (see [The independent audit](#the-independent-audit)). Maxwell's own recorded run on a two-app example took about 85 minutes and about US$98. The defaults (180 minutes, US$60) are a bound, not a measurement: what a review of one starter-sized app takes and costs on Mynt has not been measured yet, and a larger app may need a higher cap.
+
 ### Tracking a build
 
 | Tool | Shows |
@@ -592,7 +670,7 @@ When an agent starts, Mynt copies its folder into the sandbox and makes it the a
 | Folder under `core/workspaces/` | Agent |
 | --- | --- |
 | `coding-build/` | The builders' coding agent: `CLAUDE.md`, `.claude/agents/` (its team), skills, `templates/mynt-app` (the Compose app) and scripts |
-| `build-audit/` | The audit-only agent in a build's clean verification sandbox (`maxwell-static-audit`) |
+| `build-audit/` | The audit-only agent in a build's clean verification sandbox, and the reviewer of a [production code review](#the-production-code-review) (`maxwell-static-audit`) |
 | `product-desk/` | The product desk agent, which designs models in the firm's repository (`model-contract`, `financial-modelling`) |
 | `algorithm-explorer/` | The explorers that try to improve one decision algorithm of a product, with their angles in `angles.json` |
 | `governance-review/` | The Mynt admins' review agent: checklists, register skills and evidence scripts |
@@ -638,6 +716,7 @@ An app in Production serves real customers on a live key, so what is online ther
 - it is a build of this app that Mynt verified;
 - `audit_passed`: its independent audit found no critical or high issue. A build no audit ran on only warns, as in promotion, unless the app moves value;
 - `audit_findings`: it has no open critical or high audit findings;
+- `production_code_review`: its own [production code review](#the-production-code-review) is complete with no critical or high finding, or a Mynt admin recorded an exception for this build. An older build's review doesn't count, and a review still running refuses the deploy like a failed one. An owner or admin asks with `request_production_review` before deploying it;
 - `admin_signoff`, when the app moves value: a Mynt admin signed off this very build. An owner or admin asks with `request_promotion_signoff` before deploying it; see [Production sign-off](workspaces-and-sign-in.md#production-sign-off).
 
 A check that fails, or a sign-off still waiting, refuses the deploy. The refusal lists each failing check in the words `get_promotion_checks` uses, and the build that is online stays as it is.

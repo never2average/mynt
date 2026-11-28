@@ -57,7 +57,16 @@ const by = (data) => Object.fromEntries(data.settings.map((s) => [s.key, s]));
 test("the list: the nine settings first, then the other agents' budgets; never a secret; each with how it's checked", async () => {
   const keys = PLATFORM_SETTINGS.map((s) => s.key);
   assert.deepEqual(keys.slice(0, 9), NINE);
-  assert.deepEqual(keys.slice(9), ["EXPLORE_MAX_ITERATIONS", "EXPLORE_MAX_MINUTES", "DESK_JOB_CAP_USD", "DESK_MONTHLY_CAP_USD", "REVIEW_CASE_CAP_USD", "REVIEW_MONTHLY_CAP_USD", "BENCHMARK_CAP_USD"]);
+  assert.deepEqual(keys.slice(9), ["EXPLORE_MAX_ITERATIONS", "EXPLORE_MAX_MINUTES", "DESK_JOB_CAP_USD", "DESK_MONTHLY_CAP_USD", "REVIEW_CASE_CAP_USD", "REVIEW_MONTHLY_CAP_USD", "BENCHMARK_CAP_USD", "PRODUCTION_REVIEW_WORKFLOWS", "PRODUCTION_REVIEW_MODEL", "PRODUCTION_REVIEW_MINUTES", "PRODUCTION_REVIEW_CAP_USD", "PRODUCTION_REVIEW_WORKSPACE_MONTHLY", "PRODUCTION_REVIEW_WORKSPACE_MONTHLY_USD"]);
+  // The production code review's own settings: safe defaults, each with its type and range.
+  const spec = Object.fromEntries(PLATFORM_SETTINGS.map((x) => [x.key, x]));
+  assert.deepEqual(
+    ["PRODUCTION_REVIEW_WORKFLOWS", "PRODUCTION_REVIEW_MODEL", "PRODUCTION_REVIEW_MINUTES", "PRODUCTION_REVIEW_CAP_USD", "PRODUCTION_REVIEW_WORKSPACE_MONTHLY", "PRODUCTION_REVIEW_WORKSPACE_MONTHLY_USD"].map((k) => [spec[k].default, spec[k].kind]),
+    [["execute-scr", "list"], ["claude-sonnet-5-5", "text"], ["180", "minutes"], ["60", "usd"], ["4", "count"], ["200", "usd"]],
+  );
+  for (const [key, value] of [["PRODUCTION_REVIEW_MINUTES", "9"], ["PRODUCTION_REVIEW_MINUTES", "721"], ["PRODUCTION_REVIEW_MINUTES", "90.5"], ["PRODUCTION_REVIEW_CAP_USD", "0"], ["PRODUCTION_REVIEW_CAP_USD", "1001"], ["PRODUCTION_REVIEW_WORKSPACE_MONTHLY", "0"], ["PRODUCTION_REVIEW_WORKFLOWS", "Execute SCR"], ["PRODUCTION_REVIEW_WORKFLOWS", ""]])
+    assert.equal(checkSetting(key, value).ok, false, `${key}=${value}`);
+  assert.deepEqual(checkSetting("PRODUCTION_REVIEW_WORKFLOWS", "execute-scr, probe-cicd-env"), { ok: true, value: "execute-scr,probe-cicd-env" });
   assert.ok(keys.every((k) => !/KEY|SECRET|TOKEN|PASSWORD|URL/.test(k)), "no secret is an operational setting");
   // Each default passes its own check.
   for (const s of PLATFORM_SETTINGS) assert.deepEqual(checkSetting(s.key, s.default), { ok: true, value: s.default }, s.key);

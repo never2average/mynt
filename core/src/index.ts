@@ -45,6 +45,7 @@ import { partnerLedgerFor } from "./partner-kit.js";
 import { initializeHealthProgram, loadFlowsFor, productHealthConfigFromEnv, ProductHealthService, SolanaHealthChain } from "./product-health.js";
 import { Keypair } from "./solana/codec.js";
 import { gateConfigFromEnv, MainnetGateService } from "./solana/mainnet-gate.js";
+import { ProductionReviewService } from "./production-reviews.js";
 import { CLUSTERS, type Cluster } from "./solana/rpc.js";
 import { readFileSync } from "node:fs";
 import { adoptVault, bootVault, ConfidentialReleases, confidentialHostFromEnv, initialiseHost, rewrapVault } from "./confidential/index.js";
@@ -201,6 +202,9 @@ const openServices = async () => {
   // Every agent's model calls are metered at the proxy, against its run's cap.
   const meter = await AgentMeter.open(db);
   for (const s of [builds, bd, desk, review, explore, gate]) s.meter = meter;
+  // The production code review: the full agent code review a build needs before it goes to Production. It runs on the
+  // builds' sandboxes, repository host and meter.
+  const productionReviews = await ProductionReviewService.open(db, store, builds);
   // Agent benchmarks: the same services again, over their own tables, run only when an admin starts a run.
   const benchmarks = await BenchmarkService.open(db, store, { sandboxes, repos: github, buildConfig, deskConfig, reviewConfig, bdConfig, gateConfig: gate.config });
   benchmarks.meter = meter;
@@ -230,7 +234,7 @@ const openServices = async () => {
   // environment's ESIGN_PROVIDER, SIGNWELL_API_KEY, SIGNWELL_WEBHOOK_ID and ESIGN_TEST_MODE as overrides. Off until
   // then, and the manual flow stays.
   const esign = await EsignSettings.open(store, { keys: platformKeys });
-  return { benchmarks, store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env };
+  return { benchmarks, store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productionReviews, productHealth, liquidity, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env };
 };
 
 const parseRoles = (): Role[] => {
@@ -277,13 +281,13 @@ const [command = "serve", sub] = positionals;
 if (values.help) {
   console.log(USAGE);
 } else if (command === "serve") {
-  const { benchmarks, store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env } = await openServices();
+  const { benchmarks, store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productionReviews, productHealth, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env } = await openServices();
   const token = process.env.FINANCIAL_PRODUCTS_TOKEN;
   const user = token ? ((await store.userByToken(token)) ?? die("FINANCIAL_PRODUCTS_TOKEN is not a valid token")) : null;
-  await createServer(store, user, { clerkAdmin: clerkAdmin(env), identity: identity(store, env), benchmarks, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings }).connect(new StdioServerTransport());
+  await createServer(store, user, { clerkAdmin: clerkAdmin(env), identity: identity(store, env), benchmarks, builds, bd, desk, review, explore, hosting, modules, solana, gate, productionReviews, productHealth, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings }).connect(new StdioServerTransport());
 } else if (command === "serve-http") {
   const port = Number(values.port);
-  const { benchmarks, store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, liquidity, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env } = await openServices();
+  const { benchmarks, store, builds, bd, desk, review, explore, hosting, modules, solana, gate, productionReviews, productHealth, liquidity, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings, env } = await openServices();
   // Sign-in first, before anything starts: a server meant to require it (CLERK_PUBLISHABLE_KEY set) whose secret key
   // can't be read (not in the environment, none the key vault could open) stops here, never serving /mcp without it.
   let config: ReturnType<typeof clerkConfigFromEnv>;
@@ -301,6 +305,7 @@ if (values.help) {
   explore.startWorker();
   review.startWorker();
   gate.startWorker();
+  productionReviews.startWorker();
   benchmarks.startWorker();
   productHealth.startWorker();
   liquidity.startWorker();
@@ -323,7 +328,7 @@ if (values.help) {
         .finally(() => setTimeout(tick, wait));
     setTimeout(tick, 60_000);
   }
-  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(env), identity: identity(store, env), workspaceSync, benchmarks, builds, bd, desk, review, explore, hosting, modules, solana, gate, productHealth, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings }).listen(port, values.host, () =>
+  const http = createMcpHttpServer(store, clerk, { clerkAdmin: clerkAdmin(env), identity: identity(store, env), workspaceSync, benchmarks, builds, bd, desk, review, explore, hosting, modules, solana, gate, productionReviews, productHealth, covenants, treasury, esign, confidential, confidentialReleases, platformKeys, operationalSettings }).listen(port, values.host, () =>
     console.error(`mynt MCP listening on http://${values.host}:${port}/mcp${clerk ? " (Clerk whitelist auth)" : ""}`),
   );
   // Workspace offboardings with a step still to do (a provider was down), and Mynt invites made by workspace invites
@@ -379,6 +384,7 @@ if (values.help) {
     explore.stopWorker();
     review.stopWorker();
     gate.stopWorker();
+    productionReviews.stopWorker();
     productHealth.stopWorker();
     liquidity.stopWorker();
     covenants.stopWorker();

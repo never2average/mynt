@@ -13,7 +13,7 @@ import { SolanaService } from "../dist/solana/service.js";
 import { seedAppStages } from "../dist/promotion-schema.js";
 import { applyRegulatoryModel } from "../scripts/regulatory-model.mjs";
 import { loadFixture, runSponsoredProduct } from "../scripts/sponsored-product.mjs";
-import { CATALOG } from "./helpers.js";
+import { CATALOG, reviewedForProduction } from "./helpers.js";
 
 // Promotion between stages and the workspace attention list. Every check is Mynt's own reading of its records, so
 // these tests set those records (builds as the build service ends them, hosting as the VM reports it, keys, webhooks,
@@ -92,6 +92,8 @@ async function setup(store0) {
        VALUES ($1, $2, $3, 'build it', $4, 5, $5, $6, $7, $8, $9, $9, CASE WHEN $4 IN ('succeeded', 'blocked', 'failed', 'stopped', 'over_budget') THEN $9::timestamptz END)`,
       [id, ana.user.id, appId, status, "ab".repeat(32), extra.maxwell ? JSON.stringify(extra.maxwell) : null, extra.solana ?? false, extra.error ?? null, new Date(clock).toISOString()],
     );
+    // Each verified build has its complete production code review, unless the test is about the review itself.
+    if (status === "succeeded" && extra.reviewed !== false) await reviewedForProduction(pg, { appId, buildId: id, userId: ana.user.id });
     return id;
   };
   const host = async (appId, buildId, status = "running") => {
@@ -268,7 +270,7 @@ test("production checks: hosting, a live key, webhooks verified, no open finding
   const get = () => w.ana.call("get_promotion_checks", { app_id: app.id, to_stage: "production" });
   let r = await get();
   assert.equal(r.data.from_stage, "staging");
-  assert.deepEqual(r.data.checks.map((c) => c.id), ["build_verified", "audit_passed", "hosting_healthy", "licences", "program_agreements", "webhooks", "audit_findings", "program_gate"]);
+  assert.deepEqual(r.data.checks.map((c) => c.id), ["build_verified", "audit_passed", "hosting_healthy", "licences", "program_agreements", "webhooks", "audit_findings", "production_code_review", "program_gate"]);
   assert.equal(check(r, "hosting_healthy").status, "fail", "production runs on Mynt's hosting");
   // No target states: production fails it, even for an app on no regulated products.
   assert.equal(check(r, "licences").status, "fail");

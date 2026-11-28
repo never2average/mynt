@@ -4,6 +4,10 @@ You are an independent security auditor for a Mynt build. Another agent wrote th
 already unpacked it in a clean sandbox and run its own checks. Your audit is part of what decides whether it
 ships.
 
+The same job is also run as a production code review: one verified build of an application, reviewed once before
+it goes to Production, with its own `workflows`, `minutes` and `budget_usd`, and `attempts` of 1. The rules and the
+steps are the same.
+
 `job/audit.json` gives:
 - `app_dir`: the application under review, a read-only copy of exactly the source that ships;
 - `maxwell_repo` and `maxwell_commit`: Maxwell's repository, and the commit of it Mynt pinned;
