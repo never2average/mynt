@@ -98,6 +98,43 @@ test("the auditor's copy is the verified archive, read-only; git's own folders d
   }
 });
 
+test("a production review's copy is the commit's archive: fetched with a header file that is deleted, unpacked without its top folder, read-only, hashed", () => {
+  const f = fixture();
+  try {
+    // A commit's archive as a repository host serves it: one folder at the top, named for the commit.
+    const pack = join(f.root, "pack");
+    mkdirSync(join(pack, "acme-app-ccccccc", "api"), { recursive: true });
+    writeFileSync(join(pack, "acme-app-ccccccc", "api/index.ts"), "export const x = 1;\n");
+    writeFileSync(join(pack, "acme-app-ccccccc", "README.md"), "# app\n");
+    const archive = join(f.root, "commit.tgz");
+    assert.equal(spawnSync("tar", ["-czf", archive, "-C", pack, "acme-app-ccccccc"]).status, 0);
+    const header = join(f.V, "source.header");
+    writeFileSync(header, "Authorization: Bearer not-a-real-token\n");
+    const made = f.run("--review-copy", "file://" + archive, header);
+    assert.equal(made.status, 0, made.stderr);
+    const before = tree(made.stdout);
+    assert.ok(before, made.stdout);
+    assert.throws(() => statSync(header), /ENOENT/, "the header file is gone before anything else runs");
+    assert.equal(readFileSync(join(f.copy, "api/index.ts"), "utf8"), "export const x = 1;\n", "the source is what is inside the archive's top folder");
+    assert.equal(statSync(join(f.copy, "api/index.ts")).mode & 0o222, 0, "read-only");
+    assert.equal(tree(f.run("--rehash").stdout), before, "untouched, it hashes the same afterwards");
+    // A change to it is caught and named, as for a build's audit.
+    chmodSync(join(f.copy, "README.md"), 0o644);
+    writeFileSync(join(f.copy, "README.md"), "# changed\n");
+    assert.notEqual(tree(f.run("--rehash").stdout), before);
+    assert.match(readFileSync(join(f.V, "changed.txt"), "utf8"), /README\.md/);
+    // An archive that can't be fetched: no copy, and the header file is still deleted.
+    writeFileSync(header, "Authorization: Bearer not-a-real-token\n");
+    const missing = f.run("--review-copy", "file://" + join(f.root, "nothing.tgz"), header);
+    assert.equal(missing.status, 2);
+    assert.match(missing.stderr, /could not download the source/);
+    assert.throws(() => statSync(header), /ENOENT/);
+    assert.equal(f.run("--review-copy", "file://" + archive).status, 2, "it needs the header file's path");
+  } finally {
+    f.cleanup();
+  }
+});
+
 // Mynt's image stage (images.py, src/verify-images.ts), run for real against stand-ins for docker, syft and grype:
 // what it builds, what it scans, and what the image_scan and sbom checks then say.
 const { VERIFY_IMAGES_SCRIPT } = await import("../dist/verify-images.js");

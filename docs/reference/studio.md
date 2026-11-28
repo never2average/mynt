@@ -180,7 +180,7 @@ On your own products, the row has the labelled actions for its stage:
 | Action | What it does |
 |---|---|
 | **Create product** | Opens one sheet with the product's fields. The new product is listed as an Idea |
-| **Move to staging**, **Move to production** | Opens the approval sheet with Mynt's checks for the next stage |
+| **Move to staging**, **Move to production** | Opens the approval sheet with Mynt's checks for the next stage. For Production, "Production code review passed" is one of them: its row says where the review stands, and its **Request production review** button goes to the Security & risk tab |
 | **Move back** | Moves the product to an earlier stage |
 | **Archive**, **Unarchive** | Opens the archive sheet. The **Archived** filter lists your archived products |
 
@@ -229,7 +229,7 @@ Each tab is read live from Mynt for this app only: when it is opened, when the p
 | **Products** | The products this app uses, each with its stage and the licence providers sponsoring it, by state. An app holds no licences of its own; its products do |
 | **Agreements** | The program agreements Production needs, the app's agreements with firms, and its vendor contracts, with **Propose agreement** for owners and admins |
 | **Customers** | The customer personas this app targets, from its products, and introductions in progress |
-| **Security & risk** | The app's risk register (**Add risk**, **Review risk**; each risk with its inherent, control and residual scores, and a row opening [the risk's detail](risk.md#a-risks-detail)), Mynt's build checks and security events, and the signals Mynt measures around the app: fraud, its vendors, conduct and its products |
+| **Security & risk** | The app's risk register (**Add risk**, **Review risk**; each risk with its inherent, control and residual scores, and a row opening [the risk's detail](risk.md#a-risks-detail)), Mynt's build checks and security events, its [production code reviews](apps-and-builds.md#the-production-code-review) and the signals Mynt measures around the app: fraud, its vendors, conduct and its products. Production code reviews is one table (Build, Status, Findings by severity, Coverage, Cost, Time, Started by, When; "Not measured" where Mynt has no figure), and a row opens that review's findings table. **Request production review** (owners and admins) opens a sheet with the build to review, how long it may take and what it costs at most; **Stop review** is in a running review's sheet. An exception a Mynt admin recorded for a build is shown with its reason |
 | **P&L** | Money moved and costs for this app, with the statement |
 | **SDK** | Each product's integration kit: action, access, permitted actions, fields, contract and hand-off |
 | **Activity** | The app's builds and its audit events |

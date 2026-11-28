@@ -24,6 +24,7 @@ export const VERIFY_TOOLS = { gitleaks: GITLEAKS_VERSION, syft: SYFT_VERSION, gr
 
 export const VERIFY_SCRIPT = String.raw`#!/usr/bin/env bash
 # Mynt build verification. Usage: verify.sh <source-url> <sha256>  |  verify.sh --audit-copy <sha256>  |  verify.sh --rehash
+#   |  verify.sh --review-copy <archive-url> <header-file>
 # The paths can be moved for Mynt's own tests of this script; in a verification sandbox nothing sets them.
 V=$MYNT_VERIFY_DIR; [ -n "$V" ] || V=${VERIFY_DIR}
 APP=$MYNT_VERIFY_APP; [ -n "$APP" ] || APP=${VERIFY_APP}
@@ -71,6 +72,27 @@ if [ "$#" -gt 0 ] && [ "$1" = "--audit-copy" ]; then
   tar -xzf "$V/app.tgz" -C "$AUDIT" || { echo "could not unpack the source" >&2; exit 2; }
   tree_sums "$AUDIT" "$V/before"
   # Read-only, except Git's own folders, so the git commands the auditor runs work as they would anywhere.
+  chmod -R a-w "$AUDIT" && find "$AUDIT" -name .git -prune -exec chmod -R u+w {} + 2>/dev/null
+  echo "audit-copy $(cat "$V/before.sha")"
+  exit 0
+fi
+# A production code review (production-reviews.ts) reads a build after it ended: the commit the build pushed, which
+# is what hosting fetches when that build goes online. The commit's archive is fetched with a request header Mynt
+# wrote to a file (deleted here before anything else runs, whatever happens) and unpacked into the same read-only
+# copy, hashed the same way.
+if [ "$#" -gt 0 ] && [ "$1" = "--review-copy" ]; then
+  [ "$#" -ge 3 ] || { echo "usage: verify.sh --review-copy <archive-url> <header-file>" >&2; exit 2; }
+  H="$3"
+  trap 'rm -f "$H"' EXIT
+  if [ -s "$H" ]; then curl -fsSL -H @"$H" "$2" -o "$V/review.tgz"; else curl -fsSL "$2" -o "$V/review.tgz"; fi
+  got=$?
+  rm -f "$H"
+  [ "$got" = 0 ] || { echo "could not download the source" >&2; exit 2; }
+  chmod -R u+w "$AUDIT" 2>/dev/null; rm -rf "$AUDIT"; mkdir -p "$AUDIT"
+  # A commit's archive has one folder at its top, named for the commit: the source is what is inside it.
+  tar -xzf "$V/review.tgz" -C "$AUDIT" --strip-components=1 || { echo "could not unpack the source" >&2; exit 2; }
+  [ -n "$(ls -A "$AUDIT")" ] || { echo "the source archive is empty" >&2; exit 2; }
+  tree_sums "$AUDIT" "$V/before"
   chmod -R a-w "$AUDIT" && find "$AUDIT" -name .git -prune -exec chmod -R u+w {} + 2>/dev/null
   echo "audit-copy $(cat "$V/before.sha")"
   exit 0

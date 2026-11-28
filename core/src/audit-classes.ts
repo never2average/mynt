@@ -16,6 +16,12 @@ const SECURITY = [
   "auto_approve_repository_connection",
   "approve_repository_connection",
   "reject_repository_connection",
+  // the production code review of a build before Production (production-reviews.ts): asked, stopped, ended, and a
+  // Mynt admin's recorded exception for one build
+  "request_production_review",
+  "stop_production_review",
+  "production_review_finished",
+  "waive_production_review",
   // the mainnet program gate and its vulnerability flags
   "request_mainnet_review",
   "approve_mainnet_program",

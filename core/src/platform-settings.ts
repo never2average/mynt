@@ -91,6 +91,41 @@ export const PLATFORM_SETTINGS: readonly PlatformSettingSpec[] = [
     used_by: RED_TEAM,
     check: { type: "text", pattern: /^[a-z][a-z0-9_]{1,39}$/, words: "a programme's name as the provider writes it: lower-case letters, digits and underscores", max: 40 },
   },
+  // The production code review (production-reviews.ts): one full review of the build that goes to Production.
+  {
+    key: "PRODUCTION_REVIEW_WORKFLOWS",
+    default: "execute-scr",
+    kind: "list",
+    description: "The production code review's workflows, in order",
+    used_by: "Production code reviews",
+    check: { type: "list", item: /^[a-z0-9][a-z0-9-]{1,48}$/, words: "workflow names separated by commas (lower-case letters, digits and dashes)", max: 12 },
+  },
+  {
+    key: "PRODUCTION_REVIEW_MODEL",
+    default: "claude-sonnet-5-5",
+    kind: "text",
+    description: "The model the production code review runs on",
+    used_by: "Production code reviews",
+    check: { type: "text", pattern: /^[a-z0-9][a-z0-9.@:_-]{2,79}$/, words: "a model id: lower-case letters, digits, dots and dashes", max: 80 },
+  },
+  { key: "PRODUCTION_REVIEW_MINUTES", default: "180", kind: "minutes", description: "Time limit for one production code review", used_by: "Production code reviews", check: { type: "number", min: 10, max: 720, integer: true } },
+  { key: "PRODUCTION_REVIEW_CAP_USD", default: "60", kind: "usd", description: "Spend cap for one production code review (Mynt's own spend)", used_by: "Production code reviews", check: usd(1, 1_000) },
+  {
+    key: "PRODUCTION_REVIEW_WORKSPACE_MONTHLY",
+    default: "4",
+    kind: "count",
+    description: "The most production code reviews one workspace's owners and admins may start per calendar month",
+    used_by: "Production code reviews",
+    check: { type: "number", min: 1, max: 500, integer: true },
+  },
+  {
+    key: "PRODUCTION_REVIEW_WORKSPACE_MONTHLY_USD",
+    default: "200",
+    kind: "usd",
+    description: "The most one workspace's production code reviews may spend per calendar month, counting each review in progress at its cap",
+    used_by: "Production code reviews",
+    check: usd(1, 50_000),
+  },
 ];
 const SPEC = new Map(PLATFORM_SETTINGS.map((s) => [s.key, s]));
 export const PLATFORM_SETTING_KEYS = PLATFORM_SETTINGS.map((s) => s.key) as [string, ...string[]];

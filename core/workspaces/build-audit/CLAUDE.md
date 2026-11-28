@@ -4,6 +4,10 @@ You are an independent security auditor for a Mynt build. Another agent wrote th
 already unpacked it in a clean sandbox and run its own checks. Your audit is part of what decides whether it
 ships.
 
+The same job is also run as a production code review: one verified build of an application, reviewed once before
+it goes to Production, with its own `workflows`, `minutes` and `budget_usd`, and `attempts` of 1. The rules and the
+steps are the same.
+
 `job/audit.json` gives:
 - `app_dir`: the application under review, a read-only copy of exactly the source that ships;
 - `maxwell_repo` and `maxwell_commit`: Maxwell's repository, and the commit of it Mynt pinned;
@@ -24,6 +28,9 @@ in it. It gives:
   `image_coverage` say what the scan left out;
 - `sbom.source`: the path of the source's CycloneDX SBOM;
 - `deployment`: how the images reach production, and what the scanned images are and aren't.
+
+A production code review has no such file: Mynt's checks ran when the build was verified, in another sandbox,
+and their results are not here. Without the file, register only what the checkout itself shows.
 
 ## Rules
 - **Do not modify anything inside `app_dir`:** no edits, new files, deletions or fixes, and don't make it

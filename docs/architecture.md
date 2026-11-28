@@ -256,7 +256,7 @@ There are eight agent workspace folders under `core/workspaces/`:
 | Folder | The agent | What Mynt checks afterwards | Code |
 |---|---|---|---|
 | `coding-build/` | The coding team | In a fresh sandbox with no secrets: tests, lint, types, `gitleaks`, a dependency audit, a `syft` software bill of materials, a `grype` scan of the images it builds, disclosures, and a re-hash of the source. Mynt opens the pull request | `core/src/builds.ts`, `core/src/verify-script.ts` |
-| `build-audit/` | The independent security audit of a build | Runs only with `BUILD_AUDIT=maxwell`. Critical or high findings block the build | `core/src/builds.ts` |
+| `build-audit/` | The independent security audit of a build, and the production code review of a build before Production | The audit runs only with `BUILD_AUDIT=maxwell`; critical or high findings block the build. The review is asked for per build; Mynt reads its report, and only a complete one with no critical or high finding passes the production check | `core/src/builds.ts`, `core/src/production-reviews.ts` |
 | `product-desk/` | The product desk | Mynt runs the agent's model code itself, in a clean sandbox, and keeps only its own numbers | `core/src/desk.ts`, `core/src/desk-runner.ts` |
 | `algorithm-explorer/` | Algorithm explorers | Mynt scores every kept variant on a holdout only it sees | `core/src/explore.ts`, `core/src/explore-score.ts`, `core/src/explore-data.ts` |
 | `governance-review/` | The governance desk | Mynt fetches every cited page again, checks each quote, and computes the recommendation. A Mynt admin decides | `core/src/review.ts`, `core/src/evidence.ts` |
@@ -282,7 +282,7 @@ See [Hosting](reference/apps-and-builds.md#hosting).
 
 A workspace is a team that owns apps. With Clerk as the sign-in provider, each workspace is one organization at the identity provider. Mynt's tools write there (`core/src/org-directory.ts` is the interface, `core/src/clerk-orgs.ts` the adapter), and Mynt reads back through the organization webhook and a reconcile worker (`core/src/workspace-sync.ts`). Membership, invitations and offboarding are in `core/src/workspaces.ts`.
 
-An app moves through idea, staging and production only through Mynt's checks (`core/src/promotions.ts`, `core/src/promotion-schema.ts`). Production gates real money. `core/src/attention.ts` lists what needs a workspace's attention, `core/src/workspace-compliance.ts` its licences, obligations and audit trail, and `core/src/workspace-pnl.ts` its profit and loss.
+An app moves through idea, staging and production only through Mynt's checks (`core/src/promotions.ts`, `core/src/promotion-schema.ts`). Production gates real money. Before a build goes there, Mynt reviews its code in full, once, on that exact build (`core/src/production-reviews.ts`, run through the build audit's machinery; `core/src/production-review-records.ts` is what the checks read). `core/src/attention.ts` lists what needs a workspace's attention, `core/src/workspace-compliance.ts` its licences, obligations and audit trail, and `core/src/workspace-pnl.ts` its profit and loss.
 
 See [Workspaces and sign-in](reference/workspaces-and-sign-in.md).
 
@@ -349,7 +349,7 @@ There are about 165 tables. `core/src/store.ts` creates the core ones; each feat
 | Vendors and the ramp | `core/src/store.ts` | `service_types`, `vendor_offerings`, `vendor_conformance_runs`, `vendor_subscriptions`, `vendor_action_runs`, `vendor_usage`, `ramp_adapter_transfers`, `ramp_link_requests` |
 | Apps and runtime | `core/src/store.ts`, `core/src/modules.ts` | `apps`, `app_releases`, `app_journeys`, `api_keys`, `handoffs`, `app_events`, `client_sessions`, `client_evidence`, `customer_vault`, `webhooks`, `webhook_deliveries`, `sdks`, `sdk_modules`, `module_namespaces` |
 | Campaigns | `core/src/store.ts` | `segments`, `campaigns` |
-| Workspaces and stages | `core/src/workspaces.ts`, `core/src/promotion-schema.ts`, `core/src/chat-sessions-schema.ts` | `workspaces`, `workspace_members`, `workspace_invites`, `workspace_offboards`, `org_webhook_events`, `app_promotions`, `promotion_signoffs`, `chat_sessions` |
+| Workspaces and stages | `core/src/workspaces.ts`, `core/src/promotion-schema.ts`, `core/src/chat-sessions-schema.ts` | `workspaces`, `workspace_members`, `workspace_invites`, `workspace_offboards`, `org_webhook_events`, `app_promotions`, `promotion_signoffs`, `production_reviews`, `production_review_waivers`, `chat_sessions` |
 | Agreements and risk | `core/src/app-agreements-schema.ts`, `core/src/agreement-esign-schema.ts`, `core/src/agreement-audits-schema.ts`, `core/src/agreement-slas-schema.ts`, `core/src/risk-register-schema.ts`, `core/src/risk-models-schema.ts` | `app_agreements`, `app_target_segments`, `agreement_templates`, `app_agreement_documents`, `agreement_audits`, `agreement_slas`, `risk_register`, `risk_factors`, `risk_treatments`, `risk_controls`, `risk_links`, `risk_grading_versions`, `risk_models` |
 | Money and liquidity | `core/src/store.ts`, `core/src/liquidity-schema.ts`, `core/src/covenant-schema.ts`, `core/src/product-health.ts` | `money_rails`, `money_movements`, `customer_verified_states`, `partner_ledger_sources`, `liquidity_pools`, `pool_commitments`, `pool_withdrawals`, `covenants`, `covenant_breaches`, `product_health_snapshots` |
 | On-chain | `core/src/solana/service.ts`, `core/src/solana/mainnet-gate.ts`, `core/src/treasury.ts`, `core/src/build-env.ts` | `solana_programs`, `solana_program_versions`, `solana_keys`, `solana_mainnet_reviews`, `treasury_pools`, `treasury_deposits`, `treasury_builds`, `solana_build_envs` |
@@ -367,6 +367,7 @@ There are about 165 tables. `core/src/store.ts` creates the core ones; each feat
 | Loop | Interval | Setting | Does |
 |---|---|---|---|
 | Build worker | 5 seconds | `BUILD_POLL_MS` | Starts, steers, meters, verifies and finishes coding-agent builds (`core/src/builds.ts`) |
+| Production review worker | 15 seconds | `PRODUCTION_REVIEW_POLL_MS` | Starts, meters, ends and reads production code reviews (`core/src/production-reviews.ts`) |
 | Product desk worker | 5 seconds | `DESK_POLL_MS` | Runs desk jobs (`core/src/desk.ts`) |
 | Exploration worker | 5 seconds | `DESK_POLL_MS` | Runs algorithm explorations (`core/src/explore.ts`) |
 | Governance desk worker | 10 seconds | `REVIEW_POLL_MS` | Runs review cases (`core/src/review.ts`) |

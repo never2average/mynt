@@ -1,6 +1,7 @@
 // The visual harness: one studio screen per page (?screen=<id>&theme=light|dark), in the studio's
 // real shell (sidebar and header) with the tests' fixtures, and the API answered from fixtures
 // in the browser (no server). Not part of the app; nothing here ships.
+import { reviewsFrom } from "@/lib/production-reviews";
 import "@/app/globals.css";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -296,6 +297,18 @@ const panel: Record<string, unknown> = {
       { id: "audit_findings", label: "No open critical findings", status: "fail", detail: "1 high finding", fix: null },
     ],
     checksReason: null,
+    reviews: reviewsFrom({
+      reviews: [
+        { id: "5b1f0c1e-0000-4000-8000-000000000001", app_id: "a1", build_id: "9c2d7e10-0000-4000-8000-000000000002", status: "complete", findings: { critical: 0, high: 0, medium: 1, low: 2 }, coverage: { reviewed: ["execute-scr"], not_reviewed: [] }, cost_usd: 21.25, seconds: 4290, limits: { workflows: ["execute-scr"], minutes: 180, cap_usd: 60, model: "claude-sonnet-5-5" }, requested_by: { id: "u2", name: "Ines" }, created_at: "2026-11-20T10:00:00.000Z" },
+        { id: "5b1f0c1e-0000-4000-8000-000000000003", app_id: "a1", build_id: "9c2d7e10-0000-4000-8000-000000000004", status: "incomplete", findings: null, coverage: null, cost_usd: null, seconds: null, limits: { workflows: ["execute-scr"], minutes: 180, cap_usd: 60, model: "claude-sonnet-5-5" }, reason: "The review ran out of time (180 min) before it finished", requested_by: { id: "u2", name: "Ines" }, created_at: "2026-11-18T10:00:00.000Z" },
+      ],
+      waivers: [],
+      limits: { workflows: ["execute-scr"], model: "claude-sonnet-5-5", minutes: 180, cap_usd: 60, workspace_monthly_reviews: 4, workspace_monthly_usd: 200 },
+      available: true,
+      builds: [{ id: "9c2d7e10-0000-4000-8000-000000000002", verified_at: "2026-11-20T09:00:00.000Z", commit_sha: "c".repeat(40), review_status: "complete" }],
+      can_request: true,
+      workspace_usage: { month: "November 2026", reviews: 2, usd: 81.25 },
+    })!,
     register: registerFrom(APP_RISKS, [{ userId: "u2", name: "Ines" }]),
     signals: signalsFrom(APP_RISKS),
   },

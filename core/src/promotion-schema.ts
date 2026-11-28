@@ -54,6 +54,66 @@ export const PROMOTION_TABLES = `
     at timestamptz NOT NULL DEFAULT now(),
     apps integer NOT NULL DEFAULT 0
   );
+  -- A production code review (production-reviews.ts): Mynt's full agent code review of one verified build of an app
+  -- or service, required before that build goes to Production. Its report has the build audit's shape
+  -- (build_runs.maxwell): counts by severity, findings, the workflows that ran and those that didn't, with why.
+  CREATE TABLE IF NOT EXISTS ${T}.production_reviews (
+    id uuid PRIMARY KEY,
+    app_id uuid NOT NULL REFERENCES ${T}.apps(id),
+    workspace_id uuid,
+    build_id uuid NOT NULL,
+    source_sha256 text,
+    commit_sha text,
+    repository text,
+    status text NOT NULL CHECK (status IN ('queued', 'running', 'complete', 'incomplete', 'refused', 'failed', 'stopped')),
+    step text,
+    -- What it ran with, as the settings stood when it was asked for.
+    workflows text[] NOT NULL DEFAULT '{}',
+    minutes integer NOT NULL,
+    cap_usd numeric NOT NULL,
+    model text NOT NULL,
+    tool_commit text,
+    requested_by uuid REFERENCES ${T}.users(id),
+    by_admin boolean NOT NULL DEFAULT false,
+    sandbox_id text,
+    process_id text,
+    token_hash text,
+    tree_sha256 text,
+    report jsonb,
+    -- Measured, or null: never 0 for want of a measurement.
+    cost_usd numeric,
+    model_cost_usd numeric,
+    sandbox_cost_usd numeric,
+    -- Why it isn't complete (time, budget, refused, tool, stalled, no_report, incomplete, changed, stopped, error),
+    -- in words, and what to do about it.
+    problem text,
+    reason text,
+    next_step text,
+    run jsonb,
+    stopped_by uuid REFERENCES ${T}.users(id),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    started_at timestamptz,
+    review_started_at timestamptz,
+    finished_at timestamptz,
+    updated_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS production_reviews_build_idx ON ${T}.production_reviews (app_id, build_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS production_reviews_workspace_idx ON ${T}.production_reviews (workspace_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS production_reviews_status_idx ON ${T}.production_reviews (status, created_at);
+  -- One review in progress per app at a time.
+  CREATE UNIQUE INDEX IF NOT EXISTS production_reviews_active_idx ON ${T}.production_reviews (app_id) WHERE status IN ('queued', 'running');
+  -- A Mynt admin's recorded exception for one build: it may go to Production without a complete review, for the
+  -- reason given. One per build.
+  CREATE TABLE IF NOT EXISTS ${T}.production_review_waivers (
+    id uuid PRIMARY KEY,
+    app_id uuid NOT NULL REFERENCES ${T}.apps(id),
+    workspace_id uuid,
+    build_id uuid NOT NULL,
+    reason text NOT NULL,
+    waived_by uuid REFERENCES ${T}.users(id),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (app_id, build_id)
+  );
 `;
 
 // Once, when promotions arrive: every app already there keeps the stage Mynt derived for it (appStages), so nothing

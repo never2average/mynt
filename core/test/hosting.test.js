@@ -8,6 +8,7 @@ import { createMcpHttpServer } from "../dist/http.js";
 import { ModuleRegistry } from "../dist/modules.js";
 import { createServer } from "../dist/server.js";
 import { publishDefined, setup, definitionFor } from "./v2-helpers.js";
+import { reviewedForProduction } from "./helpers.js";
 
 // Records what Mynt asks of the cloud.
 function fakeProvider() {
@@ -79,9 +80,12 @@ async function world({ provider = fakeProvider(), config = CONFIG } = {}) {
   // And the developer's connection to the repository, approved by an admin (repo-approvals.ts).
   await ctx.store.db.exec(`CREATE TABLE IF NOT EXISTS financial_products.repo_connections (developer_id uuid, repository text, approval text)`);
   await ctx.store.db.query("INSERT INTO financial_products.repo_connections (developer_id, repository, approval) VALUES ($1, 'dev/saver', 'approved')", [devUser.id]);
-  const build = async (status, sha = "a".repeat(40)) => {
+  // `reviewed`: a verified build has its complete production code review (a build goes online in Production only with
+  // one), unless the test is about the review itself.
+  const build = async (status, sha = "a".repeat(40), { reviewed = true } = {}) => {
     const id = randomUUID();
     await ctx.store.db.query("INSERT INTO financial_products.build_runs (id, developer_id, app_id, repository, commit_sha, status) VALUES ($1, $2, $3, $4, $5, $6)", [id, devUser.id, app.id, "dev/saver", sha, status]);
+    if (status === "succeeded" && reviewed) await reviewedForProduction(ctx.store.db, { appId: app.id, buildId: id, userId: devUser.id });
     return id;
   };
   const http = createMcpHttpServer(ctx.store, null, { hosting, modules }).listen(0, "127.0.0.1");
@@ -931,8 +935,8 @@ test("an app in Production: only owners and admins change what is online or run 
       `ALTER TABLE financial_products.build_runs ADD COLUMN IF NOT EXISTS maxwell jsonb, ADD COLUMN IF NOT EXISTS solana boolean DEFAULT false, ADD COLUMN IF NOT EXISTS source_sha256 text DEFAULT 'abab',
          ADD COLUMN IF NOT EXISTS error text, ADD COLUMN IF NOT EXISTS finished_at timestamptz, ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT clock_timestamp(), ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT clock_timestamp()`,
     );
-    const build = async (maxwell, solana = false) => {
-      const id = await w.build("succeeded");
+    const build = async (maxwell, solana = false, { reviewed = true } = {}) => {
+      const id = await w.build("succeeded", undefined, { reviewed });
       await db.query("UPDATE financial_products.build_runs SET maxwell = $2, solana = $3 WHERE id = $1", [id, maxwell ? JSON.stringify(maxwell) : null, solana]);
       return id;
     };
@@ -1015,6 +1019,30 @@ test("an app in Production: only owners and admins change what is online or run 
     await db.query("UPDATE financial_products.build_runs SET app_id = NULL WHERE id = $1", [stray]);
     assert.match((await call(dev, "deploy_app", { app_id: w.app.id, build_id: stray })).data.error, /isn't a build of this app that passed Mynt's verification/);
     assert.equal(await online(), first);
+
+    // A build with no production code review of its own: refused, though an earlier build of the app has one. A
+    // review that is still running, or that didn't finish, stops it too, with its reason.
+    const unreviewed = await build(CLEAN, false, { reviewed: false });
+    const noReview = await call(dev, "deploy_app", { app_id: w.app.id, build_id: unreviewed });
+    assert.equal(noReview.isError, true);
+    assert.match(noReview.data.error, new RegExp(`Production code review passed: No production code review of build ${unreviewed.slice(0, 8)} yet: an owner or admin of the workspace requests one.* \\(request_production_review\\)`));
+    assert.deepEqual((await refusals()).at(-1).details.failing, ["production_code_review"]);
+    const review = (status, extra = {}) =>
+      db.query(
+        `INSERT INTO financial_products.production_reviews (id, app_id, build_id, status, workflows, minutes, cap_usd, model, reason, next_step, started_at, created_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, '{execute-scr}', 180, 60, 'claude-sonnet-5-5', $4, $5, now(), clock_timestamp())`,
+        [w.app.id, unreviewed, status, extra.reason ?? null, extra.next_step ?? null],
+      );
+    await review("running");
+    assert.match((await call(dev, "deploy_app", { app_id: w.app.id, build_id: unreviewed })).data.error, /Production code review passed: Mynt's code review of build [0-9a-f]{8} is running/);
+    await db.query("UPDATE financial_products.production_reviews SET status = 'incomplete', reason = $2, next_step = $3 WHERE build_id = $1", [unreviewed, "The review ran out of time (180 min) before it finished", "Ask a Mynt admin to raise PRODUCTION_REVIEW_MINUTES, then request the review again."]);
+    assert.match((await call(dev, "deploy_app", { app_id: w.app.id, build_id: unreviewed })).data.error, /Production code review passed: The review ran out of time \(180 min\) before it finished\. Ask a Mynt admin to raise PRODUCTION_REVIEW_MINUTES/);
+    assert.equal(await online(), first);
+    // Complete, it goes online.
+    await db.query("UPDATE financial_products.production_reviews SET status = 'complete', reason = NULL, next_step = NULL, finished_at = now(), report = $2 WHERE build_id = $1", [unreviewed, JSON.stringify({ complete: true, counts: { critical: 0, high: 0, medium: 0, low: 0 }, workflows_run: ["execute-scr"] })]);
+    assert.equal((await call(dev, "deploy_app", { app_id: w.app.id, build_id: unreviewed })).isError, false);
+    await w.hosting.pending;
+    assert.equal(await online(), unreviewed);
 
     // A build that passes them goes online for an owner, and for an admin.
     const ok = await call(dev, "deploy_app", { app_id: w.app.id, build_id: good });

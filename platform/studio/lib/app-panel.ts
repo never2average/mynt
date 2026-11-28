@@ -4,6 +4,7 @@
 // Tabs show information; anything that changes state (promoting, moving back, setting target
 // states) is a labelled action elsewhere (the top bar's Promote button and its sheet). Pure: the
 // route reads Mynt's replies into these shapes, and the tabs and the tests share them.
+import type { ProductionReviews, ReviewsUnavailable } from "./production-reviews";
 import type { AppSignals, RiskRegister, Unavailable } from "./risk-register";
 import { esignOf, esignStatusLine, SIGNED_IN_TEST_MODE, signedInTestMode, type EsignInfo } from "./agreement-esign";
 import type { AgreementAuditSummary } from "./agreement-audits";
@@ -392,8 +393,10 @@ export type AppSecurity = {
   // Mynt's own build checks for the app's next stage (verification, independent audit, findings, the program gate).
   checks: PromotionCheck[];
   checksReason: string | null;
+  // Mynt's production code reviews of this app's builds (lib/production-reviews.ts), or why they can't be shown.
+  reviews: ProductionReviews | ReviewsUnavailable;
 };
-export const SECURITY_CHECKS = ["build_verified", "audit_passed", "audit_findings", "program_gate"];
+export const SECURITY_CHECKS = ["build_verified", "audit_passed", "audit_findings", "production_code_review", "program_gate"];
 
 export function eventsFrom(reply: unknown, appId: string): PanelEvent[] {
   return (isObj(reply) ? arr(reply.events) : [])

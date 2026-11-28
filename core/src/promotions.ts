@@ -7,6 +7,7 @@ import { inTransaction, type Db } from "./db.js";
 import type { App, Store, User } from "./store.js";
 import { coveredStates, US_STATE_NAMES } from "./workspace-compliance.js";
 import { lockAppStage } from "./promotion-schema.js";
+import { reviewCounts, reviewStanding, seriousOf, type ReviewStanding } from "./production-review-records.js";
 import { appRole, frozenReason, isUuid, memberApp, type AppStage } from "./workspaces.js";
 
 // Promoting an app between the studio's folders: idea → staging → production, one step at a time, and back down.
@@ -27,6 +28,13 @@ import { appRole, frozenReason, isUuid, memberApp, type AppStage } from "./works
 // The admin who decides is never the one who asked, nor anyone in the app's workspace. The sign-off is also bound to what made it
 // necessary (its basis: programs, rails): if that changes without a new build, it no longer counts. Production promotes
 // what runs: the hosted build must be the verified build the checks and sign-off are about.
+//
+// The production code review (production-reviews.ts): moving to Production needs Mynt's full agent code review of the
+// very build that goes online, complete and with no critical or high finding. A build's own audit runs only the
+// workflows that fit a per-build limit; the review that reads the code runs once, on that build. A review that didn't
+// finish (out of time or budget, refused by the model provider, a broken tool, stopped) never passes. The one way
+// past it is a Mynt admin's recorded exception for that one build (waive_production_review), shown as it is. An app
+// that was in Production before the review was required stays online: its next build needs one.
 //
 // After promotion the same checks keep guarding what is online: for an app in Production, deploy_app puts a build
 // online only for an owner or admin of its workspace, and only if the checks that are about the build pass for that
@@ -279,9 +287,13 @@ async function webhookCheck(q: Q, app: App): Promise<PromotionCheck> {
   return { ...base, status: "pass", detail: `${hooks.length} webhook(s) on, each receiving deliveries signed with a secret a member holds` };
 }
 
-function findingsCheck(appId: string, s: State, strict: boolean): PromotionCheck {
+function findingsCheck(appId: string, s: State, strict: boolean, standing?: ReviewStanding): PromotionCheck {
   const base = { id: "audit_findings", label: "No open blocking audit findings" };
   if (!s.verified) return { ...base, status: "pending", detail: "Waits for a build Mynt verified" };
+  // The production code review's findings are this build's too, whether or not the review finished.
+  const reviewed = seriousOf(standing?.review?.report);
+  if (reviewed > 0)
+    return { ...base, status: "fail", detail: `${reviewed} critical or high finding(s) in the production code review of build ${short(s.verified.id)}: fix them and build again`, fix: { label: "Open the review", href: reviewHref(appId), tool: "get_production_review" } };
   const latest = s.newestFinished;
   if (latest && latest.id !== s.verified.id) {
     if (serious(latest) > 0) return { ...base, status: "fail", detail: `The newest build, ${short(latest.id)}, has ${serious(latest)} critical or high audit finding(s)`, fix: { label: "Open the build", href: `/${appId}` } };
@@ -294,6 +306,44 @@ function findingsCheck(appId: string, s: State, strict: boolean): PromotionCheck
       ? { ...base, status: "fail", detail: "No independent audit ran on this build, so its findings are unknown; an app that moves value needs one", fix: { label: "Build again with the independent audit on", href: `/${appId}` } }
       : { ...base, status: "warn", detail: "No independent audit ran on this build, so there are no findings to read" };
   return { ...base, status: "pass", detail: "None in the latest audited build" };
+}
+
+// ---- the production code review of the build that goes online ----
+
+const reviewHref = (appId: string, service = false) => (service ? `/services/${appId}?tab=security` : `/${appId}?tab=security`);
+
+/**
+ * "Production code review passed", for one build. `grandfathered`: the build is already online in Production and has
+ * never had a review asked for it (it went online before reviews were required), so it only warns; a promotion and a
+ * deploy never pass that.
+ */
+function reviewCheck(app: Pick<App, "id" | "kind">, build: Row | undefined, standing: ReviewStanding | undefined, o: { grandfathered?: boolean } = {}): PromotionCheck {
+  const base = { id: "production_code_review", label: "Production code review passed" };
+  const href = reviewHref(app.id, app.kind === "service");
+  const ask = { label: "Request production review", href, tool: "request_production_review" };
+  if (!build) return { ...base, status: "pending", detail: "Waits for a build Mynt verified" };
+  const name = `build ${short(build.id)}`;
+  const r = standing?.review;
+  const w = standing?.waiver;
+  const serious = seriousOf(r?.report);
+  const c = reviewCounts(r?.report);
+  if (r?.status === "complete") {
+    if (serious > 0) return { ...base, status: "fail", detail: `Mynt's code review of ${name} found ${serious} critical or high finding(s): fix them and build again; the new build needs its own review`, fix: { label: "Open the review", href, tool: "get_production_review" } };
+    return { ...base, status: "pass", detail: `Mynt's code review of ${name} finished on ${iso(r.finished_at ?? r.updated_at)!.slice(0, 10)} with no critical or high finding (medium ${c?.medium ?? 0}, low ${c?.low ?? 0}; ${((r.workflows as string[] | null) ?? []).join(", ")})` };
+  }
+  // A review that recorded a critical or high finding before it ended is never waived.
+  if (serious > 0) return { ...base, status: "fail", detail: `Mynt's code review of ${name} recorded ${serious} critical or high finding(s) before it ended ${r!.status}: fix them and build again; the new build needs its own review`, fix: { label: "Open the review", href, tool: "get_production_review" } };
+  if (w) {
+    const by = [w.waived_by_name, iso(w.created_at)?.slice(0, 10)].filter(Boolean).join(", ");
+    return { ...base, status: "pass", detail: `Waived by a Mynt admin: ${w.reason}${by ? ` (${by})` : ""}. No complete code review ran on ${name}${r ? `; the last one ended ${r.status}` : ""}` };
+  }
+  if (!r) {
+    if (o.grandfathered) return { ...base, status: "warn", detail: `${name[0].toUpperCase()}${name.slice(1)} went online before production code reviews were required, so it has none and stays online. The next build needs its own review before it goes online`, fix: ask };
+    return { ...base, status: "fail", detail: `No production code review of ${name} yet: an owner or admin of the workspace requests one. It is Mynt's full code review of the build that goes online, and takes a while`, fix: ask };
+  }
+  if (r.status === "queued" || r.status === "running") return { ...base, status: "pending", detail: `Mynt's code review of ${name} is ${r.status}${r.started_at ? ` (started ${iso(r.started_at)!.slice(0, 16).replace("T", " ")} UTC; up to ${r.minutes} min)` : ""}`, fix: { label: "Open the review", href, tool: "get_production_review" } };
+  // Incomplete, refused, failed or stopped: never a pass. The review's own words say why and what to do.
+  return { ...base, status: "fail", detail: `${r.reason ?? `Mynt's code review of ${name} ended ${r.status}`}. ${r.next_step ?? "Request the review again"}`, fix: ask };
 }
 
 async function programsOf(q: Q, appId: string, s: State) {
@@ -462,8 +512,11 @@ export async function productionBlockers(store: Store, appId: string, buildId: s
   if (!build || build.status !== "succeeded") return [`Latest build verified by Mynt: build ${buildId ? short(buildId) : "(none)"} didn't pass Mynt's verification`];
   // The same checks, about this build.
   const on: State = { ...s, verified: build, newestFinished: build };
-  const checks = [...(await serviceChecks(q, store, app, on)).filter((c) => c.id !== "service_conformance"), auditCheck(on, { production: true, strict: false }), findingsCheck(app.id, on, false)];
-  return checks.filter((c) => c.status === "fail").map((c) => `${c.label}: ${c.detail}`);
+  const standing = await reviewStanding(q, app.id, build.id as string);
+  const review = reviewCheck(app, build, standing);
+  const checks = [...(await serviceChecks(q, store, app, on)).filter((c) => c.id !== "service_conformance"), auditCheck(on, { production: true, strict: false }), findingsCheck(app.id, on, false, standing)];
+  // The review of this very build: one still running stops it as a failed one does.
+  return [...checks.filter((c) => c.status === "fail"), ...(review.status === "pass" ? [] : [review])].map((c) => `${c.label}: ${c.detail}`);
 }
 
 /**
@@ -474,6 +527,8 @@ export async function productionBlockers(store: Store, appId: string, buildId: s
  * - it is a build of this app that Mynt verified;
  * - its independent audit passed (a build with no audit only warns, as in promotion, unless the app moves value);
  * - it has no open critical or high audit findings;
+ * - its own production code review is complete, with no critical or high finding (or a Mynt admin recorded an
+ *   exception for this build): a new build can't go online on the strength of an older build's review;
  * - when the app moves value (Solana programs, or a product on an approved money rail), a Mynt admin signed off this
  *   very build, and what made the sign-off necessary hasn't changed since. In Production the sign-off is asked before
  *   the build is online (requestSignoff), because it can't go online without it.
@@ -501,7 +556,8 @@ export async function productionDeployBlockers(store: Store, app: App, buildId: 
   const { moneyFirms } = await licenceCheck(store, app, on);
   const { reasons, basis } = await signoffReasons(q, on, await programsOf(q, app.id, on), moneyFirms);
   const needs = reasons.length > 0;
-  const checks = [auditCheck(on, { production: true, strict: needs }), findingsCheck(app.id, on, needs)];
+  const standing = await reviewStanding(q, app.id, build.id as string);
+  const checks = [auditCheck(on, { production: true, strict: needs }), findingsCheck(app.id, on, needs, standing), reviewCheck(app, build, standing)];
   if (needs) checks.push(await signoffCheck(q, app.id, on, await signoffFor(q, app.id, build), reasons, basis));
   return checks.filter((c) => c.status === "fail" || c.status === "pending");
 }
@@ -527,8 +583,9 @@ export async function stageChecks(q: Q, store: Store, app: App, from: AppStage, 
 }
 
 // A warning that doesn't block. Staging: every warning is advisory. Production: only these (a newer build that failed
-// while the verified one runs; no independent audit, and so no findings to read, when the app moves no value).
-export const ADVISORY_PRODUCTION_CHECKS = ["build_verified", "audit_passed", "audit_findings"] as const;
+// while the verified one runs; no independent audit, and so no findings to read, when the app moves no value; a build
+// that was online in Production before code reviews were required, which is the only time that check warns).
+export const ADVISORY_PRODUCTION_CHECKS = ["build_verified", "audit_passed", "audit_findings", "production_code_review"] as const;
 
 async function evaluate(q: Q, store: Store, app: App, from: AppStage, to: "staging" | "production") {
   const s = await readState(q, app.id);
@@ -537,10 +594,20 @@ async function evaluate(q: Q, store: Store, app: App, from: AppStage, to: "stagi
   let basis: SignoffBasis = { programs: [], solana_build: false, rails: [] };
   let reasons: string[] = [];
   let checks: PromotionCheck[];
+  // The production code review is about the build that goes online: the verified build a promotion is about or, for
+  // an app already in Production, the build that is online there.
+  let reviewed = s.verified;
+  if (to === "production" && from === "production" && s.hosted?.build_id && s.hosted.build_id !== s.verified?.id && s.have.has("build_runs"))
+    reviewed = (await one(q, `SELECT * FROM ${T}.build_runs WHERE id = $1 AND app_id = $2`, [s.hosted.build_id, app.id])) ?? reviewed;
+  const standing = to === "production" && reviewed ? await reviewStanding(q, app.id, reviewed.id as string) : undefined;
+  const grandfathered = from === "production" && !!reviewed && s.hosted?.build_id === reviewed.id;
+  const review = () => reviewCheck(app, reviewed, standing, { grandfathered });
+  // Its findings count as the build's own, read with the build they are about.
+  const findingsOn = reviewed && s.verified && reviewed.id === s.verified.id ? standing : undefined;
   if (to === "staging") checks = [buildCheck(app.id, s), auditCheck(s, { production: false, strict: false }), hostingCheck(app.id, s, false, app.kind === "service")];
   else if (app.kind === "service") {
     // A service: conformance on the build online, terms, licence, then the security and hosting checks an app has.
-    checks = [...(await serviceChecks(q, store, app, s)), buildCheck(app.id, s), auditCheck(s, { production: true, strict: false }), findingsCheck(app.id, s, false), hostingCheck(app.id, s, true, true)];
+    checks = [...(await serviceChecks(q, store, app, s)), buildCheck(app.id, s), auditCheck(s, { production: true, strict: false }), findingsCheck(app.id, s, false, findingsOn), review(), hostingCheck(app.id, s, true, true)];
   } else {
     const { check, moneyFirms } = await licenceCheck(store, app, s);
     const programs = await programsOf(q, app.id, s);
@@ -553,7 +620,8 @@ async function evaluate(q: Q, store: Store, app: App, from: AppStage, to: "stagi
       check,
       await programAgreementsCheck(q, store, app, s),
       await webhookCheck(q, app),
-      findingsCheck(app.id, s, needs),
+      findingsCheck(app.id, s, needs, findingsOn),
+      review(),
       programCheck(app.id, s, programs),
     ];
     const row = await signoffFor(q, app.id, s.verified);
@@ -809,7 +877,7 @@ export function registerPromotionTools(server: McpServer, store: Store, user: Us
     {
       title: "What an app needs to move up a stage",
       description:
-        "Developer (any member of the app's workspace): the checks for promoting an app one step, idea → staging or staging → production, computed by Mynt from its own records, never from what the app or an agent reports. staging: the latest build passed Mynt's verification in a clean sandbox, its independent audit passed (or wasn't required), and it runs (healthy on Mynt's hosting if deployed there). production: all of that, running on Mynt's hosting from that very verified build, target states set and every product licensed (a licence in force covering its action) in each, a signed program agreement in force with the licence provider sponsoring each product where the app serves (program_agreements, with each product and sponsor in coverage), every webhook verified, no open critical or high audit findings, the mainnet program gate passed when the app has Solana programs, and a Mynt admin's sign-off for this very build when the app moves value (which then also needs the independent audit). Each check is pass, fail, warn or pending (Mynt can't tell yet: blocks like a fail), with a fix where there is one. can_promote: every check passes, or warns where the warning is advisory (any staging check; in production only build_verified, audit_passed and audit_findings). Production gates real money: live keys, live runtime calls and publishing are for production apps only, so they come after promotion, not before.",
+        "Developer (any member of the app's workspace): the checks for promoting an app one step, idea → staging or staging → production, computed by Mynt from its own records, never from what the app or an agent reports. staging: the latest build passed Mynt's verification in a clean sandbox, its independent audit passed (or wasn't required), and it runs (healthy on Mynt's hosting if deployed there). production: all of that, running on Mynt's hosting from that very verified build, target states set and every product licensed (a licence in force covering its action) in each, a signed program agreement in force with the licence provider sponsoring each product where the app serves (program_agreements, with each product and sponsor in coverage), every webhook verified, no open critical or high audit findings, Mynt's production code review of that very build complete with no critical or high finding (production_code_review: ask for it with request_production_review; a review that didn't finish never passes, and a Mynt admin's recorded exception for the build shows as 'Waived by a Mynt admin: …'), the mainnet program gate passed when the app has Solana programs, and a Mynt admin's sign-off for this very build when the app moves value (which then also needs the independent audit). Each check is pass, fail, warn or pending (Mynt can't tell yet: blocks like a fail), with a fix where there is one. can_promote: every check passes, or warns where the warning is advisory (any staging check; in production only build_verified, audit_passed and audit_findings, and production_code_review for a build that was online in Production before reviews were required). Production gates real money: live keys, live runtime calls and publishing are for production apps only, so they come after promotion, not before.",
       inputSchema: { app_id: z.string(), to_stage: TO },
       annotations: { readOnlyHint: true },
     },

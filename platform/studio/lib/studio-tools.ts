@@ -213,6 +213,13 @@ export const STUDIO_TOOLS = {
   promote_app: z.object({ app_id: id, to_stage: promotionStage }).strict(),
   demote_app: z.object({ app_id: id, to_stage: demotionStage, reason: z.string().trim().min(3).max(1000) }).strict(),
   request_promotion_signoff: z.object({ app_id: id }).strict(),
+  // Production code reviews (an app's or a service's Security & risk tab): Mynt's full code review of one verified
+  // build, needed before it goes to Production. The tab reads them; Request production review and Stop review are
+  // its labelled actions, for the workspace's owners and admins (Mynt checks who, and the workspace's monthly limits).
+  list_production_reviews: z.object({ app_id: id }).strict(),
+  get_production_review: z.object({ id: uuid }).strict(),
+  request_production_review: z.object({ app_id: id, build_id: uuid.optional() }).strict(),
+  stop_production_review: z.object({ id: uuid }).strict(),
   // An app's Products, Agreements and Customers tabs: its products with their sponsors, its agreements with the firms
   // behind them (Propose agreement), and the personas it targets (Choose personas). Apps hold no licences themselves.
   // Without app_id: the Licences page's Agreements tab, a licence provider's list of what apps proposed to its firm.
@@ -946,6 +953,12 @@ export const ADMIN_TOOLS = {
     })
     .strict(),
   stop_benchmark_run: z.object({ run_id: uuid, reason: z.string().trim().min(3).max(300) }).strict(),
+  // Audit trails → Production reviews: every workspace's production code reviews, one in full, Stop review, and
+  // Record exception (one build may go to Production without a complete review, for the reason given; audited).
+  list_production_reviews: z.object({ status: z.enum(["queued", "running", "complete", "incomplete", "refused", "failed", "stopped"]).optional(), limit: z.number().int().min(1).max(500).optional() }).strict(),
+  get_production_review: z.object({ id: uuid }).strict(),
+  stop_production_review: z.object({ id: uuid }).strict(),
+  waive_production_review: z.object({ app_id: uuid, build_id: uuid, reason: z.string().trim().min(20).max(1000) }).strict(),
   // Ask AI's benchmark, which Studio runs (lib/ask-benchmark.ts; POST /api/admin/benchmarks/ask): take the task
   // waiting in the run an admin started, and hand Mynt the record of what Ask AI did. Neither starts a run or spends.
   next_benchmark_task: z.object({ models: z.array(z.string().trim().min(1).max(120)).min(1).max(4), instructions_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional() }).strict(),
