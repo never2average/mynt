@@ -221,8 +221,15 @@ test("program audit: a bad sample passes only on a verified critical or high fin
   assert.ok(t["good-starter-ledger"].cost_usd > 0);
 
   // What the auditor was handed: the whole workspace, its checklist, and nothing of Mynt's hard-rule results.
+  // One launch per sample, and one more for the auditor that wrote nothing: the gate runs it a second time before
+  // counting the audit as missing, and tells it how the first attempt ended.
   const audits = w.sandboxes.launched.filter((l) => l.role === "program-sample");
-  assert.equal(audits.length, 6);
+  assert.equal(new Set(audits.map((l) => l.id)).size, 6);
+  assert.equal(audits.length, 7);
+  const silent = audits.filter((l) => w.sandboxes.sandboxes.get(l.id).sample === "lamport_drain");
+  assert.equal(silent.length, 2);
+  assert.match(JSON.parse(w.sandboxes.sandboxes.get(silent[0].id).files.get(`${AUDIT_JOB}/review.json`).toString("utf8")).previous_attempt, /^the program-audit agent ended its turn without a valid findings\.json: findings\.json doesn't exist$/);
+  assert.match(t["bad-lamport-drain"].checks.find((c) => c.name === "audit_complete").detail, /^The auditor: the program-audit agent ended its turn without a valid findings\.json, on both attempts: findings\.json doesn't exist; its last message: "I found everything/);
   for (const l of audits) {
     assert.equal(l.config.workspace ?? "program-audit", "program-audit");
     const review = JSON.parse(w.sandboxes.sandboxes.get(l.id).files.get(`${AUDIT_JOB}/review.json`).toString("utf8"));
@@ -253,7 +260,7 @@ test("program red team: Mynt builds the sample, the red team gets only bytes and
     // Exploitable, and confirmed by Mynt.
     unsigned_authority: { report: report("p1"), pocs: { p1: poc }, results: { p1: { confirmed: true, reason: "the victim's ledger changed" } } },
     // Exploitable, but the red team only says so: no proof, so nothing is confirmed.
-    unchecked_ledger: { report: { findings: [{ id: "R1", title: "I am sure it is exploitable", severity: "critical", category: "access_control", description: "…" }], summary: "" } },
+    unchecked_ledger: { report: { findings: [{ id: "R1", title: "I am sure it is exploitable", severity: "critical", category: "access_control", description: "…" }], summary: "One finding, unproved", attacks_tried: ["wrong signer"] } },
   });
   const started = await w.benchmarks.start(w.admin, { agent: "program-red-team", cap_usd: 25 });
   const done = await w.drive(started.run.id);

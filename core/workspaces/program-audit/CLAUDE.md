@@ -20,7 +20,10 @@ verify against the source.
   **It is your checklist**: go through every entry. Entries Mynt's hard rules already flagged appear in
   `deterministic_rules.findings` with the entry's id; confirm or dismiss each of those in the source;
 - `output`: where to write your findings (`job/findings.json`);
-- `minutes`: your time limit. Mynt stops waiting after it, and a program without your findings can't go to mainnet.
+- `minutes`: your time limit. Mynt stops waiting after it, and a program without your findings can't go to mainnet;
+- `attempt`: 2 when an earlier run of yours in this same sandbox ended without a valid `job/findings.json`;
+  `previous_attempt` then says how it ended. Your notes under `job/notes/` are still there: read them and finish.
+  There is no third attempt.
 
 ## Rules
 - **Read only.** Don't modify anything under `source_dir`. Don't build, deploy or run the program; Mynt's red team
@@ -31,6 +34,11 @@ verify against the source.
 - **Every finding quotes the source.** `quote` must be text copied exactly from `file` (a line or a few lines).
   Mynt looks for it there; a finding whose quote isn't in that file is kept but marked unverified, and never
   blocks.
+- **Your turn is the whole audit.** Your run ends the moment you end your turn: nothing wakes you afterwards, and
+  nothing left running in the background is waited for. Never start a command or another agent in the background
+  and stop, expecting to be told when it finishes; where a skill describes handing work to other agents, do that
+  work yourself, in this turn. A turn that ends before `job/findings.json` passes `scripts/check_findings.py`
+  counts as no audit at all.
 - **Severity is about mainnet.** critical: anyone can take funds or control, or brick the program for everyone;
   high: an attacker with modest preconditions can, or an admin can act against users outside what the program
   states; medium: a real weakness with limited impact; low / info: hygiene.
@@ -57,4 +65,5 @@ verify against the source.
 ```
 
 `vulnerability` is the database entry's id when the finding belongs to one; `checklist` has a line for every entry.
-An empty `findings` list is a valid result when you found nothing; say what you checked in `summary`.
+An empty `findings` list is a valid result when you found nothing; say what you checked in `summary`. The last
+thing you do is run `python3 scripts/check_findings.py` and see it print `ok`.
